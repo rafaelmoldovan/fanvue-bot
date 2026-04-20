@@ -324,12 +324,14 @@ def set_token():
         return {"status": "ok", "message": "Token saved"}
     return {"status": "error", "message": "No token provided"}
 
+# Initialize database on module load
+init_db()
+log("=" * 50)
+log("API BOT STARTING")
+log("=" * 50)
+tokens = load_token()
+if not tokens.get('refresh_token'):
+    log("WARNING: No refresh token. Use /set_token to set it.")
+
 if __name__ == '__main__':
-    init_db()
-    log("=" * 50)
-    log("API BOT STARTING")
-    log("=" * 50)
-    tokens = load_token()
-    if not tokens.get('refresh_token'):
-        log("WARNING: No refresh token. Use /set_token to set it.")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
