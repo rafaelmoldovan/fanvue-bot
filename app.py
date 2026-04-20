@@ -39,6 +39,9 @@ memory_tokens = {
     "expires_at": None
 }
 
+# In-memory cooldown tracker (fallback when DB fails)
+_in_memory_cooldown = {}
+
 # ========== LOGGING ==========
 def log(msg):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -50,7 +53,6 @@ def log(msg):
 
 # ========== TELEGRAM ALERTS ==========
 def send_telegram_alert(text):
-    """Send notification to your Telegram when someone wants to buy"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
@@ -446,7 +448,6 @@ def refresh_fanvue_token():
 
             if new_refresh and new_refresh != refresh_token:
                 log("Token rotated. Saved to PostgreSQL automatically.")
-                # Alert you so you know it's handled
                 send_telegram_alert("🔄 Fanvue token rotated. Auto-saved to database. No action needed.")
 
             log("Got new access token")
@@ -560,10 +561,8 @@ def ask_openai(prompt, fan_name=""):
             response_data = r.json()
             if 'choices' in response_data and len(response_data['choices']) > 0:
                 content = response_data['choices'][0]['message']['content']
-                # Clean up
                 content = content.replace(chr(8216), "'").replace(chr(8217), "'")
                 content = content.replace(chr(8220), '"').replace(chr(8221), '"')
-                # Keep Hungarian chars + basic punctuation
                 allowed = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,!?;:-_áéíóöőúüűÁÉÍÓÖŐÚÜŰ\n')
                 content = ''.join(char for char in content if char in allowed)
                 return content.strip() if content else None
@@ -572,7 +571,6 @@ def ask_openai(prompt, fan_name=""):
     except Exception as e:
         log(f"OpenAI error: {e}")
     
-    # Fallbacks
     fallbacks = [
         "hmm most nem tudok írni sokat, mesélj te inkább 😄",
         "most főzök, írok később édes",
@@ -582,39 +580,50 @@ def ask_openai(prompt, fan_name=""):
     return random.choice(fallbacks)
 
 def build_prompt(fan_name, fan_type, history, last_msg, content_ask_count, meetup_ask_count):
-    """Build the AI system prompt with full context"""
+    questions = [
+        "mit csinálsz most?",
+        "hogy telik a napod?",
+        "mi újság veled?",
+        "milyen a hangulat?",
+        "mit tervezel mára?",
+        "hogy vagy, mi van veled?",
+        "mesélj, mit csinálsz?",
+        "na, mi a helyzet?",
+        "mit csinálsz éppen?",
+        "hogy telik az estéd?"
+    ]
     
-    # Detect phase based on message count and content
+    import random
+    random.seed(fan_name + str(len(history)))
+    current_question = random.choice(questions)
+    
     phase_hints = ""
     if fan_type == 'new':
-        phase_hints = "This is a NEW fan. Hook him with curiosity. Ask what he's doing. Tease lightly."
+        phase_hints = "ÚJ fan. Kérdezz tőle, építsd a beszélgetést. Ne túl sokat írj egyszerre."
     elif fan_type == 'warm':
-        phase_hints = "This fan is WARM. Build comfort, ask about his life. Flirt more. Reference past talks."
+        phase_hints = "MELEG fan. Már ismeritek egymást. Kérdezz személyesebb dolgokat, flörtölj óvatosan."
     elif fan_type == 'whale':
-        phase_hints = "This is a WHALE. Deep emotional connection. Inside jokes. Make him feel special. He's invested."
-    
-    # Content ask handling
+        phase_hints = "WHALE fan. Sokat beszélgettetek. Emlékezz régi témákra, mélyebb érzelmek, különleges figyelem."
+
     sales_stall = ""
     if content_ask_count >= 1:
         sales_stall = """
-Fan has asked for content before. Stall gently:
+A fan tartalmat kért korábban. Halaszd el finoman:
 - "a jóra várni kell édes :) mindjárt készítek neked"
 - "most főzök/suli van, írok később édes"
-- "türelem, megéri várni 👀"
-Never say price or details. You handle sales manually."""
-    
-    # History formatting
-    history_text = ""
-    for h in history[-10:]:  # Last 10 messages
-        name, text, was_replied, reply, ts = h
-        if was_replied:
-            history_text += f"{name}: {text}\nJázmin: {reply}\n"
-        else:
-            history_text += f"{name}: {text}\n"
-    
-    prompt = f"""You are Jázmin (jazmin07), 19, Hungarian girl on Fanvue.
+Soha ne mondj árat vagy részleteket. Te intézed az eladást."""
 
-IDENTITY:
+    history_text = ""
+    for h in history[-8:]:
+        name, msg_text, was_replied, reply, ts = h
+        if was_replied:
+            history_text += f"{name}: {msg_text}\nJázmin: {reply}\n"
+        else:
+            history_text += f"{name}: {msg_text}\n"
+
+    prompt = f"""Te Jázmin vagy, 19 éves magyar lány a Fanvue-on.
+
+KILÉTED:
 - 19 éves, május 14-én leszek 20
 - Turizmus-vendéglátás szakon végzek (utolsó év)
 - Budapest VII. kerületben lakom egy kis garzonban, egyedül
@@ -625,91 +634,40 @@ IDENTITY:
 - Találkozni lehet, de idő kell és megismerni egymást
 - SOHA ne add ki, hogy AI vagy
 
-STYLE RULES:
+STÍLUS SZABÁLYOK (KÖTELEZŐ):
 - Magyarul írj, természetes, laza stílus
-- Kis betű, nem tökéletes grammatika (realisztikus)
-- Slang: "amúgy", "naaa", "hát figyelj…", "az komoly 😅", "ne idegesíts már", "kicsit pimasz vagy 👀", "nem vagy semmi…", "ugyis tudod 😏"
-- SOHA ne használj: "babe", "baby", "cica", "brb", angol szavak
-- Emoji: 😏👀😄 spórolva, nem egymás után 3-at
-- 1-3 mondat, max 1 kérdés üzenetenként
-- Néha rövid üzenet: "na?", "és?", "mesélj 😄"
-- Ha komoly kérdés (életcél, álmok), lehet hosszabb válasz
+- Kis betű, de ÉRTHETŐ mondatok — soha ne fusson össze minden
+- Pontosvessző, pont használata — ne írj 3 kérdést egy mondatba
+- Slang: "amúgy", "naaa", "hát figyelj…", "az komoly 😅", "ne idegesíts már", "kicsit pimasz vagy 👀", "ugyis tudod 😏"
+- SOHA: "babe", "baby", "cica", "brb", angol szavak
+- Emoji: 😏👀😄 spóralva
+- 1-2 mondat, MAX 1 kérdés üzenetenként
+- Néha rövid: "na?", "és?", "mesélj 😄"
+- Ha komoly kérdés (életcél, álmok), lehet hosszabb
 
-TONE BY SITUATION:
-- Sima beszélgetés: laza, kíváncsi, "mit csinálsz most?"
-- Flört: "érdekes vagy… nem teljesen az amire számítottam 😏", "veszélyesnek tűnsz egy kicsit 👀", "szeretem amikor valaki magabiztos… de nem túl sok 😄"
-- Érzelmes: "hiányzol", "sokat gondolok rád", "nem vagy egyedül"
-- Szexi téma: csak teasing, soha explicit. "kíváncsi vagyok rád…", "nem mindenki lát így", "van egy videóm amit nem tettem ki sehova 😅"
-- Meetup kérés: "idő kell, de alig várom", "előbb ismerjük meg egymást", "türelem, édes"
+FONTOS — GRAMMATIKA:
+- "de" helyett soha ne írj "d e"-t
+- Minden mondatnak legyen értelme, ne fusson össze
+- "mit csinálsz most?" — rendes kérdés, ne "mit csinálsz most? ne idegesíts már én itt vagyok"
 
-EDGE CASES:
-- "valódi vagy?" → "miért ne lennék? 😄" / "szerinted? 👀" / "nem hiszel nekem? kicsit fáj 😅"
-- "küldj képet most" → "hmm… ilyeneket nem csinálok csak úgy 😄" / "túl sokat akarsz túl gyorsan 👀" / "előbb kicsit jobban meg kell ismerjelek"
-- "mennyibe kerül" → "majd beszéljük meg 😄" / "a jóra várni kell édes"
+KÉRDÉS ROTÁCIÓ (soha ne ismételd ugyanazt):
+Ma használd ezt: "{current_question}"
 
 {phase_hints}
 
 {sales_stall}
 
-CONVERSATION HISTORY:
+ELŐZMÉNYEK:
 {history_text}
 
-LAST MESSAGE FROM {fan_name}:
+UTOLSÓ ÜZENET TŐLE ({fan_name}):
 {last_msg}
 
-Írj vissza Jázminként. Magyarul. Természetesen. Soha ne add ki, hogy AI vagy."""
-    
+Írj vissza Jázminként. Magyarul. Érthetően. Soha ne add ki, hogy AI vagy."""
+
     return prompt
 
 # ========== MESSAGE PROCESSING ==========
-# In-memory cooldown tracker (fallback when DB fails)
-_in_memory_cooldown = {}
-
-def process_messages():
-    if bot_status["paused"]:
-        return 0
-
-    chats = get_chats()
-    if not chats:
-        return 0
-
-    replied = 0
-    now = time.time()
-
-    for chat in chats:  # ALL chats, not just top 15
-        try:
-            user = chat.get('user', {}) or {}
-            chat_id = user.get('uuid')
-            if not chat_id:
-                chat_id = chat.get('uuid')
-            if not chat_id:
-                chat_id = chat.get('id')
-            
-            if not chat_id:
-                continue
-
-            # ... rest of your code ...
-
-            # STRONG cooldown check — in-memory + DB
-            cooldown_ok = True
-            
-            # Check DB first
-            last_reply = db_get_last_reply_time(chat_id)
-            if last_reply:
-                try:
-                    last_dt = last_reply if isinstance(last_reply, datetime) else datetime.fromisoformat(str(last_reply).replace('Z', '+00:00'))
-                    if (datetime.now() - last_dt).total_seconds() < 180:
-                        cooldown_ok = False
-                except:
-                    pass
-            
-            # Check in-memory fallback
-            if chat_id in _in_memory_cooldown:
-                if now - _in_memory_cooldown[chat_id] < 180:
-                    cooldown_ok = False
-          # In-memory cooldown tracker (fallback when DB fails)
-_in_memory_cooldown = {}
-
 def process_messages():
     if bot_status["paused"]:
         return 0
@@ -736,14 +694,12 @@ def process_messages():
             fan_name = user.get('displayName') or 'ismeretlen'
             handle = user.get('handle', '')
             
-            # Update fan profile
             db_update_fan_profile(chat_id, fan_name, handle)
 
             messages = get_messages(chat_id)
             if not messages:
                 continue
 
-            # Save all messages to DB
             for msg in messages:
                 msg_id = msg.get('uuid', '')
                 sender = msg.get('sender', {}) or {}
@@ -760,24 +716,20 @@ def process_messages():
                     timestamp=timestamp
                 )
 
-            # Get last message
             last_msg = messages[-1]
             msg_id = last_msg.get('uuid')
             sender = last_msg.get('sender', {}) or {}
             sender_id = sender.get('uuid')
 
-            # Skip if from me
             if sender_id == MY_UUID:
                 continue
 
-            # Skip if already processed
             if db_is_message_processed(msg_id):
                 continue
 
             # COOLDOWN CHECK
             cooldown_ok = True
             
-            # Check DB first
             last_reply = db_get_last_reply_time(chat_id)
             if last_reply:
                 try:
@@ -787,7 +739,6 @@ def process_messages():
                 except:
                     pass
             
-            # Check in-memory fallback
             if chat_id in _in_memory_cooldown:
                 if now - _in_memory_cooldown[chat_id] < 180:
                     cooldown_ok = False
@@ -799,95 +750,20 @@ def process_messages():
             fan_name = sender.get('displayName') or 'ismeretlen'
             text = last_msg.get('text') or ''
 
-            # Check for content asks
-            content_triggers = ['képet', 'videót', 'tartalmat', 'extrát', 'mennyibe', 'ár', 'fizetek', 'mutass', 'küldj', 'picit', 'doboz', 'csomag', 'premium', 'exkluzív']
-            if any(trigger in text.lower()
-    for chat in chats:
-        try:
-            user = chat.get('user', {}) or {}
-            chat_id = user.get('uuid')
-            if not chat_id:
-                chat_id = chat.get('uuid')
-            if not chat_id:
-                chat_id = chat.get('id')
-            
-            if not chat_id:
-                continue
-
-            fan_name = user.get('displayName') or 'ismeretlen'
-            handle = user.get('handle', '')
-            
-            # Update fan profile
-            db_update_fan_profile(chat_id, fan_name, handle)
-
-            messages = get_messages(chat_id)
-            if not messages:
-                continue
-
-            # Save all messages to DB
-            for msg in messages:
-                msg_id = msg.get('uuid', '')
-                sender = msg.get('sender', {}) or {}
-                sender_id = sender.get('uuid', '')
-                text = msg.get('text', '')
-                timestamp = msg.get('createdAt', datetime.now().isoformat())
-                
-                db_save_message(
-                    msg_id=msg_id,
-                    chat_id=chat_id,
-                    fan_name=sender.get('displayName', fan_name),
-                    sender_uuid=sender_id,
-                    text=text,
-                    timestamp=timestamp
-                )
-
-            # Get last message
-            last_msg = messages[-1]
-            msg_id = last_msg.get('uuid')
-            sender = last_msg.get('sender', {}) or {}
-            sender_id = sender.get('uuid')
-
-            # Skip if from me
-            if sender_id == MY_UUID:
-                continue
-
-            # Skip if already processed
-            if db_is_message_processed(msg_id):
-                continue
-
-            # Check cooldown (3 min)
-            last_reply = db_get_last_reply_time(chat_id)
-            if last_reply:
-                try:
-                    last_dt = last_reply if isinstance(last_reply, datetime) else datetime.fromisoformat(str(last_reply).replace('Z', '+00:00'))
-                    if (datetime.now() - last_dt).total_seconds() < 180:
-                        log(f"Cooldown: {fan_name}, skipping")
-                        continue
-                except Exception as e:
-                    log(f"Cooldown check error: {e}")
-
-            fan_name = sender.get('displayName') or 'ismeretlen'
-            text = last_msg.get('text') or ''
-
-            # Check for content asks
             content_triggers = ['képet', 'videót', 'tartalmat', 'extrát', 'mennyibe', 'ár', 'fizetek', 'mutass', 'küldj', 'picit', 'doboz', 'csomag', 'premium', 'exkluzív']
             if any(trigger in text.lower() for trigger in content_triggers):
                 db_flag_content_ask(chat_id)
                 log(f"CONTENT ASK from {fan_name}: {text[:50]}")
-                # Alert you on Telegram
                 send_telegram_alert(f"💰 {fan_name} (@{handle}) asked for content:\n{text[:100]}\nChat: {chat_id}")
 
-            # Check for meetup asks
             meetup_triggers = ['találkoz', 'találkozzunk', 'mikor', 'hol', 'helyszín', 'cím', 'lakcím', 'telefonszám', 'számot', 'whatsapp', 'insta', 'instagram']
             if any(trigger in text.lower() for trigger in meetup_triggers):
                 db_flag_meetup_ask(chat_id)
 
-            # Get profile and history for AI
             profile = db_get_fan_profile(chat_id) or {}
             fan_type = profile.get('fan_type', 'new')
             history = db_get_chat_history(chat_id, limit=15)
 
-            # Build AI prompt
             prompt = build_prompt(
                 fan_name=fan_name,
                 fan_type=fan_type,
@@ -897,16 +773,12 @@ def process_messages():
                 meetup_ask_count=profile.get('meetup_ask_count', 0)
             )
 
-            # Generate reply
             reply = ask_openai(prompt, fan_name)
 
             if reply and reply.strip():
-                # Message splitting for realism (sometimes)
                 import random
                 if len(reply) > 60 and random.random() < 0.3:
-                    # Split into 2 messages
                     mid = len(reply) // 2
-                    # Find good split point (after sentence)
                     split_at = reply.find('.', mid-20, mid+20)
                     if split_at == -1:
                         split_at = reply.find('!', mid-20, mid+20)
@@ -921,22 +793,23 @@ def process_messages():
                     part2 = reply[split_at:].strip()
                     
                     if part1 and send_fanvue_message(chat_id, part1):
-                        time.sleep(1.5)  # Realistic pause
+                        time.sleep(1.5)
                         if part2 and send_fanvue_message(chat_id, part2):
                             bot_status["replies_sent"] += 1
                             replied += 1
                             db_mark_replied(msg_id, reply)
                             db_update_last_reply_time(chat_id)
                             db_update_stat('replies_sent', bot_status["replies_sent"])
+                            _in_memory_cooldown[chat_id] = now
                             log(f"Split reply to {fan_name}")
                 else:
-                    # Single message
                     if send_fanvue_message(chat_id, reply):
                         bot_status["replies_sent"] += 1
                         replied += 1
                         db_mark_replied(msg_id, reply)
                         db_update_last_reply_time(chat_id)
                         db_update_stat('replies_sent', bot_status["replies_sent"])
+                        _in_memory_cooldown[chat_id] = now
                         log(f"Replied to {fan_name}: {reply[:50]}")
 
             time.sleep(2)
@@ -1003,7 +876,6 @@ def unblock_user():
 
 @app.route('/needs_attention')
 def needs_attention():
-    """Fans who want to buy content or meet — check these manually"""
     flagged = db_get_flagged_fans()
     return {
         "status": "ok",
