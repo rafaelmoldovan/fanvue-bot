@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
+FANVUE_CLIENT_ID = os.environ.get('FANVUE_CLIENT_ID')
+FANVUE_CLIENT_SECRET = os.environ.get('FANVUE_CLIENT_SECRET')
 FANVUE_REFRESH_TOKEN = os.environ.get('FANVUE_REFRESH_TOKEN')
 KIMI_API_KEY = os.environ.get('KIMI_API_KEY')
 CREATOR_NAME = os.environ.get('CREATOR_NAME', 'Creator')
@@ -34,23 +36,28 @@ log("KIMI_API_KEY: " + ("SET" if KIMI_API_KEY else "EMPTY"))
 processed_messages = set()
 pending_messages = {}
 
+def get_basic_auth_header():
+    credentials = f"{FANVUE_CLIENT_ID}:{FANVUE_CLIENT_SECRET}"
+    encoded = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
+    return f"Basic {encoded}"
+
 def refresh_fanvue_token():
     global fanvue_access_token, token_expires_at
 
     url = "https://auth.fanvue.com/oauth2/token"
 
-    # Create Basic Auth header from client credentials
-    # Note: We don't have client_id/secret anymore, but the refresh token itself should work with basic auth
-    # Actually, let me try with just the refresh token in the body first, but with proper form encoding
     payload = {
         "grant_type": "refresh_token",
-        "refresh_token": FANVUE_REFRESH_TOKEN,
-        "client_id": "23cc2e68-0e23-4cff-914b-eec2bdb56268",
-        "client_secret": "dc30583e61d42c70b23ede8d29c1bfd0662ac77234eae479bdaec1bcc5968efa"
+        "refresh_token": FANVUE_REFRESH_TOKEN
+    }
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": get_basic_auth_header()
     }
 
     try:
-        r = requests.post(url, data=payload, timeout=10)
+        r = requests.post(url, data=payload, headers=headers, timeout=10)
         log(f"Refresh status: {r.status_code}")
         if r.status_code == 200:
             data = r.json()
