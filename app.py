@@ -662,6 +662,62 @@ LAST MESSAGE FROM {fan_name}:
     return prompt
 
 # ========== MESSAGE PROCESSING ==========
+# In-memory cooldown tracker (fallback when DB fails)
+_in_memory_cooldown = {}
+
+def process_messages():
+    if bot_status["paused"]:
+        return 0
+
+    chats = get_chats()
+    if not chats:
+        return 0
+
+    replied = 0
+    now = time.time()
+
+    for chat in chats:  # ALL chats, not just top 15
+        try:
+            user = chat.get('user', {}) or {}
+            chat_id = user.get('uuid')
+            if not chat_id:
+                chat_id = chat.get('uuid')
+            if not chat_id:
+                chat_id = chat.get('id')
+            
+            if not chat_id:
+                continue
+
+            # ... rest of your code ...
+
+            # STRONG cooldown check — in-memory + DB
+            cooldown_ok = True
+            
+            # Check DB first
+            last_reply = db_get_last_reply_time(chat_id)
+            if last_reply:
+                try:
+                    last_dt = last_reply if isinstance(last_reply, datetime) else datetime.fromisoformat(str(last_reply).replace('Z', '+00:00'))
+                    if (datetime.now() - last_dt).total_seconds() < 180:
+                        cooldown_ok = False
+                except:
+                    pass
+            
+            # Check in-memory fallback
+            if chat_id in _in_memory_cooldown:
+                if now - _in_memory_cooldown[chat_id] < 180:
+                    cooldown_ok = False
+            
+            if not cooldown_ok:
+                log(f"COOLDOWN: {fan_name}, skipping")
+                continue
+
+            # ... send reply ...
+
+            # Save to in-memory cooldown
+            _in_memory_cooldown[chat_id] = now
+
+            # ... rest ...
 def process_messages():
     if bot_status["paused"]:
         return 0
