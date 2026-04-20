@@ -672,7 +672,7 @@ def process_messages():
 
     replied = 0
 
-    for chat in chats[:15]:
+    for chat in chats:
         try:
             user = chat.get('user', {}) or {}
             chat_id = user.get('uuid')
