@@ -1,20 +1,15 @@
-
-updated_code = '''from flask import Flask, request
+from flask import Flask, request
 import requests
 import os
-import time
-import threading
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# OAuth2 credentials
 FANVUE_CLIENT_ID = os.environ.get('FANVUE_CLIENT_ID')
 FANVUE_CLIENT_SECRET = os.environ.get('FANVUE_CLIENT_SECRET')
 KIMI_API_KEY = os.environ.get('KIMI_API_KEY')
 CREATOR_NAME = os.environ.get('CREATOR_NAME', 'Creator')
 
-# OAuth2 token storage
 fanvue_access_token = None
 token_expires_at = None
 
@@ -40,14 +35,10 @@ processed_messages = set()
 pending_messages = {}
 
 def get_fanvue_token():
-    """Get OAuth2 access token from Fanvue"""
     global fanvue_access_token, token_expires_at
-    
-    # If token is still valid, return it
     if fanvue_access_token and token_expires_at and datetime.now() < token_expires_at:
         return fanvue_access_token
-    
-    # Otherwise, get new token
+
     url = "https://api.fanvue.com/oauth/token"
     payload = {
         "grant_type": "client_credentials",
@@ -55,14 +46,14 @@ def get_fanvue_token():
         "client_secret": FANVUE_CLIENT_SECRET,
         "scope": "read write"
     }
-    
+
     try:
         r = requests.post(url, json=payload, timeout=10)
         if r.status_code == 200:
             data = r.json()
             fanvue_access_token = data.get('access_token')
             expires_in = data.get('expires_in', 3600)
-            token_expires_at = datetime.now() + timedelta(seconds=expires_in - 60)  # Refresh 1 min early
+            token_expires_at = datetime.now() + timedelta(seconds=expires_in - 60)
             log("Got new Fanvue access token")
             return fanvue_access_token
         else:
@@ -85,7 +76,6 @@ def get_chats():
     try:
         r = requests.get(url, headers=get_headers(), timeout=10)
         if r.status_code == 401:
-            # Token expired, force refresh
             global fanvue_access_token
             fanvue_access_token = None
             r = requests.get(url, headers=get_headers(), timeout=10)
@@ -126,7 +116,6 @@ def send_fanvue_message(chat_id, text):
         r = requests.post(url, headers=headers, json=payload, timeout=10)
         log(f"Send status: {r.status_code}")
         if r.status_code == 401:
-            # Token expired, refresh and retry once
             global fanvue_access_token
             fanvue_access_token = None
             headers["Authorization"] = "Bearer " + (get_fanvue_token() or "")
@@ -146,11 +135,8 @@ def ask_kimi(message, fan_name, chat_history="", fan_known_name=""):
         "Authorization": "Bearer " + KIMI_API_KEY,
         "Content-Type": "application/json"
     }
-
     name_to_use = fan_known_name if fan_known_name else ""
-
     system = "You are " + CREATOR_NAME + ". Reply naturally in Hungarian. Fan name: " + name_to_use + ". Keep under 40 words. Be innocent, sweet, slightly shy. Build emotional connection. NEVER upsell. Chat history: " + chat_history
-
     data = {
         "model": "kimi-k2.5",
         "messages": [
@@ -159,7 +145,6 @@ def ask_kimi(message, fan_name, chat_history="", fan_known_name=""):
         ],
         "max_tokens": 100
     }
-
     try:
         r = requests.post(url, headers=headers, json=data, timeout=15)
         if r.status_code == 200:
@@ -174,10 +159,7 @@ def ask_kimi(message, fan_name, chat_history="", fan_known_name=""):
 def process_pending_messages():
     now = datetime.now()
     replied = 0
-
-    # Only process 3 pending messages per call to avoid timeout
     items = list(pending_messages.items())[:3]
-
     for msg_id, pending in items:
         msg_time = pending["time"]
         if now - msg_time >= timedelta(minutes=2):
@@ -187,10 +169,8 @@ def process_pending_messages():
             text = msg_data["text"]
             history = msg_data["history"]
             known_name = msg_data["known_name"]
-
             log(f"Replying to {fan_name}")
             reply = ask_kimi(text, fan_name, history, known_name)
-
             if send_fanvue_message(chat_id, reply):
                 processed_messages.add(msg_id)
                 del pending_messages[msg_id]
@@ -199,61 +179,47 @@ def process_pending_messages():
             else:
                 log("Send failed, will retry")
                 break
-
     return replied
 
 def scan_for_new_messages():
     chats = get_chats()
     if not chats:
         return 0
-
     found = 0
     fan_known_names = {}
     my_uuid = '38a392fc-a751-49b3-9d74-01ac6447c490'
-
-    # Only check last 10 chats to avoid timeout
     for chat in chats[-10:]:
         user = chat.get('user', {}) or {}
         chat_id = user.get('uuid')
         if not chat_id:
             continue
-
         messages = get_messages(chat_id)
-
         for msg in messages:
             msg_id = msg.get('uuid')
             sender = msg.get('sender', {}) or {}
             fan_id = sender.get('uuid', '')
-
             is_fan = sender.get('uuid') != my_uuid
             is_new = msg_id not in processed_messages and msg_id not in pending_messages
-
             if is_fan and is_new:
                 fan_name = sender.get('displayName') or 'babe'
                 text = msg.get('text') or ''
-
                 log(f"NEW MSG from {fan_name}: {text[:50]}")
                 bot_status["messages_found"] += 1
                 found += 1
-
-                # Extract name if they share it
                 text_lower = text.lower()
                 if "nevem" in text_lower or "hívnak" in text_lower:
                     import re
-                    match = re.search(r'(?:nevem|hívnak|a nevem)\\s+(\\w+)', text_lower)
+                    match = re.search(r'(?:nevem|hívnak|a nevem)\s+(\w+)', text_lower)
                     if match:
                         fan_known_names[fan_id] = match.group(1).capitalize()
-
                 known_name = fan_known_names.get(fan_id, "")
-
                 recent_msgs = messages[-5:] if len(messages) > 5 else messages
                 history = ""
                 for m in recent_msgs:
                     s = m.get('sender', {}) or {}
                     role = "Fan" if s.get('uuid') != my_uuid else "You"
                     m_text = s.get('text') or ''
-                    history += role + ": " + m_text + "\\n"
-
+                    history += role + ": " + m_text + "\n"
                 pending_messages[msg_id] = {
                     "time": datetime.now(),
                     "data": {
@@ -265,19 +231,13 @@ def scan_for_new_messages():
                     }
                 }
                 log(f"Added to pending")
-
     return found
 
 def process_all_chats():
     log("Processing...")
     bot_status["last_check"] = datetime.now().isoformat()
-
-    # First reply to pending (max 3)
     replied = process_pending_messages()
-
-    # Then scan for new (limit to avoid timeout)
     found = scan_for_new_messages()
-
     return replied + found
 
 @app.route('/')
@@ -325,13 +285,7 @@ if __name__ == '__main__':
     log("=" * 50)
     log("BOT STARTING")
     log("=" * 50)
-    # Clear old pending on startup to avoid backlog
     pending_messages.clear()
     processed_messages.clear()
     log("Cleared old messages on startup")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
-'''
-
-print(updated_code)
-print("\n" + "="*50)
-print("CODE READY - Copy this to your app.py file")
