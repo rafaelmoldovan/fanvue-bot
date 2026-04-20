@@ -73,49 +73,146 @@ class FanvueBot:
         try:
             log("Logging into Fanvue...")
             self.page.goto("https://fanvue.com/login", wait_until="domcontentloaded")
-            time.sleep(3)
+            time.sleep(5)
 
-            # Fill email
-            email_input = self.page.query_selector('input[type="email"]')
-            if not email_input:
-                email_input = self.page.query_selector('input[name="email"]')
-            if not email_input:
-                email_input = self.page.query_selector('input[placeholder*="mail"]')
+            # Take screenshot to see what page looks like
+            try:
+                self.page.screenshot(path="/tmp/login_page.png")
+                log("Screenshot saved to /tmp/login_page.png")
+            except:
+                pass
 
-            if email_input:
-                email_input.fill(FANVUE_EMAIL)
-                log("Email filled")
-            else:
+            # Log page info
+            log(f"Page title: {self.page.title()}")
+            log(f"Page URL: {self.page.url}")
+
+            # Try multiple selectors for email
+            email_selectors = [
+                'input[type="email"]',
+                'input[name="email"]',
+                'input[id="email"]',
+                'input[placeholder*="mail"]',
+                'input[placeholder*="Mail"]',
+                'input[placeholder*="e-mail"]',
+                'input[placeholder*="E-mail"]',
+            ]
+
+            email_input = None
+            for sel in email_selectors:
+                try:
+                    email_input = self.page.query_selector(sel)
+                    if email_input:
+                        log(f"Found email with selector: {sel}")
+                        break
+                except:
+                    continue
+
+            if not email_input:
+                # Try getting all inputs
+                inputs = self.page.query_selector_all('input')
+                log(f"Found {len(inputs)} total inputs")
+                for i, inp in enumerate(inputs):
+                    try:
+                        input_type = inp.get_attribute('type') or 'text'
+                        input_name = inp.get_attribute('name') or ''
+                        input_placeholder = inp.get_attribute('placeholder') or ''
+                        input_class = inp.get_attribute('class') or ''
+                        log(f"Input {i}: type={input_type}, name={input_name}, placeholder={input_placeholder}, class={input_class[:50]}")
+                    except:
+                        continue
+
+                # Fanvue likely has email as first input, password as second
+                if len(inputs) >= 1:
+                    email_input = inputs[0]
+                    log("Using first input as email")
+
+            if not email_input:
                 log("Email input not found")
                 return False
 
+            if not email_input:
+                log("Email input not found")
+                return False
+
+            email_input.fill(FANVUE_EMAIL)
+            log("Email filled")
             time.sleep(1)
 
-            # Fill password
-            pass_input = self.page.query_selector('input[type="password"]')
-            if pass_input:
-                pass_input.fill(FANVUE_PASSWORD)
-                log("Password filled")
-            else:
+            # Try multiple selectors for password
+            pass_selectors = [
+                'input[type="password"]',
+                'input[name="password"]',
+                'input[id="password"]',
+            ]
+
+            pass_input = None
+            for sel in pass_selectors:
+                try:
+                    pass_input = self.page.query_selector(sel)
+                    if pass_input:
+                        log(f"Found password with selector: {sel}")
+                        break
+                except:
+                    continue
+
+            if not pass_input:
+                # Try getting all inputs again
+                inputs = self.page.query_selector_all('input')
+                if len(inputs) >= 2:
+                    pass_input = inputs[1]
+                    log("Using second input as password")
+                else:
+                    for inp in inputs:
+                        try:
+                            if inp.get_attribute('type') == 'password':
+                                pass_input = inp
+                                log("Found password input")
+                                break
+                        except:
+                            continue
+
+            if not pass_input:
                 log("Password input not found")
                 return False
 
+            pass_input.fill(FANVUE_PASSWORD)
+            log("Password filled")
             time.sleep(1)
 
-            # Click login button
-            login_btn = self.page.query_selector('button[type="submit"]')
+            # Try multiple selectors for login button
+            btn_selectors = [
+                'button[type="submit"]',
+                'button:has-text("Log")',
+                'button:has-text("Sign")',
+                'button:has-text("In")',
+                'input[type="submit"]',
+                'button',
+            ]
+
+            login_btn = None
+            for sel in btn_selectors:
+                try:
+                    login_btn = self.page.query_selector(sel)
+                    if login_btn:
+                        btn_text = login_btn.inner_text() or ''
+                        log(f"Found button with selector: {sel}, text: {btn_text}")
+                        if 'log' in btn_text.lower() or 'sign' in btn_text.lower() or 'in' in btn_text.lower():
+                            break
+                except:
+                    continue
+
             if login_btn:
                 login_btn.click()
                 log("Login button clicked")
             else:
-                log("Login button not found")
-                return False
+                # Try pressing Enter on password field
+                log("No button found, pressing Enter")
+                pass_input.press("Enter")
 
             time.sleep(5)
 
-            # Check current URL
             current_url = self.page.url
-            log(f"Current URL: {current_url}")
+            log(f"Current URL after login: {current_url}")
 
             if "login" not in current_url.lower():
                 log("Login successful!")
@@ -123,7 +220,6 @@ class FanvueBot:
                 return True
             else:
                 log("Login failed - still on login page")
-                # Take screenshot for debugging
                 try:
                     self.page.screenshot(path="/tmp/login_error.png")
                     log("Screenshot saved to /tmp/login_error.png")
