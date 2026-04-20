@@ -228,6 +228,12 @@ def ask_openai(message, fan_name=""):
 
 processed_messages = set()
 
+# ========== MISSING FUNCTION ADDED HERE ==========
+def is_message_processed(msg_id):
+    """Check if a message has already been replied to"""
+    return msg_id in processed_messages
+# =================================================
+
 def process_messages():
     if bot_status["paused"]:
         return 0
