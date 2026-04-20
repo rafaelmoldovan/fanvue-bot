@@ -10,21 +10,25 @@ FANVUE_TOKEN = os.environ.get('FANVUE_TOKEN')
 KIMI_API_KEY = os.environ.get('KIMI_API_KEY')
 CREATOR_NAME = os.environ.get('CREATOR_NAME', 'Creator')
 
-@app.route('/')
-def home():
-    return "Fanvue Bot is running!"
+processed_messages = set()
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    return 'OK', 200
-
-@app.route('/callback')
-def callback():
-    code = request.args.get('code')
-    error = request.args.get('error')
-    if code:
-        return f"CODE: {code}"
-    return f"ERROR: {error}"
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+def ask_kimi(message, fan_name, chat_history=""):
+    url = "https://api.moonshot.cn/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {KIMI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    system = f"""You are {CREATOR_NAME}. Reply to fan messages naturally in Hungarian.
+    Fan name: {fan_name}. Keep it under 40 words. Flirty but exclusive.
+    Remember details they share. Guide toward PPV sales gently.
+    
+    Chat history: {chat_history}"""
+    
+    data = {
+        "model": "kimi-k2.5",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": message}
+        ],
+        "max_tokens": 100
