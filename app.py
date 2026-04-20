@@ -67,7 +67,7 @@ class FanvueBot:
     def login(self):
         try:
             log("Logging into Fanvue...")
-            self.page.goto("https://www.fanvue.com/signin", wait_until="networkidle")
+            self.page.goto("https://www.fanvue.com/signin", wait_until="domcontentloaded", timeout=15000)
             time.sleep(5)
 
             # Use JavaScript to find and fill inputs
@@ -186,7 +186,7 @@ class FanvueBot:
 
     def get_messages(self):
         try:
-            self.page.goto("https://www.fanvue.com/messages", wait_until="networkidle")
+            self.page.goto("https://www.fanvue.com/messages", wait_until="domcontentloaded", timeout=15000)
             time.sleep(5)
 
             chats = self.page.query_selector_all('a[href*="/messages/"]')
@@ -194,28 +194,60 @@ class FanvueBot:
 
             new_messages = []
 
-            for i, chat in enumerate(chats[:3]):
+            for i, chat in enumerate(chats[:5]):
                 try:
                     chat.click()
                     time.sleep(3)
 
-                    # Get all message elements
-                    msgs = self.page.query_selector_all('[class*="message"]')
+                    # Get fan name
+                    fan_name = f"User_{i}"
+                    try:
+                        name_elem = self.page.query_selector('h1, h2, h3, [class*="name"]')
+                        if name_elem:
+                            fan_name = name_elem.inner_text().strip()
+                    except:
+                        pass
 
-                    if msgs:
-                        last = msgs[-1]
-                        text = last.inner_text()
-                        msg_class = last.get_attribute("class") or ""
-                        is_me = "sent" in msg_class.lower() or "right" in msg_class.lower()
+                    # Get ALL messages in chat (full history)
+                    msg_elements = self.page.query_selector_all('[class*="message"]')
 
-                        if text and not is_me:
-                            msg_id = f"msg_{i}_{hash(text)}"
-                            if msg_id not in self.last_messages:
-                                self.last_messages[msg_id] = True
-                                new_messages.append({"index": i, "text": text})
-                                log(f"New msg: {text[:50]}")
+                    chat_history = []
+                    last_fan_msg = None
 
-                    self.page.goto("https://www.fanvue.com/messages", wait_until="networkidle")
+                    for msg_elem in msg_elements:
+                        try:
+                            text = msg_elem.inner_text().strip()
+                            msg_class = msg_elem.get_attribute("class") or ""
+                            is_me = "sent" in msg_class.lower() or "right" in msg_class.lower() or "me" in msg_class.lower()
+
+                            if text:
+                                role = "Me" if is_me else "Fan"
+                                chat_history.append(f"{role}: {text}")
+
+                                # Track last message from fan
+                                if not is_me:
+                                    last_fan_msg = text
+                        except:
+                            continue
+
+                    # Only reply if last message is from fan (not from me)
+                    if last_fan_msg:
+                        msg_id = f"{fan_name}_{hash(last_fan_msg)}"
+                        if msg_id not in self.last_messages:
+                            self.last_messages[msg_id] = True
+
+                            # Get last 10 messages for context
+                            recent_history = "\n".join(chat_history[-10:])
+
+                            new_messages.append({
+                                "index": i,
+                                "fan_name": fan_name,
+                                "text": last_fan_msg,
+                                "history": recent_history
+                            })
+                            log(f"New msg from {fan_name}: {last_fan_msg[:50]}")
+
+                    self.page.goto("https://www.fanvue.com/messages", wait_until="domcontentloaded", timeout=15000)
                     time.sleep(3)
 
                 except Exception as e:
@@ -257,19 +289,28 @@ class FanvueBot:
             log(f"Send error: {e}")
             return False
 
-    def ask_kimi(self, message):
+    def ask_kimi(self, message, fan_name="", history=""):
         url = "https://api.moonshot.ai/v1/chat/completions"
         headers = {
             "Authorization": "Bearer " + KIMI_API_KEY,
             "Content-Type": "application/json"
         }
 
+        system = f"You are {CREATOR_NAME}, a friendly creator. Reply in Hungarian. Keep under 30 words. Be sweet, casual, slightly flirty. Fan name: {fan_name}."
+
+        messages = [
+            {"role": "system", "content": system}
+        ]
+
+        # Add chat history for context
+        if history:
+            messages.append({"role": "user", "content": f"Previous chat history:\n{history}\n\nNow reply to: {message}"})
+        else:
+            messages.append({"role": "user", "content": message})
+
         data = {
             "model": "kimi-latest",
-            "messages": [
-                {"role": "system", "content": f"You are {CREATOR_NAME}. Reply in Hungarian. Keep under 30 words. Be sweet and casual."},
-                {"role": "user", "content": message}
-            ],
+            "messages": messages,
             "max_tokens": 100
         }
 
@@ -298,7 +339,15 @@ class FanvueBot:
 
         for msg in msgs:
             text = msg["text"]
-            reply = self.ask_kimi(text)
+            fan_name = msg.get("fan_name", "")
+            history = msg.get("history", "")
+
+            # Skip if user is blocked
+            if fan_name in bot_status["blocked_users"]:
+                log(f"Skipping blocked user: {fan_name}")
+                continue
+
+            reply = self.ask_kimi(text, fan_name, history)
 
             chats = self.page.query_selector_all('a[href*="/messages/"]')
             if msg["index"] < len(chats):
@@ -307,6 +356,7 @@ class FanvueBot:
                 if self.send_reply(reply):
                     bot_status["replies_sent"] += 1
                     replied += 1
+                    log(f"Replied to {fan_name}: {reply[:50]}")
 
             time.sleep(3)
 
