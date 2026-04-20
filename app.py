@@ -1,6 +1,8 @@
 from flask import Flask, request
 import requests
 import os
+import time
+import threading
 
 app = Flask(__name__)
 
@@ -8,31 +10,20 @@ FANVUE_TOKEN = os.environ.get('FANVUE_TOKEN')
 KIMI_API_KEY = os.environ.get('KIMI_API_KEY')
 CREATOR_NAME = os.environ.get('CREATOR_NAME', 'Creator')
 
-@app.route('/webhook', methods=['POST'])
-def handle_fanvue():
-    data = request.json
-    
-    if data.get('type') == 'message.created':
-        msg = data['data']
-        fan_text = msg['text']
-        chat_id = msg['chatId']
-        fan_name = msg['sender'].get('displayName', 'babe')
-        
-        reply = ask_kimi(fan_text, fan_name)
-        send_fanvue(chat_id, reply)
-    
-    return 'OK', 200
+processed_messages = set()
 
-def ask_kimi(message, fan_name):
+def ask_kimi(message, fan_name, chat_history=""):
     url = "https://api.moonshot.cn/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {KIMI_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    system = f"""You are {CREATOR_NAME}. Reply to fan messages naturally.
+    system = f"""You are {CREATOR_NAME}. Reply to fan messages naturally in Hungarian.
     Fan name: {fan_name}. Keep it under 40 words. Flirty but exclusive.
-    Remember details they share. Guide toward PPV sales gently."""
+    Remember details they share. Guide toward PPV sales gently.
+    
+    Chat history: {chat_history}"""
     
     data = {
         "model": "kimi-k2.5",
@@ -49,7 +40,7 @@ def ask_kimi(message, fan_name):
         return r.json()['choices'][0]['message']['content']
     except Exception as e:
         print(f"Kimi error: {e}")
-        return f"Hey {fan_name}! 😘 What's up?"
+        return f"Szia {fan_name}! 😘 Mi újság?"
 
 def send_fanvue(chat_id, text):
     url = f"https://api.fanvue.com/v1/chats/{chat_id}/messages"
@@ -58,13 +49,48 @@ def send_fanvue(chat_id, text):
         "Content-Type": "application/json"
     }
     try:
-        requests.post(url, headers=headers, json={"text": text}, timeout=10)
+        r = requests.post(url, headers=headers, json={"text": text}, timeout=10)
+        print(f"Sent to Fanvue: {r.status_code}")
     except Exception as e:
         print(f"Fanvue error: {e}")
 
-@app.route('/')
-def home():
-    return "Fanvue Bot Running!"
+def get_chats():
+    url = "https://api.fanvue.com/v1/chats"
+    headers = {"Authorization": f"Bearer {FANVUE_TOKEN}"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        return r.json().get('data', [])
+    except Exception as e:
+        print(f"Get chats error: {e}")
+        return []
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+def get_messages(chat_id):
+    url = f"https://api.fanvue.com/v1/chats/{chat_id}/messages"
+    headers = {"Authorization": f"Bearer {FANVUE_TOKEN}"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        return r.json().get('data', [])
+    except Exception as e:
+        print(f"Get messages error: {e}")
+        return []
+
+def poll_for_messages():
+    while True:
+        print("Checking for new messages...")
+        chats = get_chats()
+        
+        for chat in chats:
+            chat_id = chat.get('id')
+            messages = get_messages(chat_id)
+            
+            for msg in messages:
+                msg_id = msg.get('id')
+                sender = msg.get('sender', {})
+                
+                if sender.get('type') == 'fan' and msg_id not in processed_messages:
+                    fan_name = sender.get('displayName', 'babe')
+                    text = msg.get('text', '')
+                    
+                    print(f"New message from {fan_name}: {
