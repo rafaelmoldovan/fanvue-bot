@@ -67,7 +67,7 @@ class FanvueBot:
     def login(self):
         try:
             log("Logging into Fanvue...")
-            self.page.goto("https://www.fanvue.com/login", wait_until="networkidle")
+            self.page.goto("https://www.fanvue.com/signin", wait_until="networkidle")
             time.sleep(5)
 
             # Use JavaScript to find and fill inputs
@@ -83,18 +83,19 @@ class FanvueBot:
                         const type = input.type || '';
                         const name = input.name || '';
                         const placeholder = input.placeholder || '';
+                        const ariaLabel = input.getAttribute('aria-label') || '';
 
-                        if (type === 'email' || name === 'email' || placeholder.toLowerCase().includes('email')) {
+                        if (type === 'email' || name === 'email' || 
+                            placeholder.toLowerCase().includes('email') ||
+                            ariaLabel.toLowerCase().includes('email')) {
                             emailInput = input;
                         }
-                        if (type === 'password' || name === 'password' || placeholder.toLowerCase().includes('password')) {
+                        if (type === 'password' || name === 'password' || 
+                            placeholder.toLowerCase().includes('password') ||
+                            ariaLabel.toLowerCase().includes('password')) {
                             passInput = input;
                         }
                     }
-
-                    // If not found by type, use first and second input
-                    if (!emailInput && inputs.length > 0) emailInput = inputs[0];
-                    if (!passInput && inputs.length > 1) passInput = inputs[1];
 
                     return {
                         emailFound: !!emailInput,
@@ -116,9 +117,14 @@ class FanvueBot:
                     const inputs = document.querySelectorAll('input');
                     let emailInput = null;
                     for (let input of inputs) {{
-                        if (input.type === 'email' || input.name === 'email') emailInput = input;
+                        const placeholder = input.placeholder || '';
+                        const ariaLabel = input.getAttribute('aria-label') || '';
+                        if (input.type === 'email' || input.name === 'email' || 
+                            placeholder.toLowerCase().includes('email') ||
+                            ariaLabel.toLowerCase().includes('email')) {{
+                            emailInput = input;
+                        }}
                     }}
-                    if (!emailInput && inputs.length > 0) emailInput = inputs[0];
                     if (emailInput) {{
                         emailInput.value = '{FANVUE_EMAIL}';
                         emailInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
@@ -135,9 +141,14 @@ class FanvueBot:
                     const inputs = document.querySelectorAll('input');
                     let passInput = null;
                     for (let input of inputs) {{
-                        if (input.type === 'password' || input.name === 'password') passInput = input;
+                        const placeholder = input.placeholder || '';
+                        const ariaLabel = input.getAttribute('aria-label') || '';
+                        if (input.type === 'password' || input.name === 'password' ||
+                            placeholder.toLowerCase().includes('password') ||
+                            ariaLabel.toLowerCase().includes('password')) {{
+                            passInput = input;
+                        }}
                     }}
-                    if (!passInput && inputs.length > 1) passInput = inputs[1];
                     if (passInput) {{
                         passInput.value = '{FANVUE_PASSWORD}';
                         passInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
