@@ -129,78 +129,53 @@ def extract_name(text):
         match = re.search(r'(?:nevem|hívnak|a nevem)\s+(\w+)', text_lower)
         if match:
             return match.group(1).capitalize()
-    return ""
+    return []
 
-def poll_for_messages():
-    log("=== POLL THREAD STARTED ===")
-    fan_known_names = {}
+def process_all_chats():
+    """Process all chats and return results"""
+    log("Processing chats...")
+    bot_status["last_check"] = datetime.now().isoformat()
+    chats = get_chats()
+    log(f"Found {len(chats)} chats")
     
-    while True:
-        try:
-            log("Checking for new messages...")
-            bot_status["last_check"] = datetime.now().isoformat()
-            chats = get_chats()
+    messages_processed = 0
+    
+    for chat in chats:
+        chat_id = chat.get('id')
+        if not chat_id:
+            continue
+        
+        messages = get_messages(chat_id)
+        log(f"Chat {chat_id[:8]}...: {len(messages)} messages")
+        
+        for msg in messages:
+            msg_id = msg.get('id')
+            sender = msg.get('sender', {})
+            msg_time = msg.get('createdAt', '')
             
-            if not chats:
-                log("No chats found")
+            is_fan = sender.get('type') == 'fan'
+            is_new = msg_id not in processed_messages
+            is_after_start = msg_time > bot_start_time
             
-            for chat in chats:
-                chat_id = chat.get('id')
-                if not chat_id:
-                    continue
+            if is_fan and is_new and is_after_start:
+                fan_name = sender.get('displayName', 'babe')
+                text = msg.get('text', '')
                 
-                messages = get_messages(chat_id)
-                log(f"Chat {chat_id}: {len(messages)} messages")
+                log(f"NEW MSG from {fan_name}: {text[:50]}")
+                bot_status["messages_found"] += 1
+                messages_processed += 1
                 
-                for msg in messages:
-                    msg_id = msg.get('id')
-                    sender = msg.get('sender', {})
-                    msg_time = msg.get('createdAt', '')
-                    fan_id = sender.get('uuid', '')
-                    
-                    is_fan = sender.get('type') == 'fan'
-                    is_new = msg_id not in processed_messages
-                    is_after_start = msg_time > bot_start_time
-                    
-                    if is_fan and is_new and is_after_start:
-                        fan_name = sender.get('displayName', 'babe')
-                        text = msg.get('text', '')
-                        
-                        log(f"NEW MSG from {fan_name}: {text[:50]}")
-                        bot_status["messages_found"] += 1
-                        
-                        extracted = extract_name(text)
-                        if extracted and fan_id not in fan_known_names:
-                            fan_known_names[fan_id] = extracted
-                            log(f"Learned name: {extracted}")
-                        
-                        known_name = fan_known_names.get(fan_id, "")
-                        
-                        recent_msgs = messages[-5:] if len(messages) > 5 else messages
-                        history = ""
-                        for m in recent_msgs:
-                            s = m.get('sender', {})
-                            role = "Fan" if s.get('type') == 'fan' else "You"
-                            history += role + ": " + m.get('text', '') + "\n"
-                        
-                        log("Waiting 2 min...")
-                        time.sleep(120)
-                        
-                        reply = ask_kimi(text, fan_name, history, known_name)
-                        send_fanvue(chat_id, reply)
-                        processed_messages.add(msg_id)
-                        log(f"Replied: {reply[:50]}")
-            
-            log("Sleeping 2 min...")
-            time.sleep(120)
-            
-        except Exception as e:
-            log(f"POLL ERROR: {e}")
-            time.sleep(120)
+                # Simple reply for now
+                reply = "Szia! 😊 Koszi az uzenetet, kesobb visszaerek!"
+                send_fanvue(chat_id, reply)
+                processed_messages.add(msg_id)
+                log(f"Replied: {reply}")
+    
+    return messages_processed
 
 @app.route('/')
 def home():
-    return "Bot running! Go to /status for details."
+    return "Bot running! Use /trigger to check messages, /status for info."
 
 @app.route('/status')
 def status():
@@ -210,6 +185,16 @@ def status():
         "messages_found": bot_status["messages_found"],
         "recent_logs": bot_status["errors"][-10:]
     }
+
+@app.route('/trigger')
+def trigger_poll():
+    """Manually trigger one poll cycle"""
+    try:
+        count = process_all_chats()
+        return {"status": "ok", "messages_processed": count}
+    except Exception as e:
+        log(f"Trigger error: {e}")
+        return {"status": "error", "error": str(e)}
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -223,7 +208,4 @@ if __name__ == '__main__':
     log("=" * 50)
     log("BOT STARTING")
     log("=" * 50)
-    poll_thread = threading.Thread(target=poll_for_messages, daemon=True)
-    poll_thread.start()
-    log("Thread started")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
