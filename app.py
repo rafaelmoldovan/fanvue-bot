@@ -21,9 +21,10 @@ def webhook():
 @app.route('/callback')
 def callback():
     code = request.args.get('code')
+    error = request.args.get('error')
     if code:
-        return f"Authorization code received: {code[:10]}... (check logs)"
-    return "Callback received"
+        return f"CODE: {code}"
+    return f"ERROR: {error}"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
