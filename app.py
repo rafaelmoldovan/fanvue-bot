@@ -1,6 +1,7 @@
 from flask import Flask, request
 import requests
 import os
+import base64
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -37,13 +38,20 @@ def refresh_fanvue_token():
     global fanvue_access_token, token_expires_at
 
     url = "https://auth.fanvue.com/oauth2/token"
+
+    # Create Basic Auth header from client credentials
+    # Note: We don't have client_id/secret anymore, but the refresh token itself should work with basic auth
+    # Actually, let me try with just the refresh token in the body first, but with proper form encoding
     payload = {
         "grant_type": "refresh_token",
-        "refresh_token": FANVUE_REFRESH_TOKEN
+        "refresh_token": FANVUE_REFRESH_TOKEN,
+        "client_id": "23cc2e68-0e23-4cff-914b-eec2bdb56268",
+        "client_secret": "dc30583e61d42c70b23ede8d29c1bfd0662ac77234eae479bdaec1bcc5968efa"
     }
 
     try:
         r = requests.post(url, data=payload, timeout=10)
+        log(f"Refresh status: {r.status_code}")
         if r.status_code == 200:
             data = r.json()
             fanvue_access_token = data.get('access_token')
@@ -51,9 +59,9 @@ def refresh_fanvue_token():
             expires_in = data.get('expires_in', 3600)
             token_expires_at = datetime.now() + timedelta(seconds=expires_in - 60)
             log("Got new Fanvue access token via refresh")
-            # Update refresh token if rotated
             if new_refresh and new_refresh != FANVUE_REFRESH_TOKEN:
                 log("Refresh token was rotated - update your Railway variable!")
+                log(f"New refresh token: {new_refresh[:50]}...")
             return fanvue_access_token
         else:
             log(f"Refresh error: {r.status_code} - {r.text[:200]}")
