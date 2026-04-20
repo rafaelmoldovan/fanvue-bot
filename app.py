@@ -66,7 +66,7 @@ def send_telegram_alert(text):
 
 # ========== POSTGRESQL DATABASE ==========
 def get_db_conn():
-    return psycopg2.connect(DATABASE_URL, sslmode='require')
+    return psycopg.connect(DATABASE_URL, sslmode='require')
 
 def init_database():
     conn = get_db_conn()
