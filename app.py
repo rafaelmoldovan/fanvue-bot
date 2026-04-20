@@ -193,15 +193,17 @@ def send_fanvue_message(chat_id, text):
         log(f"Send error: {e}")
         return False
 
-def ask_kimi(message, fan_name=""):
-    url = "https://api.moonshot.ai/v1/chat/completions"
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+
+def ask_openai(message, fan_name=""):
+    url = "https://api.openai.com/v1/chat/completions"
     headers = {
-        "Authorization": "Bearer " + KIMI_API_KEY,
+        "Authorization": "Bearer " + OPENAI_API_KEY,
         "Content-Type": "application/json"
     }
     system = f"You are {CREATOR_NAME}. Reply in Hungarian. Keep under 30 words. Be sweet and casual."
     data = {
-        "model": "kimi-latest",
+        "model": "gpt-4o-mini",
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": message}
@@ -210,14 +212,15 @@ def ask_kimi(message, fan_name=""):
     }
     try:
         r = requests.post(url, headers=headers, json=data, timeout=15)
+        log(f"OpenAI status: {r.status_code}")
         if r.status_code == 200:
             content = r.json()['choices'][0]['message']['content']
             return content.strip() if content else "Szia! 😊"
         else:
-            log(f"Kimi error: {r.status_code}")
+            log(f"OpenAI error: {r.status_code} - {r.text[:200]}")
             return "Szia! 😊 Mi ujsag?"
     except Exception as e:
-        log(f"Kimi error: {e}")
+        log(f"OpenAI error: {e}")
         return "Szia! 😊 Mi ujsag?"
 
 processed_messages = set()
@@ -259,7 +262,7 @@ def process_messages():
                 log(f"NEW MSG from {fan_name}: {text[:50]}")
                 bot_status["messages_found"] += 1
 
-                reply = ask_kimi(text, fan_name)
+                reply = ask_openai(text, fan_name)
 
                 if send_fanvue_message(chat_id, reply):
                     bot_status["replies_sent"] += 1
