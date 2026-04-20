@@ -7,11 +7,10 @@ from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 
-# Config
-FANVUE_EMAIL = os.environ.get('FANVUE_EMAIL')
-FANVUE_PASSWORD = os.environ.get('FANVUE_PASSWORD')
-KIMI_API_KEY = os.environ.get('KIMI_API_KEY')
-CREATOR_NAME = os.environ.get('CREATOR_NAME', 'Creator')
+FANVUE_EMAIL = os.environ.get("FANVUE_EMAIL")
+FANVUE_PASSWORD = os.environ.get("FANVUE_PASSWORD")
+KIMI_API_KEY = os.environ.get("KIMI_API_KEY")
+CREATOR_NAME = os.environ.get("CREATOR_NAME", "Creator")
 
 bot_status = {
     "started": datetime.now().isoformat(),
@@ -20,7 +19,6 @@ bot_status = {
     "replies_sent": 0,
     "errors": [],
     "paused": False,
-    "blocked_users": set(),
     "logged_in": False
 }
 
@@ -32,13 +30,9 @@ def log(msg):
     if len(bot_status["errors"]) > 100:
         bot_status["errors"] = bot_status["errors"][-100:]
 
-log("BOT STARTING")
-log(f"CREATOR_NAME: {CREATOR_NAME}")
-
 class FanvueBot:
     def __init__(self):
         self.browser = None
-        self.context = None
         self.page = None
         self.last_messages = {}
 
@@ -49,21 +43,22 @@ class FanvueBot:
             self.browser = self.playwright.chromium.launch(
                 headless=True,
                 args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--no-first-run',
-                    '--no-zygote',
-                    '--single-process'
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-first-run",
+                    "--no-zygote",
+                    "--single-process",
+                    "--disable-blink-features=AutomationControlled"
                 ]
             )
             self.context = self.browser.new_context(
-                viewport={'width': 1280, 'height': 720},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                viewport={"width": 1280, "height": 720},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             )
             self.page = self.context.new_page()
-            log("Browser started successfully")
+            log("Browser started")
             return True
         except Exception as e:
             log(f"Browser start error: {e}")
@@ -72,179 +67,106 @@ class FanvueBot:
     def login(self):
         try:
             log("Logging into Fanvue...")
-            self.page.goto("https://fanvue.com/login", wait_until="networkidle")
-            time.sleep(8)
+            self.page.goto("https://www.fanvue.com/login", wait_until="networkidle")
+            time.sleep(5)
 
-            # Take screenshot to see what page looks like
-            try:
-                self.page.screenshot(path="/tmp/login_page.png")
-                log("Screenshot saved to /tmp/login_page.png")
-            except:
-                pass
+            # Use JavaScript to find and fill inputs
+            log("Filling login form...")
 
-            # Log page info
-            log(f"Page title: {self.page.title()}")
-            log(f"Page URL: {self.page.url}")
+            result = self.page.evaluate("""
+                () => {
+                    const inputs = document.querySelectorAll('input');
+                    let emailInput = null;
+                    let passInput = null;
 
-            # Wait for inputs to appear dynamically
-            log("Waiting for inputs to load...")
-            try:
-                self.page.wait_for_selector('input', timeout=10000)
-                log("Inputs found")
-            except:
-                log("No inputs found after waiting")
+                    for (let input of inputs) {
+                        const type = input.type || '';
+                        const name = input.name || '';
+                        const placeholder = input.placeholder || '';
 
-            # Also check for iframes
-            frames = self.page.frames
-            log(f"Number of frames: {len(frames)}")
-            for i, frame in enumerate(frames):
-                try:
-                    frame_url = frame.url
-                    log(f"Frame {i}: {frame_url}")
-                    frame_inputs = frame.query_selector_all('input')
-                    log(f"Frame {i} has {len(frame_inputs)} inputs")
-                except:
-                    continue
+                        if (type === 'email' || name === 'email' || placeholder.toLowerCase().includes('email')) {
+                            emailInput = input;
+                        }
+                        if (type === 'password' || name === 'password' || placeholder.toLowerCase().includes('password')) {
+                            passInput = input;
+                        }
+                    }
 
-            # Try multiple selectors for email
-            email_selectors = [
-                'input[type="email"]',
-                'input[name="email"]',
-                'input[id="email"]',
-                'input[placeholder*="mail"]',
-                'input[placeholder*="Mail"]',
-                'input[placeholder*="e-mail"]',
-                'input[placeholder*="E-mail"]',
-            ]
+                    // If not found by type, use first and second input
+                    if (!emailInput && inputs.length > 0) emailInput = inputs[0];
+                    if (!passInput && inputs.length > 1) passInput = inputs[1];
 
-            email_input = None
-            for sel in email_selectors:
-                try:
-                    email_input = self.page.query_selector(sel)
-                    if email_input:
-                        log(f"Found email with selector: {sel}")
-                        break
-                except:
-                    continue
+                    return {
+                        emailFound: !!emailInput,
+                        passFound: !!passInput,
+                        totalInputs: inputs.length
+                    };
+                }
+            """)
 
-            if not email_input:
-                # Try getting all inputs
-                inputs = self.page.query_selector_all('input')
-                log(f"Found {len(inputs)} total inputs")
-                for i, inp in enumerate(inputs):
-                    try:
-                        input_type = inp.get_attribute('type') or 'text'
-                        input_name = inp.get_attribute('name') or ''
-                        input_placeholder = inp.get_attribute('placeholder') or ''
-                        input_class = inp.get_attribute('class') or ''
-                        log(f"Input {i}: type={input_type}, name={input_name}, placeholder={input_placeholder}, class={input_class[:50]}")
-                    except:
-                        continue
+            log(f"Inputs found: {result}")
 
-                # Fanvue likely has email as first input, password as second
-                if len(inputs) >= 1:
-                    email_input = inputs[0]
-                    log("Using first input as email")
-
-            if not email_input:
-                log("Email input not found")
+            if not result.get('emailFound') or not result.get('passFound'):
+                log("Could not find login inputs")
                 return False
 
-            if not email_input:
-                log("Email input not found")
-                return False
+            # Fill email using JavaScript
+            self.page.evaluate(f"""
+                () => {{
+                    const inputs = document.querySelectorAll('input');
+                    let emailInput = null;
+                    for (let input of inputs) {{
+                        if (input.type === 'email' || input.name === 'email') emailInput = input;
+                    }}
+                    if (!emailInput && inputs.length > 0) emailInput = inputs[0];
+                    if (emailInput) {{
+                        emailInput.value = '{FANVUE_EMAIL}';
+                        emailInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        emailInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }}
+                }}
+            """)
 
-            email_input.fill(FANVUE_EMAIL)
-            log("Email filled")
             time.sleep(1)
 
-            # Try multiple selectors for password
-            pass_selectors = [
-                'input[type="password"]',
-                'input[name="password"]',
-                'input[id="password"]',
-            ]
+            # Fill password
+            self.page.evaluate(f"""
+                () => {{
+                    const inputs = document.querySelectorAll('input');
+                    let passInput = null;
+                    for (let input of inputs) {{
+                        if (input.type === 'password' || input.name === 'password') passInput = input;
+                    }}
+                    if (!passInput && inputs.length > 1) passInput = inputs[1];
+                    if (passInput) {{
+                        passInput.value = '{FANVUE_PASSWORD}';
+                        passInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        passInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }}
+                }}
+            """)
 
-            pass_input = None
-            for sel in pass_selectors:
-                try:
-                    pass_input = self.page.query_selector(sel)
-                    if pass_input:
-                        log(f"Found password with selector: {sel}")
-                        break
-                except:
-                    continue
-
-            if not pass_input:
-                # Try getting all inputs again
-                inputs = self.page.query_selector_all('input')
-                if len(inputs) >= 2:
-                    pass_input = inputs[1]
-                    log("Using second input as password")
-                else:
-                    for inp in inputs:
-                        try:
-                            if inp.get_attribute('type') == 'password':
-                                pass_input = inp
-                                log("Found password input")
-                                break
-                        except:
-                            continue
-
-            if not pass_input:
-                log("Password input not found")
-                return False
-
-            pass_input.fill(FANVUE_PASSWORD)
-            log("Password filled")
             time.sleep(1)
 
-            # Try multiple selectors for login button
-            btn_selectors = [
-                'button[type="submit"]',
-                'button:has-text("Log")',
-                'button:has-text("Sign")',
-                'button:has-text("In")',
-                'input[type="submit"]',
-                'button',
-            ]
-
-            login_btn = None
-            for sel in btn_selectors:
-                try:
-                    login_btn = self.page.query_selector(sel)
-                    if login_btn:
-                        btn_text = login_btn.inner_text() or ''
-                        log(f"Found button with selector: {sel}, text: {btn_text}")
-                        if 'log' in btn_text.lower() or 'sign' in btn_text.lower() or 'in' in btn_text.lower():
-                            break
-                except:
-                    continue
-
-            if login_btn:
-                login_btn.click()
-                log("Login button clicked")
-            else:
-                # Try pressing Enter on password field
-                log("No button found, pressing Enter")
-                pass_input.press("Enter")
+            # Submit form
+            self.page.evaluate("""
+                () => {
+                    const form = document.querySelector('form');
+                    if (form) form.submit();
+                }
+            """)
 
             time.sleep(5)
 
             current_url = self.page.url
-            log(f"Current URL after login: {current_url}")
+            log(f"URL after login: {current_url}")
 
             if "login" not in current_url.lower():
                 log("Login successful!")
                 bot_status["logged_in"] = True
                 return True
             else:
-                log("Login failed - still on login page")
-                try:
-                    self.page.screenshot(path="/tmp/login_error.png")
-                    log("Screenshot saved to /tmp/login_error.png")
-                except:
-                    pass
+                log("Login failed")
                 return False
 
         except Exception as e:
@@ -253,75 +175,40 @@ class FanvueBot:
 
     def get_messages(self):
         try:
-            log("Navigating to messages...")
-            self.page.goto("https://fanvue.com/messages", wait_until="domcontentloaded")
+            self.page.goto("https://www.fanvue.com/messages", wait_until="networkidle")
             time.sleep(5)
 
-            # Wait for chat list
-            self.page.wait_for_selector('a[href*="/messages/"]', timeout=15000)
-
-            # Get all chat links
-            chat_links = self.page.query_selector_all('a[href*="/messages/"]')
-            log(f"Found {len(chat_links)} chats")
+            chats = self.page.query_selector_all('a[href*="/messages/"]')
+            log(f"Found {len(chats)} chats")
 
             new_messages = []
 
-            for i, link in enumerate(chat_links[:5]):  # Check first 5 chats
+            for i, chat in enumerate(chats[:3]):
                 try:
-                    # Get fan name
-                    name_elem = link.query_selector('h3, h4, span, p')
-                    fan_name = name_elem.inner_text() if name_elem else f"User_{i}"
-
-                    # Check for unread indicator (usually a dot or number)
-                    has_unread = False
-
-                    # Look for unread badge
-                    unread_elem = link.query_selector('[class*="unread"], [class*="badge"], [class*="dot"]')
-                    if unread_elem:
-                        has_unread = True
-
-                    # Or check if there's a time indicator that's recent
-                    time_elem = link.query_selector('time')
-                    if time_elem:
-                        # If time says "now" or few minutes ago, likely unread
-                        time_text = time_elem.inner_text()
-                        if any(word in time_text.lower() for word in ['now', 'min', '1m', '2m', '3m', '4m', '5m']):
-                            has_unread = True
-
-                    # Click to open chat
-                    link.click()
+                    chat.click()
                     time.sleep(3)
 
-                    # Get messages in chat
-                    msg_bubbles = self.page.query_selector_all('[class*="message"]')
+                    # Get all message elements
+                    msgs = self.page.query_selector_all('[class*="message"]')
 
-                    if msg_bubbles:
-                        # Get last message
-                        last_msg = msg_bubbles[-1]
-                        text = last_msg.inner_text()
+                    if msgs:
+                        last = msgs[-1]
+                        text = last.inner_text()
+                        msg_class = last.get_attribute("class") or ""
+                        is_me = "sent" in msg_class.lower() or "right" in msg_class.lower()
 
-                        # Check if it's from fan (not from me)
-                        # Usually fan messages are on left, mine on right
-                        # Or check for specific class
-                        msg_classes = last_msg.get_attribute("class") or ""
-                        is_from_me = "sent" in msg_classes.lower() or "me" in msg_classes.lower() or "right" in msg_classes.lower()
-
-                        if text and not is_from_me:
-                            msg_id = f"{fan_name}_{hash(text)}"
+                        if text and not is_me:
+                            msg_id = f"msg_{i}_{hash(text)}"
                             if msg_id not in self.last_messages:
                                 self.last_messages[msg_id] = True
-                                new_messages.append({
-                                    "fan_name": fan_name,
-                                    "text": text
-                                })
-                                log(f"New message from {fan_name}: {text[:50]}")
+                                new_messages.append({"index": i, "text": text})
+                                log(f"New msg: {text[:50]}")
 
-                    # Go back to messages list
-                    self.page.goto("https://fanvue.com/messages", wait_until="domcontentloaded")
+                    self.page.goto("https://www.fanvue.com/messages", wait_until="networkidle")
                     time.sleep(3)
 
                 except Exception as e:
-                    log(f"Chat parse error: {e}")
+                    log(f"Chat error: {e}")
                     continue
 
             return new_messages
@@ -332,53 +219,44 @@ class FanvueBot:
 
     def send_reply(self, text):
         try:
-            # Find message input
-            input_selectors = [
-                'textarea[placeholder*="message"]',
-                'textarea[placeholder*="Message"]',
-                'input[placeholder*="message"]',
+            selectors = [
+                'textarea',
                 'div[contenteditable="true"]',
-                'textarea'
+                'input[type="text"]'
             ]
 
-            input_box = None
-            for sel in input_selectors:
-                input_box = self.page.query_selector(sel)
-                if input_box:
-                    log(f"Found input with selector: {sel}")
+            inp = None
+            for sel in selectors:
+                inp = self.page.query_selector(sel)
+                if inp:
                     break
 
-            if input_box:
-                input_box.fill(text)
+            if inp:
+                inp.fill(text)
                 time.sleep(1)
-
-                # Press Enter to send
                 self.page.keyboard.press("Enter")
                 time.sleep(2)
-
-                log(f"Sent reply: {text[:50]}")
+                log(f"Sent: {text[:50]}")
                 return True
             else:
-                log("Could not find message input")
+                log("No input found")
                 return False
 
         except Exception as e:
             log(f"Send error: {e}")
             return False
 
-    def ask_kimi(self, message, fan_name):
+    def ask_kimi(self, message):
         url = "https://api.moonshot.ai/v1/chat/completions"
         headers = {
             "Authorization": "Bearer " + KIMI_API_KEY,
             "Content-Type": "application/json"
         }
 
-        system = f"You are {CREATOR_NAME}. Reply in Hungarian. Keep under 30 words. Be sweet, casual, slightly flirty. Fan name: {fan_name}"
-
         data = {
             "model": "kimi-latest",
             "messages": [
-                {"role": "system", "content": system},
+                {"role": "system", "content": f"You are {CREATOR_NAME}. Reply in Hungarian. Keep under 30 words. Be sweet and casual."},
                 {"role": "user", "content": message}
             ],
             "max_tokens": 100
@@ -386,55 +264,40 @@ class FanvueBot:
 
         try:
             r = requests.post(url, headers=headers, json=data, timeout=15)
-            log(f"Kimi status: {r.status_code}")
-
             if r.status_code == 200:
-                response = r.json()
-                content = response['choices'][0]['message']['content']
-                if content and content.strip():
-                    return content.strip()
-                else:
-                    log("Kimi returned empty content")
-                    return "Szia! 😊 Mi ujsag?"
+                content = r.json()["choices"][0]["message"]["content"]
+                return content.strip() if content else "Szia! 😊"
             else:
-                log(f"Kimi error: {r.status_code} - {r.text[:200]}")
+                log(f"Kimi error: {r.status_code}")
                 return "Szia! 😊 Mi ujsag?"
         except Exception as e:
-            log(f"Kimi exception: {e}")
+            log(f"Kimi error: {e}")
             return "Szia! 😊 Mi ujsag?"
 
     def process_messages(self):
         if bot_status["paused"]:
-            log("Bot is paused")
             return 0
 
         if not bot_status["logged_in"]:
             if not self.login():
                 return 0
 
-        new_msgs = self.get_messages()
+        msgs = self.get_messages()
         replied = 0
 
-        for msg in new_msgs:
-            fan_name = msg["fan_name"]
+        for msg in msgs:
             text = msg["text"]
+            reply = self.ask_kimi(text)
 
-            if fan_name in bot_status["blocked_users"]:
-                log(f"Skipping blocked user: {fan_name}")
-                continue
+            chats = self.page.query_selector_all('a[href*="/messages/"]')
+            if msg["index"] < len(chats):
+                chats[msg["index"]].click()
+                time.sleep(2)
+                if self.send_reply(reply):
+                    bot_status["replies_sent"] += 1
+                    replied += 1
 
-            log(f"Processing message from {fan_name}: {text[:50]}")
-            bot_status["messages_found"] += 1
-
-            # Generate reply
-            reply = self.ask_kimi(text, fan_name)
-
-            # Send reply
-            if self.send_reply(reply):
-                bot_status["replies_sent"] += 1
-                replied += 1
-
-            time.sleep(3)  # Delay between replies
+            time.sleep(3)
 
         return replied
 
@@ -444,14 +307,13 @@ class FanvueBot:
         if hasattr(self, 'playwright') and self.playwright:
             self.playwright.stop()
 
-# Global bot instance
 bot = FanvueBot()
 
-@app.route('/')
+@app.route("/")
 def home():
     return f"Bot running! Replies: {bot_status['replies_sent']}. Use /trigger /pause /resume /status"
 
-@app.route('/status')
+@app.route("/status")
 def status():
     return {
         "started": bot_status["started"],
@@ -460,16 +322,15 @@ def status():
         "replies_sent": bot_status["replies_sent"],
         "paused": bot_status["paused"],
         "logged_in": bot_status["logged_in"],
-        "blocked_users": list(bot_status["blocked_users"]),
         "recent_logs": bot_status["errors"][-10:]
     }
 
-@app.route('/trigger')
+@app.route("/trigger")
 def trigger():
     try:
         if not bot.browser:
             if not bot.start():
-                return {"status": "error", "error": "Could not start browser"}
+                return {"status": "error", "error": "Browser failed"}
 
         bot_status["last_check"] = datetime.now().isoformat()
         count = bot.process_messages()
@@ -483,34 +344,34 @@ def trigger():
         log(f"Trigger error: {e}")
         return {"status": "error", "error": str(e)}
 
-@app.route('/pause')
+@app.route("/pause")
 def pause():
     bot_status["paused"] = True
     return {"status": "paused"}
 
-@app.route('/resume')
+@app.route("/resume")
 def resume():
     bot_status["paused"] = False
     return {"status": "resumed"}
 
-@app.route('/block')
+@app.route("/block")
 def block_user():
-    user = request.args.get('user')
+    user = request.args.get("user")
     if user:
         bot_status["blocked_users"].add(user)
         return {"status": "blocked", "user": user}
-    return {"status": "error", "message": "No user specified"}
+    return {"status": "error"}
 
-@app.route('/unblock')
+@app.route("/unblock")
 def unblock_user():
-    user = request.args.get('user')
+    user = request.args.get("user")
     if user:
         bot_status["blocked_users"].discard(user)
         return {"status": "unblocked", "user": user}
-    return {"status": "error", "message": "No user specified"}
+    return {"status": "error"}
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     log("=" * 50)
-    log("PLAYWRIGHT BOT STARTING")
+    log("BOT STARTING")
     log("=" * 50)
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
