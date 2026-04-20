@@ -214,7 +214,10 @@ def ask_openai(message, fan_name=""):
         r = requests.post(url, headers=headers, json=data, timeout=15)
         log(f"OpenAI status: {r.status_code}")
         if r.status_code == 200:
-            content = r.json()['choices'][0]['message']['content']
+            response_data = r.json()
+            log(f"OpenAI response: {json.dumps(response_data)[:300]}")
+            content = response_data['choices'][0]['message']['content']
+            log(f"OpenAI content: '{content}'")
             return content.strip() if content else "Szia! 😊"
         else:
             log(f"OpenAI error: {r.status_code} - {r.text[:200]}")
