@@ -5,18 +5,17 @@ import json
 import base64
 import time
 import threading
-import psycopg
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
 # ========== CONFIG ==========
-FANVUE_CLIENT_ID = os.environ.get('FANVUE_CLIENT_ID')
-FANVUE_CLIENT_SECRET = os.environ.get('FANVUE_CLIENT_SECRET')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+FANVUE_CLIENT_ID = os.environ.get('FANVUE_CLIENT_ID', '')
+FANVUE_CLIENT_SECRET = os.environ.get('FANVUE_CLIENT_SECRET', '')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 CREATOR_NAME = os.environ.get('CREATOR_NAME', 'Jazmin')
 RAILWAY_REFRESH_TOKEN = os.environ.get('FANVUE_REFRESH_TOKEN', '')
-DATABASE_URL = os.environ.get('DATABASE_URL')
+DATABASE_URL = os.environ.get('DATABASE_URL', '')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8141197294:AAE9aH9mptY_ZzAK6sSc_alh2PtRjF1ASWs')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '8571222647')
 
@@ -39,8 +38,15 @@ memory_tokens = {
     "expires_at": None
 }
 
-# In-memory cooldown tracker (fallback when DB fails)
-_in_memory_cooldown = {}
+# In-memory storage (works even if DB fails)
+_in_memory_db = {
+    "messages": {},
+    "fan_profiles": {},
+    "tokens": {},
+    "stats": {"messages_found": 0, "replies_sent": 0},
+    "cooldown": {},
+    "processed_ids": set()
+}
 
 # ========== LOGGING ==========
 def log(msg):
@@ -66,73 +72,91 @@ def send_telegram_alert(text):
     except Exception as e:
         log(f"Telegram error: {e}")
 
-# ========== POSTGRESQL DATABASE ==========
-def get_db_conn():
-    return psycopg.connect(DATABASE_URL, sslmode='require')
+# ========== DATABASE (PostgreSQL + In-Memory Fallback) ==========
+_db_available = False
 
 def init_database():
-    conn = get_db_conn()
-    c = conn.cursor()
+    global _db_available
+    if not DATABASE_URL:
+        log("WARNING: No DATABASE_URL. Using in-memory storage only.")
+        _db_available = False
+        return
     
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS messages (
-            msg_id VARCHAR PRIMARY KEY,
-            chat_id VARCHAR NOT NULL,
-            fan_name VARCHAR,
-            sender_uuid VARCHAR,
-            text TEXT,
-            timestamp TIMESTAMP,
-            was_replied BOOLEAN DEFAULT FALSE,
-            reply_text TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS fan_profiles (
-            chat_id VARCHAR PRIMARY KEY,
-            fan_name VARCHAR,
-            handle VARCHAR,
-            total_messages INTEGER DEFAULT 0,
-            total_gifts REAL DEFAULT 0,
-            last_interaction TIMESTAMP,
-            fan_type VARCHAR DEFAULT 'new',
-            inside_jokes TEXT DEFAULT '[]',
-            meetup_ask_count INTEGER DEFAULT 0,
-            content_ask_count INTEGER DEFAULT 0,
-            last_reply_time TIMESTAMP,
-            blocked BOOLEAN DEFAULT FALSE
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS tokens (
-            key VARCHAR PRIMARY KEY,
-            value TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS bot_stats (
-            key VARCHAR PRIMARY KEY,
-            value INTEGER DEFAULT 0
-        )
-    ''')
-    
-    c.execute('''
-        INSERT INTO bot_stats (key, value) 
-        VALUES ('messages_found', 0), ('replies_sent', 0)
-        ON CONFLICT (key) DO NOTHING
-    ''')
-    
-    conn.commit()
-    c.close()
-    conn.close()
-    log("PostgreSQL tables ready")
-
-# ========== DATABASE HELPERS ==========
-def db_save_message(msg_id, chat_id, fan_name, sender_uuid, text, timestamp):
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
+        c = conn.cursor()
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                msg_id VARCHAR PRIMARY KEY,
+                chat_id VARCHAR NOT NULL,
+                fan_name VARCHAR,
+                sender_uuid VARCHAR,
+                text TEXT,
+                timestamp TIMESTAMP,
+                was_replied BOOLEAN DEFAULT FALSE,
+                reply_text TEXT
+            )
+        ''')
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS fan_profiles (
+                chat_id VARCHAR PRIMARY KEY,
+                fan_name VARCHAR,
+                handle VARCHAR,
+                total_messages INTEGER DEFAULT 0,
+                total_gifts REAL DEFAULT 0,
+                last_interaction TIMESTAMP,
+                fan_type VARCHAR DEFAULT 'new',
+                inside_jokes TEXT DEFAULT '[]',
+                meetup_ask_count INTEGER DEFAULT 0,
+                content_ask_count INTEGER DEFAULT 0,
+                last_reply_time TIMESTAMP,
+                blocked BOOLEAN DEFAULT FALSE
+            )
+        ''')
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS tokens (
+                key VARCHAR PRIMARY KEY,
+                value TEXT
+            )
+        ''')
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS bot_stats (
+                key VARCHAR PRIMARY KEY,
+                value INTEGER DEFAULT 0
+            )
+        ''')
+        
+        c.execute('''
+            INSERT INTO bot_stats (key, value) 
+            VALUES ('messages_found', 0), ('replies_sent', 0)
+            ON CONFLICT (key) DO NOTHING
+        ''')
+        
+        conn.commit()
+        c.close()
+        conn.close()
+        _db_available = True
+        log("PostgreSQL tables ready")
+    except Exception as e:
+        log(f"DB init failed: {e}. Using in-memory storage.")
+        _db_available = False
+
+def db_save_message(msg_id, chat_id, fan_name, sender_uuid, text, timestamp):
+    _in_memory_db["messages"][msg_id] = {
+        "msg_id": msg_id, "chat_id": chat_id, "fan_name": fan_name,
+        "sender_uuid": sender_uuid, "text": text, "timestamp": timestamp,
+        "was_replied": False, "reply_text": None
+    }
+    if not _db_available:
+        return
+    try:
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('''
             INSERT INTO messages (msg_id, chat_id, fan_name, sender_uuid, text, timestamp)
@@ -146,8 +170,20 @@ def db_save_message(msg_id, chat_id, fan_name, sender_uuid, text, timestamp):
         log(f"DB save message error: {e}")
 
 def db_get_chat_history(chat_id, limit=20):
+    # Always use in-memory first (faster + reliable)
+    msgs = [m for m in _in_memory_db["messages"].values() if m["chat_id"] == chat_id]
+    msgs.sort(key=lambda x: x["timestamp"])
+    msgs = msgs[-limit:]
+    
+    if msgs:
+        return [(m["fan_name"], m["text"], m["was_replied"], m["reply_text"], m["timestamp"]) for m in msgs]
+    
+    if not _db_available:
+        return []
+    
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('''
             SELECT fan_name, text, was_replied, reply_text, timestamp
@@ -165,8 +201,32 @@ def db_get_chat_history(chat_id, limit=20):
         return []
 
 def db_update_fan_profile(chat_id, fan_name, handle, gift_amount=0):
+    if chat_id not in _in_memory_db["fan_profiles"]:
+        _in_memory_db["fan_profiles"][chat_id] = {
+            "chat_id": chat_id, "fan_name": fan_name, "handle": handle,
+            "total_messages": 0, "total_gifts": 0, "fan_type": "new",
+            "last_interaction": datetime.now(), "inside_jokes": [],
+            "meetup_ask_count": 0, "content_ask_count": 0,
+            "last_reply_time": None, "blocked": False
+        }
+    
+    p = _in_memory_db["fan_profiles"][chat_id]
+    p["total_messages"] += 1
+    p["total_gifts"] += gift_amount or 0
+    p["last_interaction"] = datetime.now()
+    p["fan_name"] = fan_name
+    
+    if p["total_messages"] >= 15 or p["total_gifts"] >= 100:
+        p["fan_type"] = "whale"
+    elif p["total_messages"] >= 3:
+        p["fan_type"] = "warm"
+    
+    if not _db_available:
+        return
+    
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         
         c.execute('SELECT total_messages, total_gifts, fan_type FROM fan_profiles WHERE chat_id = %s', (chat_id,))
@@ -176,7 +236,6 @@ def db_update_fan_profile(chat_id, fan_name, handle, gift_amount=0):
             total_msgs, total_gifts, fan_type = row
             new_msgs = total_msgs + 1
             new_gifts = total_gifts + (gift_amount or 0)
-            
             new_type = fan_type
             if new_msgs >= 15 or new_gifts >= 100:
                 new_type = 'whale'
@@ -202,8 +261,24 @@ def db_update_fan_profile(chat_id, fan_name, handle, gift_amount=0):
         log(f"DB fan profile error: {e}")
 
 def db_get_fan_profile(chat_id):
+    if chat_id in _in_memory_db["fan_profiles"]:
+        p = _in_memory_db["fan_profiles"][chat_id]
+        return {
+            'fan_name': p["fan_name"],
+            'total_messages': p["total_messages"],
+            'total_gifts': p["total_gifts"],
+            'fan_type': p["fan_type"],
+            'inside_jokes': p["inside_jokes"],
+            'meetup_ask_count': p["meetup_ask_count"],
+            'content_ask_count': p["content_ask_count"]
+        }
+    
+    if not _db_available:
+        return None
+    
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('''
             SELECT fan_name, total_messages, total_gifts, fan_type, inside_jokes, meetup_ask_count, content_ask_count
@@ -229,8 +304,16 @@ def db_get_fan_profile(chat_id):
         return None
 
 def db_mark_replied(msg_id, reply_text):
+    if msg_id in _in_memory_db["messages"]:
+        _in_memory_db["messages"][msg_id]["was_replied"] = True
+        _in_memory_db["messages"][msg_id]["reply_text"] = reply_text
+    _in_memory_db["processed_ids"].add(msg_id)
+    
+    if not _db_available:
+        return
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('''
             UPDATE messages SET was_replied = TRUE, reply_text = %s WHERE msg_id = %s
@@ -242,8 +325,12 @@ def db_mark_replied(msg_id, reply_text):
         log(f"DB mark replied error: {e}")
 
 def db_save_token(key, value):
+    _in_memory_db["tokens"][key] = value
+    if not _db_available:
+        return
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('''
             INSERT INTO tokens (key, value) VALUES (%s, %s)
@@ -256,8 +343,13 @@ def db_save_token(key, value):
         log(f"DB save token error: {e}")
 
 def db_load_token(key):
+    if key in _in_memory_db["tokens"]:
+        return _in_memory_db["tokens"][key]
+    if not _db_available:
+        return None
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('SELECT value FROM tokens WHERE key = %s', (key,))
         row = c.fetchone()
@@ -269,8 +361,15 @@ def db_load_token(key):
         return None
 
 def db_is_message_processed(msg_id):
+    if msg_id in _in_memory_db["processed_ids"]:
+        return True
+    if msg_id in _in_memory_db["messages"] and _in_memory_db["messages"][msg_id]["was_replied"]:
+        return True
+    if not _db_available:
+        return False
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('SELECT 1 FROM messages WHERE msg_id = %s AND was_replied = TRUE', (msg_id,))
         result = c.fetchone()
@@ -282,8 +381,15 @@ def db_is_message_processed(msg_id):
         return False
 
 def db_update_last_reply_time(chat_id):
+    if chat_id in _in_memory_db["fan_profiles"]:
+        _in_memory_db["fan_profiles"][chat_id]["last_reply_time"] = datetime.now()
+    _in_memory_db["cooldown"][chat_id] = time.time()
+    
+    if not _db_available:
+        return
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('''
             UPDATE fan_profiles SET last_reply_time = NOW() WHERE chat_id = %s
@@ -295,8 +401,13 @@ def db_update_last_reply_time(chat_id):
         log(f"DB update reply time error: {e}")
 
 def db_get_last_reply_time(chat_id):
+    if chat_id in _in_memory_db["fan_profiles"]:
+        return _in_memory_db["fan_profiles"][chat_id]["last_reply_time"]
+    if not _db_available:
+        return None
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('SELECT last_reply_time FROM fan_profiles WHERE chat_id = %s', (chat_id,))
         row = c.fetchone()
@@ -308,8 +419,13 @@ def db_get_last_reply_time(chat_id):
         return None
 
 def db_flag_content_ask(chat_id):
+    if chat_id in _in_memory_db["fan_profiles"]:
+        _in_memory_db["fan_profiles"][chat_id]["content_ask_count"] += 1
+    if not _db_available:
+        return
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('''
             UPDATE fan_profiles SET content_ask_count = content_ask_count + 1 WHERE chat_id = %s
@@ -321,8 +437,13 @@ def db_flag_content_ask(chat_id):
         log(f"DB flag content error: {e}")
 
 def db_flag_meetup_ask(chat_id):
+    if chat_id in _in_memory_db["fan_profiles"]:
+        _in_memory_db["fan_profiles"][chat_id]["meetup_ask_count"] += 1
+    if not _db_available:
+        return
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('''
             UPDATE fan_profiles SET meetup_ask_count = meetup_ask_count + 1 WHERE chat_id = %s
@@ -334,8 +455,23 @@ def db_flag_meetup_ask(chat_id):
         log(f"DB flag meetup error: {e}")
 
 def db_get_flagged_fans():
+    flagged = []
+    for chat_id, p in _in_memory_db["fan_profiles"].items():
+        if p["content_ask_count"] >= 1 or p["meetup_ask_count"] >= 2:
+            flagged.append({
+                "chat_id": chat_id,
+                "fan_name": p["fan_name"],
+                "content_asks": p["content_ask_count"],
+                "meetup_asks": p["meetup_ask_count"],
+                "type": p["fan_type"]
+            })
+    
+    if not _db_available:
+        return flagged
+    
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('''
             SELECT chat_id, fan_name, content_ask_count, meetup_ask_count, fan_type
@@ -349,11 +485,14 @@ def db_get_flagged_fans():
         return [{"chat_id": r[0], "fan_name": r[1], "content_asks": r[2], "meetup_asks": r[3], "type": r[4]} for r in rows]
     except Exception as e:
         log(f"DB flagged fans error: {e}")
-        return []
+        return flagged
 
 def db_get_stats():
+    if not _db_available:
+        return _in_memory_db["stats"]
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('SELECT key, value FROM bot_stats')
         rows = c.fetchall()
@@ -362,11 +501,15 @@ def db_get_stats():
         return {r[0]: r[1] for r in rows}
     except Exception as e:
         log(f"DB stats error: {e}")
-        return {}
+        return _in_memory_db["stats"]
 
 def db_update_stat(key, value):
+    _in_memory_db["stats"][key] = value
+    if not _db_available:
+        return
     try:
-        conn = get_db_conn()
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, sslmode='require')
         c = conn.cursor()
         c.execute('''
             INSERT INTO bot_stats (key, value) VALUES (%s, %s)
@@ -393,7 +536,7 @@ def save_token(refresh_token, access_token=None, expires_at=None):
         db_save_token('access_token', access_token)
     if expires_at:
         db_save_token('expires_at', expires_at)
-    log(f"Token saved to Postgres. Refresh: {refresh_token[:30]}...")
+    log(f"Token saved. Refresh: {refresh_token[:30]}...")
 
 def load_token():
     if memory_tokens["refresh_token"]:
@@ -404,13 +547,13 @@ def load_token():
         memory_tokens["refresh_token"] = db_refresh
         memory_tokens["access_token"] = db_load_token('access_token')
         memory_tokens["expires_at"] = db_load_token('expires_at')
-        log("Token loaded from PostgreSQL")
+        log("Token loaded from DB")
         return memory_tokens
     
     if RAILWAY_REFRESH_TOKEN:
         memory_tokens["refresh_token"] = RAILWAY_REFRESH_TOKEN
         db_save_token('refresh_token', RAILWAY_REFRESH_TOKEN)
-        log("Token loaded from Railway env, saved to PostgreSQL")
+        log("Token loaded from Railway env")
         return memory_tokens
     
     return {}
@@ -447,13 +590,17 @@ def refresh_fanvue_token():
             save_token(new_refresh or refresh_token, access_token, expires_at)
 
             if new_refresh and new_refresh != refresh_token:
-                log("Token rotated. Saved to PostgreSQL automatically.")
-                send_telegram_alert("🔄 Fanvue token rotated. Auto-saved to database. No action needed.")
+                log("Token rotated automatically.")
+                send_telegram_alert("🔄 Fanvue token rotated. Auto-saved. No action needed.")
 
             log("Got new access token")
             return access_token
         else:
-            log(f"Refresh error: {r.status_code} - {r.text[:200]}")
+            error_text = r.text[:200]
+            log(f"Refresh error: {r.status_code} - {error_text}")
+            if r.status_code == 400 and "invalid_grant" in error_text:
+                log("CRITICAL: Refresh token expired. Need manual re-auth.")
+                send_telegram_alert(f"🚨 CRITICAL: Refresh token expired!\n{error_text}\n\nYou need to re-authenticate manually.")
             return None
     except Exception as e:
         log(f"Refresh exception: {e}")
@@ -488,10 +635,11 @@ def get_chats():
     try:
         r = requests.get(url, headers=get_headers(), timeout=10)
         if r.status_code == 401:
+            log("Token expired during get_chats, refreshing...")
             save_token(load_token().get('refresh_token', ''), None, None)
             r = requests.get(url, headers=get_headers(), timeout=10)
         if r.status_code != 200:
-            log(f"Chats error: {r.status_code}")
+            log(f"Chats error: {r.status_code} - {r.text[:200]}")
             return []
         return r.json().get('data', [])
     except Exception as e:
@@ -518,9 +666,8 @@ def send_fanvue_message(chat_id, text):
         "Authorization": "Bearer " + (get_fanvue_token() or ""),
         "Content-Type": "application/json"
     }
-    safe_text = text.encode('utf-8').decode('utf-8')
-    payload = {"text": safe_text}
-    log(f"Sending: '{safe_text[:50]}' to {chat_id}")
+    payload = {"text": text}
+    log(f"Sending: '{text[:60]}' to {chat_id}")
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=10)
         log(f"Send status: {r.status_code}")
@@ -531,7 +678,7 @@ def send_fanvue_message(chat_id, text):
             log(f"Retry status: {r.status_code}")
         if r.status_code in [200, 201]:
             return True
-        log(f"Send error: {r.text[:200]}")
+        log(f"Send error: {r.status_code} - {r.text[:200]}")
         return False
     except Exception as e:
         log(f"Send error: {e}")
@@ -551,23 +698,25 @@ def ask_openai(prompt, fan_name=""):
             {"role": "system", "content": prompt},
             {"role": "user", "content": "írj vissza"}
         ],
-        "max_tokens": 150,
-        "temperature": 0.8
+        "max_tokens": 300,  # INCREASED from 150 to prevent cutoff
+        "temperature": 0.7
     }
     
     try:
-        r = requests.post(url, headers=headers, json=data, timeout=15)
+        r = requests.post(url, headers=headers, json=data, timeout=20)
         if r.status_code == 200:
             response_data = r.json()
             if 'choices' in response_data and len(response_data['choices']) > 0:
                 content = response_data['choices'][0]['message']['content']
+                # Clean up smart quotes but KEEP all Hungarian characters
                 content = content.replace(chr(8216), "'").replace(chr(8217), "'")
                 content = content.replace(chr(8220), '"').replace(chr(8221), '"')
-                allowed = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,!?;:-_áéíóöőúüűÁÉÍÓÖŐÚÜŰ\n')
-                content = ''.join(char for char in content if char in allowed)
-                return content.strip() if content else None
+                # DO NOT filter characters - let Hungarian text through
+                content = content.strip()
+                if content:
+                    return content
         else:
-            log(f"OpenAI error: {r.status_code}")
+            log(f"OpenAI error: {r.status_code} - {r.text[:200]}")
     except Exception as e:
         log(f"OpenAI error: {e}")
     
@@ -594,16 +743,16 @@ def build_prompt(fan_name, fan_type, history, last_msg, content_ask_count, meetu
     ]
     
     import random
-    random.seed(fan_name + str(len(history)))
+    random.seed(fan_name + str(datetime.now().day))
     current_question = random.choice(questions)
     
     phase_hints = ""
     if fan_type == 'new':
-        phase_hints = "ÚJ fan. Kérdezz tőle, építsd a beszélgetést. Ne túl sokat írj egyszerre."
+        phase_hints = "ÚJ fan. Kérdezz tőle, építsd a beszélgetést. Ne túl sokat írj egyszerre. 1-2 mondat."
     elif fan_type == 'warm':
-        phase_hints = "MELEG fan. Már ismeritek egymást. Kérdezz személyesebb dolgokat, flörtölj óvatosan."
+        phase_hints = "MELEG fan. Már ismeritek egymást. Kérdezz személyesebb dolgokat, flörtölj óvatosan. 2-3 mondat."
     elif fan_type == 'whale':
-        phase_hints = "WHALE fan. Sokat beszélgettetek. Emlékezz régi témákra, mélyebb érzelmek, különleges figyelem."
+        phase_hints = "WHALE fan. Sokat beszélgettetek. Emlékezz régi témákra, mélyebb érzelmek, különleges figyelem. Lehet hosszabb."
 
     sales_stall = ""
     if content_ask_count >= 1:
@@ -614,7 +763,7 @@ A fan tartalmat kért korábban. Halaszd el finoman:
 Soha ne mondj árat vagy részleteket. Te intézed az eladást."""
 
     history_text = ""
-    for h in history[-8:]:
+    for h in history[-10:]:  # INCREASED from 8 to 10 for better memory
         name, msg_text, was_replied, reply, ts = h
         if was_replied:
             history_text += f"{name}: {msg_text}\nJázmin: {reply}\n"
@@ -657,13 +806,13 @@ Ma használd ezt: "{current_question}"
 
 {sales_stall}
 
-ELŐZMÉNYEK:
+ELŐZMÉNYEK (utolsó 10 üzenet):
 {history_text}
 
 UTOLSÓ ÜZENET TŐLE ({fan_name}):
 {last_msg}
 
-Írj vissza Jázminként. Magyarul. Érthetően. Soha ne add ki, hogy AI vagy."""
+Írj vissza Jázminként. Magyarul. Érthetően. Soha ne add ki, hogy AI vagy. Csak a választ írd, semmi mást."""
 
     return prompt
 
@@ -674,19 +823,18 @@ def process_messages():
 
     chats = get_chats()
     if not chats:
+        log("No chats found")
         return 0
 
     replied = 0
     now = time.time()
 
+    log(f"Processing {len(chats)} chats...")
+
     for chat in chats:
         try:
             user = chat.get('user', {}) or {}
-            chat_id = user.get('uuid')
-            if not chat_id:
-                chat_id = chat.get('uuid')
-            if not chat_id:
-                chat_id = chat.get('id')
+            chat_id = user.get('uuid') or chat.get('uuid') or chat.get('id')
             
             if not chat_id:
                 continue
@@ -700,6 +848,9 @@ def process_messages():
             if not messages:
                 continue
 
+            log(f"Chat {fan_name}: {len(messages)} messages")
+
+            # Save all messages
             for msg in messages:
                 msg_id = msg.get('uuid', '')
                 sender = msg.get('sender', {}) or {}
@@ -716,40 +867,49 @@ def process_messages():
                     timestamp=timestamp
                 )
 
-            last_msg = messages[-1]
-            msg_id = last_msg.get('uuid')
-            sender = last_msg.get('sender', {}) or {}
+            # Find the LAST message from FAN (not from me)
+            fan_messages = [m for m in messages if m.get('sender', {}).get('uuid') != MY_UUID]
+            if not fan_messages:
+                continue
+            
+            last_fan_msg = fan_messages[-1]
+            msg_id = last_fan_msg.get('uuid')
+            sender = last_fan_msg.get('sender', {}) or {}
             sender_id = sender.get('uuid')
 
-            if sender_id == MY_UUID:
+            if not msg_id:
                 continue
 
+            # Check if already replied
             if db_is_message_processed(msg_id):
+                log(f"Already replied to {fan_name}, skipping")
                 continue
 
-            # COOLDOWN CHECK
+            # COOLDOWN CHECK — only skip if we replied VERY recently (30 sec)
             cooldown_ok = True
             
             last_reply = db_get_last_reply_time(chat_id)
             if last_reply:
                 try:
                     last_dt = last_reply if isinstance(last_reply, datetime) else datetime.fromisoformat(str(last_reply).replace('Z', '+00:00'))
-                    if (datetime.now() - last_dt).total_seconds() < 180:
+                    seconds_since = (datetime.now() - last_dt).total_seconds()
+                    if seconds_since < 30:  # REDUCED from 180 to 30 seconds
+                        log(f"COOLDOWN ({int(seconds_since)}s): {fan_name}, skipping")
                         cooldown_ok = False
-                except:
-                    pass
+                except Exception as e:
+                    log(f"Cooldown parse error: {e}")
             
-            if chat_id in _in_memory_cooldown:
-                if now - _in_memory_cooldown[chat_id] < 180:
+            if chat_id in _in_memory_db["cooldown"]:
+                if now - _in_memory_db["cooldown"][chat_id] < 30:
                     cooldown_ok = False
             
             if not cooldown_ok:
-                log(f"COOLDOWN: {fan_name}, skipping")
                 continue
 
             fan_name = sender.get('displayName') or 'ismeretlen'
-            text = last_msg.get('text') or ''
+            text = last_fan_msg.get('text') or ''
 
+            # Check triggers
             content_triggers = ['képet', 'videót', 'tartalmat', 'extrát', 'mennyibe', 'ár', 'fizetek', 'mutass', 'küldj', 'picit', 'doboz', 'csomag', 'premium', 'exkluzív']
             if any(trigger in text.lower() for trigger in content_triggers):
                 db_flag_content_ask(chat_id)
@@ -760,10 +920,12 @@ def process_messages():
             if any(trigger in text.lower() for trigger in meetup_triggers):
                 db_flag_meetup_ask(chat_id)
 
+            # Get profile and history
             profile = db_get_fan_profile(chat_id) or {}
             fan_type = profile.get('fan_type', 'new')
             history = db_get_chat_history(chat_id, limit=15)
 
+            # Build prompt and get reply
             prompt = build_prompt(
                 fan_name=fan_name,
                 fan_type=fan_type,
@@ -776,48 +938,24 @@ def process_messages():
             reply = ask_openai(prompt, fan_name)
 
             if reply and reply.strip():
-                import random
-                if len(reply) > 60 and random.random() < 0.3:
-                    mid = len(reply) // 2
-                    split_at = reply.find('.', mid-20, mid+20)
-                    if split_at == -1:
-                        split_at = reply.find('!', mid-20, mid+20)
-                    if split_at == -1:
-                        split_at = reply.find('?', mid-20, mid+20)
-                    if split_at == -1:
-                        split_at = mid
-                    else:
-                        split_at += 1
-                    
-                    part1 = reply[:split_at].strip()
-                    part2 = reply[split_at:].strip()
-                    
-                    if part1 and send_fanvue_message(chat_id, part1):
-                        time.sleep(1.5)
-                        if part2 and send_fanvue_message(chat_id, part2):
-                            bot_status["replies_sent"] += 1
-                            replied += 1
-                            db_mark_replied(msg_id, reply)
-                            db_update_last_reply_time(chat_id)
-                            db_update_stat('replies_sent', bot_status["replies_sent"])
-                            _in_memory_cooldown[chat_id] = now
-                            log(f"Split reply to {fan_name}")
+                # Send reply (NO splitting — send full message)
+                if send_fanvue_message(chat_id, reply):
+                    bot_status["replies_sent"] += 1
+                    replied += 1
+                    db_mark_replied(msg_id, reply)
+                    db_update_last_reply_time(chat_id)
+                    db_update_stat('replies_sent', bot_status["replies_sent"])
+                    log(f"✅ Replied to {fan_name}: {reply[:60]}")
                 else:
-                    if send_fanvue_message(chat_id, reply):
-                        bot_status["replies_sent"] += 1
-                        replied += 1
-                        db_mark_replied(msg_id, reply)
-                        db_update_last_reply_time(chat_id)
-                        db_update_stat('replies_sent', bot_status["replies_sent"])
-                        _in_memory_cooldown[chat_id] = now
-                        log(f"Replied to {fan_name}: {reply[:50]}")
+                    log(f"❌ Failed to send to {fan_name}")
 
-            time.sleep(2)
+            time.sleep(1)  # Small delay between fans
 
         except Exception as e:
-            log(f"Process error: {e}")
+            log(f"Process error for chat: {e}")
             continue
 
+    log(f"Loop complete: replied to {replied}/{len(chats)} fans")
     return replied
 
 # ========== ROUTES ==========
@@ -835,7 +973,13 @@ def status():
         "replies_sent": stats.get('replies_sent', 0),
         "paused": bot_status["paused"],
         "blocked_users": list(bot_status["blocked_users"]),
-        "recent_logs": bot_status["errors"][-10:]
+        "recent_logs": bot_status["errors"][-10:],
+        "db_available": _db_available,
+        "memory_storage": {
+            "messages": len(_in_memory_db["messages"]),
+            "profiles": len(_in_memory_db["fan_profiles"]),
+            "processed": len(_in_memory_db["processed_ids"])
+        }
     }
 
 @app.route('/trigger')
@@ -890,7 +1034,7 @@ def set_token():
         data = request.json
         if data and 'refresh_token' in data:
             save_token(data['refresh_token'])
-            return {"status": "ok", "message": "Token saved to PostgreSQL"}
+            return {"status": "ok", "message": "Token saved"}
         return {"status": "error", "message": "No token provided"}
     except Exception as e:
         log(f"Set token error: {e}")
@@ -902,8 +1046,18 @@ def get_current_token():
     refresh = tokens.get('refresh_token', '')
     return {
         "refresh_token": refresh[:50] + "..." if len(refresh) > 50 else refresh,
-        "note": "Auto-saved to PostgreSQL on rotation"
+        "note": "Auto-saved on rotation"
     }
+
+@app.route('/reset_memory', methods=['POST'])
+def reset_memory():
+    """Emergency reset — clears all in-memory data"""
+    _in_memory_db["messages"].clear()
+    _in_memory_db["fan_profiles"].clear()
+    _in_memory_db["processed_ids"].clear()
+    _in_memory_db["cooldown"].clear()
+    log("Memory reset by user")
+    return {"status": "ok", "message": "In-memory storage cleared"}
 
 # ========== AUTO-TRIGGER + INIT ==========
 def auto_loop():
@@ -921,9 +1075,8 @@ def auto_loop():
 # Initialize on startup
 try:
     init_database()
-    log("PostgreSQL initialized")
 except Exception as e:
-    log(f"Init error (tables may exist): {e}")
+    log(f"Init error: {e}")
 
 # Start auto-loop
 threading.Thread(target=auto_loop, daemon=True).start()
