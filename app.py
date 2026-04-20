@@ -40,7 +40,7 @@ def ask_kimi(message, fan_name, chat_history=""):
         return r.json()['choices'][0]['message']['content']
     except Exception as e:
         print(f"Kimi error: {e}")
-        return f"Szia {fan_name}! 😘 Mi újság?"
+        return f"Szia {fan_name}! Mi ujsag?"
 
 def send_fanvue(chat_id, text):
     url = f"https://api.fanvue.com/v1/chats/{chat_id}/messages"
@@ -83,14 +83,11 @@ def poll_for_messages():
         
         for chat in chats:
             chat_id = chat.get('id')
+            if not chat_id:
+                continue
+                
             messages = get_messages(chat_id)
             
             for msg in messages:
                 msg_id = msg.get('id')
                 sender = msg.get('sender', {})
-                
-                if sender.get('type') == 'fan' and msg_id not in processed_messages:
-                    fan_name = sender.get('displayName', 'babe')
-                    text = msg.get('text', '')
-                    
-                    print(f"New message from {fan_name}: {
