@@ -707,17 +707,9 @@ def process_messages():
             if chat_id in _in_memory_cooldown:
                 if now - _in_memory_cooldown[chat_id] < 180:
                     cooldown_ok = False
-            
-            if not cooldown_ok:
-                log(f"COOLDOWN: {fan_name}, skipping")
-                continue
+          # In-memory cooldown tracker (fallback when DB fails)
+_in_memory_cooldown = {}
 
-            # ... send reply ...
-
-            # Save to in-memory cooldown
-            _in_memory_cooldown[chat_id] = now
-
-            # ... rest ...
 def process_messages():
     if bot_status["paused"]:
         return 0
@@ -727,7 +719,89 @@ def process_messages():
         return 0
 
     replied = 0
+    now = time.time()
 
+    for chat in chats:
+        try:
+            user = chat.get('user', {}) or {}
+            chat_id = user.get('uuid')
+            if not chat_id:
+                chat_id = chat.get('uuid')
+            if not chat_id:
+                chat_id = chat.get('id')
+            
+            if not chat_id:
+                continue
+
+            fan_name = user.get('displayName') or 'ismeretlen'
+            handle = user.get('handle', '')
+            
+            # Update fan profile
+            db_update_fan_profile(chat_id, fan_name, handle)
+
+            messages = get_messages(chat_id)
+            if not messages:
+                continue
+
+            # Save all messages to DB
+            for msg in messages:
+                msg_id = msg.get('uuid', '')
+                sender = msg.get('sender', {}) or {}
+                sender_id = sender.get('uuid', '')
+                text = msg.get('text', '')
+                timestamp = msg.get('createdAt', datetime.now().isoformat())
+                
+                db_save_message(
+                    msg_id=msg_id,
+                    chat_id=chat_id,
+                    fan_name=sender.get('displayName', fan_name),
+                    sender_uuid=sender_id,
+                    text=text,
+                    timestamp=timestamp
+                )
+
+            # Get last message
+            last_msg = messages[-1]
+            msg_id = last_msg.get('uuid')
+            sender = last_msg.get('sender', {}) or {}
+            sender_id = sender.get('uuid')
+
+            # Skip if from me
+            if sender_id == MY_UUID:
+                continue
+
+            # Skip if already processed
+            if db_is_message_processed(msg_id):
+                continue
+
+            # COOLDOWN CHECK
+            cooldown_ok = True
+            
+            # Check DB first
+            last_reply = db_get_last_reply_time(chat_id)
+            if last_reply:
+                try:
+                    last_dt = last_reply if isinstance(last_reply, datetime) else datetime.fromisoformat(str(last_reply).replace('Z', '+00:00'))
+                    if (datetime.now() - last_dt).total_seconds() < 180:
+                        cooldown_ok = False
+                except:
+                    pass
+            
+            # Check in-memory fallback
+            if chat_id in _in_memory_cooldown:
+                if now - _in_memory_cooldown[chat_id] < 180:
+                    cooldown_ok = False
+            
+            if not cooldown_ok:
+                log(f"COOLDOWN: {fan_name}, skipping")
+                continue
+
+            fan_name = sender.get('displayName') or 'ismeretlen'
+            text = last_msg.get('text') or ''
+
+            # Check for content asks
+            content_triggers = ['képet', 'videót', 'tartalmat', 'extrát', 'mennyibe', 'ár', 'fizetek', 'mutass', 'küldj', 'picit', 'doboz', 'csomag', 'premium', 'exkluzív']
+            if any(trigger in text.lower()
     for chat in chats:
         try:
             user = chat.get('user', {}) or {}
