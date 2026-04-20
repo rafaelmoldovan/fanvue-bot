@@ -72,8 +72,8 @@ class FanvueBot:
     def login(self):
         try:
             log("Logging into Fanvue...")
-            self.page.goto("https://fanvue.com/login", wait_until="domcontentloaded")
-            time.sleep(5)
+            self.page.goto("https://fanvue.com/login", wait_until="networkidle")
+            time.sleep(8)
 
             # Take screenshot to see what page looks like
             try:
@@ -85,6 +85,26 @@ class FanvueBot:
             # Log page info
             log(f"Page title: {self.page.title()}")
             log(f"Page URL: {self.page.url}")
+
+            # Wait for inputs to appear dynamically
+            log("Waiting for inputs to load...")
+            try:
+                self.page.wait_for_selector('input', timeout=10000)
+                log("Inputs found")
+            except:
+                log("No inputs found after waiting")
+
+            # Also check for iframes
+            frames = self.page.frames
+            log(f"Number of frames: {len(frames)}")
+            for i, frame in enumerate(frames):
+                try:
+                    frame_url = frame.url
+                    log(f"Frame {i}: {frame_url}")
+                    frame_inputs = frame.query_selector_all('input')
+                    log(f"Frame {i} has {len(frame_inputs)} inputs")
+                except:
+                    continue
 
             # Try multiple selectors for email
             email_selectors = [
