@@ -1,25 +1,27 @@
 from flask import Flask, request
-import requests
 import os
-import base64
+import json
+import time
+import requests
 from datetime import datetime, timedelta
+from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 
-FANVUE_CLIENT_ID = os.environ.get('FANVUE_CLIENT_ID')
-FANVUE_CLIENT_SECRET = os.environ.get('FANVUE_CLIENT_SECRET')
-FANVUE_REFRESH_TOKEN = os.environ.get('FANVUE_REFRESH_TOKEN')
+# Config
+FANVUE_EMAIL = os.environ.get('FANVUE_EMAIL')
+FANVUE_PASSWORD = os.environ.get('FANVUE_PASSWORD')
 KIMI_API_KEY = os.environ.get('KIMI_API_KEY')
 CREATOR_NAME = os.environ.get('CREATOR_NAME', 'Creator')
-
-fanvue_access_token = None
-token_expires_at = None
 
 bot_status = {
     "started": datetime.now().isoformat(),
     "last_check": "never",
     "messages_found": 0,
-    "errors": []
+    "replies_sent": 0,
+    "errors": [],
+    "paused": False,
+    "blocked_users": set()
 }
 
 def log(msg):
@@ -30,245 +32,294 @@ def log(msg):
     if len(bot_status["errors"]) > 100:
         bot_status["errors"] = bot_status["errors"][-100:]
 
-log("FANVUE_REFRESH_TOKEN: " + ("SET" if FANVUE_REFRESH_TOKEN else "EMPTY"))
-log("KIMI_API_KEY: " + ("SET" if KIMI_API_KEY else "EMPTY"))
+log("BOT STARTING")
+log(f"CREATOR_NAME: {CREATOR_NAME}")
+log(f"FANVUE_EMAIL: {'SET' if FANVUE_EMAIL else 'EMPTY'}")
+log(f"KIMI_API_KEY: {'SET' if KIMI_API_KEY else 'EMPTY'}")
 
-processed_messages = set()
-pending_messages = {}
+class FanvueBot:
+    def __init__(self):
+        self.browser = None
+        self.context = None
+        self.page = None
+        self.logged_in = False
+        self.last_messages = {}
 
-def get_basic_auth_header():
-    credentials = f"{FANVUE_CLIENT_ID}:{FANVUE_CLIENT_SECRET}"
-    encoded = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
-    return f"Basic {encoded}"
-
-def refresh_fanvue_token():
-    global fanvue_access_token, token_expires_at
-
-    url = "https://auth.fanvue.com/oauth2/token"
-
-    payload = {
-        "grant_type": "refresh_token",
-        "refresh_token": FANVUE_REFRESH_TOKEN
-    }
-
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Authorization": get_basic_auth_header()
-    }
-
-    try:
-        r = requests.post(url, data=payload, headers=headers, timeout=10)
-        log(f"Refresh status: {r.status_code}")
-        if r.status_code == 200:
-            data = r.json()
-            fanvue_access_token = data.get('access_token')
-            new_refresh = data.get('refresh_token')
-            expires_in = data.get('expires_in', 3600)
-            token_expires_at = datetime.now() + timedelta(seconds=expires_in - 60)
-            log("Got new Fanvue access token via refresh")
-            if new_refresh and new_refresh != FANVUE_REFRESH_TOKEN:
-                log("Refresh token was rotated - update your Railway variable!")
-                log(f"New refresh token: {new_refresh[:50]}...")
-            return fanvue_access_token
-        else:
-            log(f"Refresh error: {r.status_code} - {r.text[:200]}")
-            return None
-    except Exception as e:
-        log(f"Refresh exception: {e}")
-        return None
-
-def get_fanvue_token():
-    if fanvue_access_token and token_expires_at and datetime.now() < token_expires_at:
-        return fanvue_access_token
-    return refresh_fanvue_token()
-
-def get_headers():
-    token = get_fanvue_token()
-    return {
-        "Authorization": "Bearer " + (token or ""),
-        "X-Fanvue-API-Version": "2025-06-26",
-        "Content-Type": "application/json"
-    }
-
-def get_chats():
-    url = "https://api.fanvue.com/chats"
-    try:
-        r = requests.get(url, headers=get_headers(), timeout=10)
-        if r.status_code == 401:
-            global fanvue_access_token
-            fanvue_access_token = None
-            r = requests.get(url, headers=get_headers(), timeout=10)
-        if r.status_code != 200:
-            log(f"Chats error: {r.status_code}")
-            return []
-        return r.json().get('data', [])
-    except Exception as e:
-        log(f"Get chats error: {e}")
-        return []
-
-def get_messages(chat_id):
-    url = f"https://api.fanvue.com/chats/{chat_id}/messages"
-    try:
-        r = requests.get(url, headers=get_headers(), timeout=10)
-        if r.status_code == 401:
-            global fanvue_access_token
-            fanvue_access_token = None
-            r = requests.get(url, headers=get_headers(), timeout=10)
-        if r.status_code != 200:
-            return []
-        return r.json().get('data', [])
-    except Exception as e:
-        log(f"Get messages error: {e}")
-        return []
-
-def send_fanvue_message(chat_id, text):
-    url = f"https://api.fanvue.com/chats/{chat_id}/message"
-    headers = {
-        "Authorization": "Bearer " + (get_fanvue_token() or ""),
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "content": text
-    }
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        log(f"Send status: {r.status_code}")
-        if r.status_code == 401:
-            global fanvue_access_token
-            fanvue_access_token = None
-            headers["Authorization"] = "Bearer " + (get_fanvue_token() or "")
-            r = requests.post(url, headers=headers, json=payload, timeout=10)
-            log(f"Retry status: {r.status_code}")
-        if r.status_code == 200 or r.status_code == 201:
+    def start(self):
+        try:
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            self.context = self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            )
+            self.page = self.context.new_page()
+            log("Browser started")
             return True
-        log(f"Send error body: {r.text[:200]}")
-        return False
-    except Exception as e:
-        log(f"Send error: {e}")
-        return False
+        except Exception as e:
+            log(f"Browser start error: {e}")
+            return False
 
-def ask_kimi(message, fan_name, chat_history="", fan_known_name=""):
-    url = "https://api.moonshot.ai/v1/chat/completions"
-    headers = {
-        "Authorization": "Bearer " + KIMI_API_KEY,
-        "Content-Type": "application/json"
-    }
-    name_to_use = fan_known_name if fan_known_name else ""
-    system = "You are " + CREATOR_NAME + ", a friendly creator. Reply in Hungarian. Keep it short (max 30 words). Be sweet and casual. Fan name: " + name_to_use
-    data = {
-        "model": "kimi-latest",
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": message}
-        ],
-        "max_tokens": 100
-    }
-    try:
-        r = requests.post(url, headers=headers, json=data, timeout=15)
-        log(f"Kimi status: {r.status_code}")
-        if r.status_code == 200:
-            response_data = r.json()
-            log(f"Kimi response: {str(response_data)[:200]}")
-            content = response_data['choices'][0]['message']['content']
-            if content and content.strip():
-                return content.strip()
+    def login(self):
+        try:
+            log("Logging into Fanvue...")
+            self.page.goto("https://fanvue.com/login", wait_until="networkidle")
+            time.sleep(2)
+
+            # Fill email
+            self.page.fill('input[type="email"]', FANVUE_EMAIL)
+            time.sleep(0.5)
+
+            # Fill password
+            self.page.fill('input[type="password"]', FANVUE_PASSWORD)
+            time.sleep(0.5)
+
+            # Click login
+            self.page.click('button[type="submit"]')
+            time.sleep(5)
+
+            # Check if logged in
+            current_url = self.page.url
+            log(f"Current URL after login: {current_url}")
+
+            if "login" not in current_url:
+                log("Login successful!")
+                self.logged_in = True
+                return True
             else:
-                log("Kimi returned empty content")
+                log("Login failed - still on login page")
+                # Take screenshot for debugging
+                self.page.screenshot(path="/tmp/login_error.png")
+                return False
+        except Exception as e:
+            log(f"Login error: {e}")
+            return False
+
+    def get_messages(self):
+        try:
+            self.page.goto("https://fanvue.com/messages", wait_until="networkidle")
+            time.sleep(3)
+
+            # Look for chat items - try different selectors
+            selectors = [
+                '[data-testid="chat-list-item"]',
+                '.chat-list-item',
+                '[class*="chat"]',
+                'a[href*="/messages/"]'
+            ]
+
+            chats = []
+            for selector in selectors:
+                chats = self.page.query_selector_all(selector)
+                if chats:
+                    log(f"Found {len(chats)} chats with selector: {selector}")
+                    break
+
+            if not chats:
+                log("No chats found")
+                return []
+
+            new_messages = []
+            for i, chat in enumerate(chats[:10]):  # Check first 10 chats
+                try:
+                    # Get fan name
+                    name_selectors = ['[data-testid="chat-name"]', '.chat-name', 'h3', 'h4', 'span']
+                    fan_name = None
+                    for sel in name_selectors:
+                        elem = chat.query_selector(sel)
+                        if elem:
+                            fan_name = elem.inner_text()
+                            break
+
+                    if not fan_name:
+                        fan_name = f"User_{i}"
+
+                    # Check for unread indicator
+                    has_unread = False
+                    unread_selectors = ['[data-testid="unread-badge"]', '.unread', '[class*="unread"]']
+                    for sel in unread_selectors:
+                        if chat.query_selector(sel):
+                            has_unread = True
+                            break
+
+                    # Click to open chat
+                    chat.click()
+                    time.sleep(2)
+
+                    # Get messages in chat
+                    msg_selectors = [
+                        '[data-testid="message-bubble"]',
+                        '.message-bubble',
+                        '[class*="message"]'
+                    ]
+
+                    messages = []
+                    for sel in msg_selectors:
+                        messages = self.page.query_selector_all(sel)
+                        if messages:
+                            break
+
+                    # Get last few messages
+                    for msg in messages[-3:]:
+                        try:
+                            text = msg.inner_text()
+                            # Check if it's from fan (not from me)
+                            is_me = msg.get_attribute("data-from-me") or "me" in str(msg.get_attribute("class"))
+
+                            if text and not is_me:
+                                msg_id = f"{fan_name}_{hash(text)}"
+                                if msg_id not in self.last_messages:
+                                    self.last_messages[msg_id] = True
+                                    new_messages.append({
+                                        "fan_name": fan_name,
+                                        "text": text,
+                                        "chat_index": i
+                                    })
+                                    log(f"New message from {fan_name}: {text[:50]}")
+                        except:
+                            continue
+
+                    # Go back
+                    self.page.goto("https://fanvue.com/messages", wait_until="networkidle")
+                    time.sleep(2)
+
+                except Exception as e:
+                    log(f"Chat parse error: {e}")
+                    continue
+
+            return new_messages
+
+        except Exception as e:
+            log(f"Get messages error: {e}")
+            return []
+
+    def send_reply(self, text):
+        try:
+            # Find input
+            input_selectors = [
+                '[data-testid="message-input"]',
+                'textarea[placeholder*="message"]',
+                'textarea[placeholder*="Message"]',
+                'input[type="text"]'
+            ]
+
+            input_box = None
+            for sel in input_selectors:
+                input_box = self.page.query_selector(sel)
+                if input_box:
+                    break
+
+            if input_box:
+                input_box.fill(text)
+                time.sleep(0.5)
+
+                # Press Enter
+                self.page.keyboard.press("Enter")
+                time.sleep(1)
+
+                log(f"Sent reply: {text[:50]}")
+                return True
+            else:
+                log("Could not find message input")
+                return False
+
+        except Exception as e:
+            log(f"Send error: {e}")
+            return False
+
+    def ask_kimi(self, message, fan_name):
+        url = "https://api.moonshot.ai/v1/chat/completions"
+        headers = {
+            "Authorization": "Bearer " + KIMI_API_KEY,
+            "Content-Type": "application/json"
+        }
+
+        system = f"You are {CREATOR_NAME}. Reply in Hungarian. Keep under 30 words. Be sweet, casual, slightly flirty. Fan name: {fan_name}"
+
+        data = {
+            "model": "kimi-latest",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": message}
+            ],
+            "max_tokens": 100
+        }
+
+        try:
+            r = requests.post(url, headers=headers, json=data, timeout=15)
+            log(f"Kimi status: {r.status_code}")
+
+            if r.status_code == 200:
+                response = r.json()
+                content = response['choices'][0]['message']['content']
+                if content and content.strip():
+                    return content.strip()
+                else:
+                    log("Kimi returned empty content")
+                    return "Szia! 😊 Mi ujsag?"
+            else:
+                log(f"Kimi error: {r.status_code} - {r.text[:200]}")
                 return "Szia! 😊 Mi ujsag?"
-        else:
-            log(f"Kimi error: {r.status_code} - {r.text[:200]}")
+
+        except Exception as e:
+            log(f"Kimi exception: {e}")
             return "Szia! 😊 Mi ujsag?"
-    except Exception as e:
-        log(f"Kimi exception: {e}")
-        return "Szia! 😊 Mi ujsag?"
 
-def process_pending_messages():
-    now = datetime.now()
-    replied = 0
-    items = list(pending_messages.items())[:3]
-    for msg_id, pending in items:
-        msg_time = pending["time"]
-        if now - msg_time >= timedelta(minutes=2):
-            msg_data = pending["data"]
-            chat_id = msg_data["chat_id"]
-            fan_name = msg_data["fan_name"]
-            text = msg_data["text"]
-            history = msg_data["history"]
-            known_name = msg_data["known_name"]
-            log(f"Replying to {fan_name}")
-            reply = ask_kimi(text, fan_name, history, known_name)
-            if send_fanvue_message(chat_id, reply):
-                processed_messages.add(msg_id)
-                del pending_messages[msg_id]
+    def process_messages(self):
+        if bot_status["paused"]:
+            log("Bot is paused")
+            return 0
+
+        if not self.logged_in:
+            if not self.login():
+                return 0
+
+        new_msgs = self.get_messages()
+        replied = 0
+
+        for msg in new_msgs:
+            fan_name = msg["fan_name"]
+            text = msg["text"]
+
+            if fan_name in bot_status["blocked_users"]:
+                log(f"Skipping blocked user: {fan_name}")
+                continue
+
+            log(f"Processing message from {fan_name}: {text[:50]}")
+            bot_status["messages_found"] += 1
+
+            # Generate reply
+            reply = self.ask_kimi(text, fan_name)
+
+            # Click on chat again
+            chats = self.page.query_selector_all('a[href*="/messages/"]')
+            if msg["chat_index"] < len(chats):
+                chats[msg["chat_index"]].click()
+                time.sleep(2)
+
+            if self.send_reply(reply):
+                bot_status["replies_sent"] += 1
                 replied += 1
-                log(f"Replied: {reply[:50]}")
-            else:
-                log("Send failed, will retry")
-                break
-    return replied
 
-def scan_for_new_messages():
-    chats = get_chats()
-    if not chats:
-        return 0
-    found = 0
-    fan_known_names = {}
-    my_uuid = '38a392fc-a751-49b3-9d74-01ac6447c490'
-    for chat in chats[-10:]:
-        user = chat.get('user', {}) or {}
-        chat_id = user.get('uuid')
-        if not chat_id:
-            continue
-        messages = get_messages(chat_id)
-        for msg in messages:
-            msg_id = msg.get('uuid')
-            sender = msg.get('sender', {}) or {}
-            fan_id = sender.get('uuid', '')
-            is_fan = sender.get('uuid') != my_uuid
-            is_new = msg_id not in processed_messages and msg_id not in pending_messages
-            if is_fan and is_new:
-                fan_name = sender.get('displayName') or 'babe'
-                text = msg.get('text') or ''
-                log(f"NEW MSG from {fan_name}: {text[:50]}")
-                bot_status["messages_found"] += 1
-                found += 1
-                text_lower = text.lower()
-                if "nevem" in text_lower or "hívnak" in text_lower:
-                    import re
-                    match = re.search(r'(?:nevem|hívnak|a nevem)\s+(\w+)', text_lower)
-                    if match:
-                        fan_known_names[fan_id] = match.group(1).capitalize()
-                known_name = fan_known_names.get(fan_id, "")
-                recent_msgs = messages[-5:] if len(messages) > 5 else messages
-                history = ""
-                for m in recent_msgs:
-                    s = m.get('sender', {}) or {}
-                    role = "Fan" if s.get('uuid') != my_uuid else "You"
-                    m_text = s.get('text') or ''
-                    history += role + ": " + m_text + "\n"
-                pending_messages[msg_id] = {
-                    "time": datetime.now(),
-                    "data": {
-                        "chat_id": chat_id,
-                        "fan_name": fan_name,
-                        "text": text,
-                        "history": history,
-                        "known_name": known_name
-                    }
-                }
-                log(f"Added to pending")
-    return found
+            time.sleep(3)  # Delay between replies
 
-def process_all_chats():
-    log("Processing...")
-    bot_status["last_check"] = datetime.now().isoformat()
-    replied = process_pending_messages()
-    found = scan_for_new_messages()
-    return replied + found
+        return replied
+
+    def close(self):
+        if self.browser:
+            self.browser.close()
+        if hasattr(self, 'playwright') and self.playwright:
+            self.playwright.stop()
+
+# Global bot instance
+bot = FanvueBot()
 
 @app.route('/')
 def home():
-    return f"Bot running! Pending: {len(pending_messages)}. Use /trigger /clear /status"
+    return f"Bot running! Replies: {bot_status['replies_sent']}. Use /trigger /pause /resume /status"
 
 @app.route('/status')
 def status():
@@ -276,42 +327,60 @@ def status():
         "started": bot_status["started"],
         "last_check": bot_status["last_check"],
         "messages_found": bot_status["messages_found"],
-        "pending_replies": len(pending_messages),
+        "replies_sent": bot_status["replies_sent"],
+        "paused": bot_status["paused"],
+        "blocked_users": list(bot_status["blocked_users"]),
         "recent_logs": bot_status["errors"][-10:]
     }
 
 @app.route('/trigger')
-def trigger_poll():
+def trigger():
     try:
-        count = process_all_chats()
+        if not bot.browser:
+            if not bot.start():
+                return {"status": "error", "error": "Could not start browser"}
+            bot.login()
+
+        bot_status["last_check"] = datetime.now().isoformat()
+        count = bot.process_messages()
+
         return {
             "status": "ok",
-            "processed": count,
-            "pending": len(pending_messages)
+            "replied": count,
+            "total_replies": bot_status["replies_sent"]
         }
     except Exception as e:
         log(f"Trigger error: {e}")
         return {"status": "error", "error": str(e)}
 
-@app.route('/clear')
-def clear_pending():
-    pending_messages.clear()
-    processed_messages.clear()
-    return {"status": "ok", "message": "Cleared"}
+@app.route('/pause')
+def pause():
+    bot_status["paused"] = True
+    return {"status": "paused"}
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    return 'OK', 200
+@app.route('/resume')
+def resume():
+    bot_status["paused"] = False
+    return {"status": "resumed"}
 
-@app.route('/callback')
-def callback():
-    return "OAuth callback"
+@app.route('/block')
+def block_user():
+    user = request.args.get('user')
+    if user:
+        bot_status["blocked_users"].add(user)
+        return {"status": "blocked", "user": user}
+    return {"status": "error", "message": "No user specified"}
+
+@app.route('/unblock')
+def unblock_user():
+    user = request.args.get('user')
+    if user:
+        bot_status["blocked_users"].discard(user)
+        return {"status": "unblocked", "user": user}
+    return {"status": "error", "message": "No user specified"}
 
 if __name__ == '__main__':
     log("=" * 50)
-    log("BOT STARTING")
+    log("PLAYWRIGHT BOT STARTING")
     log("=" * 50)
-    pending_messages.clear()
-    processed_messages.clear()
-    log("Cleared old messages on startup")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
