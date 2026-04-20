@@ -122,13 +122,12 @@ def get_messages(chat_id):
         return []
 
 def send_fanvue_message(chat_id, text):
-    url = "https://api.fanvue.com/v1/chat-messages"
+    url = f"https://api.fanvue.com/chats/{chat_id}/message"
     headers = {
         "Authorization": "Bearer " + (get_fanvue_token() or ""),
         "Content-Type": "application/json"
     }
     payload = {
-        "recipientUuid": chat_id,
         "content": text
     }
     try:
@@ -149,7 +148,7 @@ def send_fanvue_message(chat_id, text):
         return False
 
 def ask_kimi(message, fan_name, chat_history="", fan_known_name=""):
-    url = "https://api.moonshot.cn/v1/chat/completions"
+    url = "https://api.moonshot.ai/v1/chat/completions"
     headers = {
         "Authorization": "Bearer " + KIMI_API_KEY,
         "Content-Type": "application/json"
