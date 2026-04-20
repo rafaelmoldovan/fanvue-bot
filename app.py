@@ -11,7 +11,6 @@ FANVUE_TOKEN = os.environ.get('FANVUE_TOKEN')
 KIMI_API_KEY = os.environ.get('KIMI_API_KEY')
 CREATOR_NAME = os.environ.get('CREATOR_NAME', 'Creator')
 
-# Global status
 bot_status = {
     "started": datetime.now().isoformat(),
     "last_check": "never",
@@ -31,8 +30,7 @@ log("FANVUE_TOKEN: " + ("SET" if FANVUE_TOKEN else "EMPTY"))
 log("KIMI_API_KEY: " + ("SET" if KIMI_API_KEY else "EMPTY"))
 
 processed_messages = set()
-pending_messages = {}  # msg_id -> {"time": datetime, "data": {...}}
-bot_start_time = datetime.now().isoformat()
+pending_messages = {}
 
 def get_headers():
     return {
@@ -40,19 +38,6 @@ def get_headers():
         "X-Fanvue-API-Version": "2025-06-26",
         "Content-Type": "application/json"
     }
-
-def safe_str(value):
-    return str(value) if value is not None else ""
-
-def test_fanvue_connection():
-    url = "https://api.fanvue.com/chats"
-    try:
-        r = requests.get(url, headers=get_headers(), timeout=10)
-        log(f"Test connection status: {r.status_code}")
-        return r.status_code, r.text
-    except Exception as e:
-        log(f"Test connection error: {e}")
-        return 0, str(e)
 
 def get_chats():
     url = "https://api.fanvue.com/chats"
@@ -78,8 +63,12 @@ def get_messages(chat_id):
         return []
 
 def send_fanvue_message(chat_id, text):
-    url = "https://api.fanvue.com/chat-messages"
-    headers = get_headers()
+    # Try the correct endpoint
+    url = "https://api.fanvue.com/v1/chat-messages"
+    headers = {
+        "Authorization": "Bearer " + FANVUE_TOKEN,
+        "Content-Type": "application/json"
+    }
     payload = {
         "recipientUuid": chat_id,
         "content": text
@@ -87,12 +76,16 @@ def send_fanvue_message(chat_id, text):
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=10)
         log(f"Send status: {r.status_code}")
-        return r.status_code == 200
+        if r.status_code == 200 or r.status_code == 201:
+            return True
+        log(f"Send error body: {r.text[:200]}")
+        return False
     except Exception as e:
         log(f"Send error: {e}")
         return False
 
 def ask_kimi(message, fan_name, chat_history="", fan_known_name=""):
+    # Use Kimi API with your key
     url = "https://api.moonshot.cn/v1/chat/completions"
     headers = {
         "Authorization": "Bearer " + KIMI_API_KEY,
@@ -101,7 +94,7 @@ def ask_kimi(message, fan_name, chat_history="", fan_known_name=""):
     
     name_to_use = fan_known_name if fan_known_name else ""
     
-    system = "You are " + CREATOR_NAME + ". Reply to fan messages naturally in Hungarian.\n\nPERSONALITY:\n- Act innocent, sweet, slightly shy but curious\n- Make them feel special and understood\n- Build emotional connection - make them fall in love or feel deeply attracted\n- Never use their username (like 'john123') - only use their real name if they told you before\n- Take your time - reply thoughtfully, not instantly\n\nRULES:\n- Chat naturally, ask questions about them\n- Show genuine interest in their life\n- Be flirty but subtle - let them chase you\n- NEVER upsell photos or PPV directly\n- You can hint at things vaguely but NEVER push sales\n- Keep responses 20-40 words\n- Use emojis sparingly (1-2 max)\n\nGOAL:\nMake them emotionally invested. They should feel like they're getting to know the real you. Build anticipation.\n\nFan name to use: " + name_to_use + "\nChat history: " + chat_history
+    system = "You are " + CREATOR_NAME + ". Reply naturally in Hungarian. Fan name: " + name_to_use + ". Keep under 40 words. Be innocent, sweet, slightly shy. Build emotional connection. NEVER upsell. Chat history: " + chat_history
     
     data = {
         "model": "kimi-k2.5",
@@ -113,33 +106,26 @@ def ask_kimi(message, fan_name, chat_history="", fan_known_name=""):
     }
     
     try:
-        r = requests.post(url, headers=headers, json=data, timeout=30)
-        r.raise_for_status()
-        return r.json()['choices'][0]['message']['content']
+        r = requests.post(url, headers=headers, json=data, timeout=15)
+        if r.status_code == 200:
+            return r.json()['choices'][0]['message']['content']
+        else:
+            log(f"Kimi error: {r.status_code}")
+            return "Szia! 😊 Mi ujsag?"
     except Exception as e:
-        log(f"Kimi error: {e}")
+        log(f"Kimi exception: {e}")
         return "Szia! 😊 Mi ujsag?"
 
-def extract_name(text):
-    if not text:
-        return ""
-    text_lower = text.lower()
-    if "nevem" in text_lower or "hívnak" in text_lower or "a nevem" in text_lower:
-        import re
-        match = re.search(r'(?:nevem|hívnak|a nevem)\s+(\w+)', text_lower)
-        if match:
-            return match.group(1).capitalize()
-    return ""
-
 def process_pending_messages():
-    """Check pending messages and reply if 2 minutes passed"""
     now = datetime.now()
     replied = 0
     
-    for msg_id, pending in list(pending_messages.items()):
+    # Only process 5 pending messages per call to avoid timeout
+    items = list(pending_messages.items())[:5]
+    
+    for msg_id, pending in items:
         msg_time = pending["time"]
         if now - msg_time >= timedelta(minutes=2):
-            # Time to reply!
             msg_data = pending["data"]
             chat_id = msg_data["chat_id"]
             fan_name = msg_data["fan_name"]
@@ -147,24 +133,28 @@ def process_pending_messages():
             history = msg_data["history"]
             known_name = msg_data["known_name"]
             
-            log(f"Replying to pending message from {fan_name}")
+            log(f"Replying to {fan_name}")
             reply = ask_kimi(text, fan_name, history, known_name)
-            send_fanvue_message(chat_id, reply)
-            processed_messages.add(msg_id)
-            del pending_messages[msg_id]
-            replied += 1
-            log(f"Replied: {reply[:50]}")
+            
+            if send_fanvue_message(chat_id, reply):
+                processed_messages.add(msg_id)
+                del pending_messages[msg_id]
+                replied += 1
+                log(f"Replied: {reply[:50]}")
+            else:
+                log("Send failed, will retry")
+                break  # Stop if send fails
     
     return replied
 
 def scan_for_new_messages():
-    """Scan for new messages and add to pending"""
     chats = get_chats()
     if not chats:
         return 0
     
     found = 0
     fan_known_names = {}
+    my_uuid = '38a392fc-a751-49b3-9d74-01ac6447c490'
     
     for chat in chats:
         user = chat.get('user', {}) or {}
@@ -179,7 +169,6 @@ def scan_for_new_messages():
             sender = msg.get('sender', {}) or {}
             fan_id = sender.get('uuid', '')
             
-            my_uuid = '38a392fc-a751-49b3-9d74-01ac6447c490'
             is_fan = sender.get('uuid') != my_uuid
             is_new = msg_id not in processed_messages and msg_id not in pending_messages
             
@@ -191,9 +180,13 @@ def scan_for_new_messages():
                 bot_status["messages_found"] += 1
                 found += 1
                 
-                extracted = extract_name(text)
-                if extracted and fan_id not in fan_known_names:
-                    fan_known_names[fan_id] = extracted
+                # Extract name if they share it
+                text_lower = text.lower()
+                if "nevem" in text_lower or "hívnak" in text_lower:
+                    import re
+                    match = re.search(r'(?:nevem|hívnak|a nevem)\s+(\w+)', text_lower)
+                    if match:
+                        fan_known_names[fan_id] = match.group(1).capitalize()
                 
                 known_name = fan_known_names.get(fan_id, "")
                 
@@ -205,7 +198,6 @@ def scan_for_new_messages():
                     m_text = s.get('text') or ''
                     history += role + ": " + m_text + "\n"
                 
-                # Add to pending with current time
                 pending_messages[msg_id] = {
                     "time": datetime.now(),
                     "data": {
@@ -216,37 +208,25 @@ def scan_for_new_messages():
                         "known_name": known_name
                     }
                 }
-                log(f"Added to pending (will reply in 2 min)")
+                log(f"Added to pending")
     
     return found
 
 def process_all_chats():
-    """Main processing: scan new + reply to pending"""
-    log("Processing chats...")
+    log("Processing...")
     bot_status["last_check"] = datetime.now().isoformat()
     
-    # First, reply to any pending messages that are ready
+    # First reply to pending (max 5)
     replied = process_pending_messages()
     
-    # Then, scan for new messages
+    # Then scan for new (limit to avoid timeout)
     found = scan_for_new_messages()
     
-    total = replied + (1 if found > 0 else 0)
-    return total
+    return replied + found
 
 @app.route('/')
 def home():
-    pending_count = len(pending_messages)
-    return f"Bot running! Pending replies: {pending_count}. Use /trigger to check, /status for info."
-
-@app.route('/test')
-def test_api():
-    status, text = test_fanvue_connection()
-    return {
-        "status_code": status,
-        "response_preview": text[:200],
-        "token_prefix": FANVUE_TOKEN[:20] if FANVUE_TOKEN else "EMPTY"
-    }
+    return f"Bot running! Pending: {len(pending_messages)}. Use /trigger /clear /status"
 
 @app.route('/status')
 def status():
@@ -255,25 +235,27 @@ def status():
         "last_check": bot_status["last_check"],
         "messages_found": bot_status["messages_found"],
         "pending_replies": len(pending_messages),
-        "recent_logs": bot_status["errors"][-20:]
+        "recent_logs": bot_status["errors"][-10:]
     }
 
 @app.route('/trigger')
 def trigger_poll():
     try:
         count = process_all_chats()
-        pending_count = len(pending_messages)
         return {
             "status": "ok",
             "processed": count,
-            "pending_replies": pending_count,
-            "message": f"{pending_count} messages waiting for 2-min delay"
+            "pending": len(pending_messages)
         }
     except Exception as e:
         log(f"Trigger error: {e}")
-        import traceback
-        log(traceback.format_exc())
         return {"status": "error", "error": str(e)}
+
+@app.route('/clear')
+def clear_pending():
+    pending_messages.clear()
+    processed_messages.clear()
+    return {"status": "ok", "message": "Cleared"}
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
