@@ -6,7 +6,6 @@ import base64
 import time
 import threading
 import psycopg
-psycopg.connect
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
