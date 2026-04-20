@@ -11,19 +11,24 @@ FANVUE_TOKEN = os.environ.get('FANVUE_TOKEN')
 KIMI_API_KEY = os.environ.get('KIMI_API_KEY')
 CREATOR_NAME = os.environ.get('CREATOR_NAME', 'Creator')
 
-# Simple file logging for Railway
+# Global status
+bot_status = {
+    "started": datetime.now().isoformat(),
+    "last_check": "never",
+    "messages_found": 0,
+    "errors": []
+}
+
 def log(msg):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {msg}"
     print(line, flush=True)
-    try:
-        with open('/tmp/bot.log', 'a') as f:
-            f.write(line + '\n')
-    except:
-        pass
+    bot_status["errors"].append(line)
+    if len(bot_status["errors"]) > 50:
+        bot_status["errors"] = bot_status["errors"][-50:]
 
-log("FANVUE_TOKEN loaded: " + (FANVUE_TOKEN[:20] + "..." if FANVUE_TOKEN else "EMPTY!"))
-log("KIMI_API_KEY loaded: " + (KIMI_API_KEY[:20] + "..." if KIMI_API_KEY else "EMPTY!"))
+log("FANVUE_TOKEN: " + ("SET" if FANVUE_TOKEN else "EMPTY"))
+log("KIMI_API_KEY: " + ("SET" if KIMI_API_KEY else "EMPTY"))
 
 processed_messages = set()
 bot_start_time = datetime.now().isoformat()
@@ -95,16 +100,11 @@ def get_chats():
     url = "https://api.fanvue.com/v1/chats"
     headers = {"Authorization": "Bearer " + FANVUE_TOKEN}
     try:
-        log("Fetching chats...")
         r = requests.get(url, headers=headers, timeout=10)
-        log(f"Chats response: {r.status_code}")
         if r.status_code != 200:
-            log(f"Error body: {r.text}")
+            log(f"Chats error: {r.status_code}")
             return []
-        data = r.json()
-        chats = data.get('data', [])
-        log(f"Found {len(chats)} chats")
-        return chats
+        return r.json().get('data', [])
     except Exception as e:
         log(f"Get chats error: {e}")
         return []
@@ -136,80 +136,80 @@ def poll_for_messages():
     fan_known_names = {}
     
     while True:
-        log("Checking for new messages...")
-        chats = get_chats()
-        
-        if not chats:
-            log("No chats found")
-        
-        for chat in chats:
-            chat_id = chat.get('id')
-            if not chat_id:
-                continue
+        try:
+            log("Checking for new messages...")
+            bot_status["last_check"] = datetime.now().isoformat()
+            chats = get_chats()
             
-            log(f"Checking chat: {chat_id}")
-            messages = get_messages(chat_id)
-            log(f"Found {len(messages)} messages")
+            if not chats:
+                log("No chats found")
             
-            for msg in messages:
-                msg_id = msg.get('id')
-                sender = msg.get('sender', {})
-                msg_time = msg.get('createdAt', '')
-                fan_id = sender.get('uuid', '')
+            for chat in chats:
+                chat_id = chat.get('id')
+                if not chat_id:
+                    continue
                 
-                is_fan = sender.get('type') == 'fan'
-                is_new = msg_id not in processed_messages
-                is_after_start = msg_time > bot_start_time
+                messages = get_messages(chat_id)
+                log(f"Chat {chat_id}: {len(messages)} messages")
                 
-                if is_fan and is_new and is_after_start:
-                    fan_name = sender.get('displayName', 'babe')
-                    text = msg.get('text', '')
+                for msg in messages:
+                    msg_id = msg.get('id')
+                    sender = msg.get('sender', {})
+                    msg_time = msg.get('createdAt', '')
+                    fan_id = sender.get('uuid', '')
                     
-                    log(f"NEW MESSAGE from {fan_name}: {text[:50]}")
+                    is_fan = sender.get('type') == 'fan'
+                    is_new = msg_id not in processed_messages
+                    is_after_start = msg_time > bot_start_time
                     
-                    extracted = extract_name(text)
-                    if extracted and fan_id not in fan_known_names:
-                        fan_known_names[fan_id] = extracted
-                        log(f"Learned real name: {extracted}")
-                    
-                    known_name = fan_known_names.get(fan_id, "")
-                    
-                    recent_msgs = messages[-5:] if len(messages) > 5 else messages
-                    history = ""
-                    for m in recent_msgs:
-                        s = m.get('sender', {})
-                        role = "Fan" if s.get('type') == 'fan' else "You"
-                        history += role + ": " + m.get('text', '') + "\n"
-                    
-                    log("Waiting 2 minutes before replying...")
-                    time.sleep(120)
-                    
-                    reply = ask_kimi(text, fan_name, history, known_name)
-                    send_fanvue(chat_id, reply)
-                    processed_messages.add(msg_id)
-                    log(f"Replied: {reply[:50]}")
-                else:
-                    if not is_fan:
-                        log(f"Skip: not from fan")
-                    elif not is_new:
-                        log(f"Skip: already processed {msg_id}")
-                    elif not is_after_start:
-                        log(f"Skip: too old {msg_time}")
-        
-        log("Sleeping 2 minutes...")
-        time.sleep(120)
+                    if is_fan and is_new and is_after_start:
+                        fan_name = sender.get('displayName', 'babe')
+                        text = msg.get('text', '')
+                        
+                        log(f"NEW MSG from {fan_name}: {text[:50]}")
+                        bot_status["messages_found"] += 1
+                        
+                        extracted = extract_name(text)
+                        if extracted and fan_id not in fan_known_names:
+                            fan_known_names[fan_id] = extracted
+                            log(f"Learned name: {extracted}")
+                        
+                        known_name = fan_known_names.get(fan_id, "")
+                        
+                        recent_msgs = messages[-5:] if len(messages) > 5 else messages
+                        history = ""
+                        for m in recent_msgs:
+                            s = m.get('sender', {})
+                            role = "Fan" if s.get('type') == 'fan' else "You"
+                            history += role + ": " + m.get('text', '') + "\n"
+                        
+                        log("Waiting 2 min...")
+                        time.sleep(120)
+                        
+                        reply = ask_kimi(text, fan_name, history, known_name)
+                        send_fanvue(chat_id, reply)
+                        processed_messages.add(msg_id)
+                        log(f"Replied: {reply[:50]}")
+            
+            log("Sleeping 2 min...")
+            time.sleep(120)
+            
+        except Exception as e:
+            log(f"POLL ERROR: {e}")
+            time.sleep(120)
 
 @app.route('/')
 def home():
-    return "Fanvue Bot is running! Check /logs for activity."
+    return "Bot running! Go to /status for details."
 
-@app.route('/logs')
-def view_logs():
-    try:
-        with open('/tmp/bot.log', 'r') as f:
-            return f"<pre>{f.read()}</pre>"
-    except:
-        return "No logs yet"
+@app.route('/status')
+def status():
+    return {
+        "started": bot_status["started"],
+        "last_check": bot_status["last_check"],
+        "messages_found": bot_status["messages_found"],
+        "recent_logs": bot_status["errors"][-10:]
+    }
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -221,8 +221,9 @@ def callback():
 
 if __name__ == '__main__':
     log("=" * 50)
-    log("FANVUE BOT STARTING")
+    log("BOT STARTING")
     log("=" * 50)
     poll_thread = threading.Thread(target=poll_for_messages, daemon=True)
     poll_thread.start()
+    log("Thread started")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
