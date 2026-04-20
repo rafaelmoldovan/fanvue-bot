@@ -73,9 +73,12 @@ def get_messages(chat_id):
     try:
         r = requests.get(url, headers=get_headers(), timeout=10)
         if r.status_code != 200:
-            log(f"Get messages error: {r.status_code}")
+            log(f"Get messages error: {r.status_code} - {r.text[:200]}")
             return []
-        return r.json().get('data', [])
+        data = r.json()
+        msgs = data.get('data', [])
+        log(f"Got {len(msgs)} messages")
+        return msgs
     except Exception as e:
         log(f"Get messages exception: {e}")
         return []
@@ -169,7 +172,7 @@ def process_all_chats():
     fan_known_names = {}
     
     for chat in chats:
-        chat_id = chat.get('user', {}).get('uuid')  # Use user's UUID as chat ID
+        chat_id = chat.get('user', {}).get('uuid')
         if not chat_id:
             continue
         
@@ -182,13 +185,22 @@ def process_all_chats():
             msg_time = msg.get('sentAt', '')
             fan_id = sender.get('uuid', '')
             
-            is_fan = sender.get('uuid') != 'YOUR_UUID'  # Not from you
+            # Skip messages from me (creator)
+            is_fan = sender.get('uuid') != '38a392fc-a751-49b3-9d74-01ac6447c490'
+            
             is_new = msg_id not in processed_messages
-            is_after_start = msg_time > bot_start_time
             
-            log(f"Msg: id={str(msg_id)[:8]}, fan={is_fan}, new={is_new}, after={is_after_start}")
+            # Parse times for comparison
+            try:
+                msg_dt = datetime.fromisoformat(msg_time.replace('Z', '+00:00'))
+                bot_dt = datetime.fromisoformat(bot_start_time.replace('Z', '+00:00'))
+                is_after_start = msg_dt > bot_dt
+            except:
+                is_after_start = True
             
-            if is_fan and is_new and is_after_start:
+            log(f"Msg: id={str(msg_id)[:8]}, fan={is_fan}, new={is_new}, after={is_after_start}, time={msg_time}")
+            
+            if is_fan and is_new:
                 fan_name = sender.get('displayName', 'babe')
                 text = msg.get('text', '')
                 
@@ -207,7 +219,7 @@ def process_all_chats():
                 history = ""
                 for m in recent_msgs:
                     s = m.get('sender', {})
-                    role = "Fan" if s.get('uuid') != 'YOUR_UUID' else "You"
+                    role = "Fan" if s.get('uuid') != '38a392fc-a751-49b3-9d74-01ac6447c490' else "You"
                     history += role + ": " + m.get('text', '') + "\n"
                 
                 log("Waiting 2 min...")
