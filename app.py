@@ -211,8 +211,9 @@ def ask_openai(message, fan_name=""):
                 content = response_data['choices'][0]['message']['content']
                 # Replace smart quotes with normal quotes
                 content = content.replace(chr(8216), "'").replace(chr(8217), "'").replace(chr(8220), '"').replace(chr(8221), '"')
-                # Remove any other non-ASCII characters
-                content = ''.join(char for char in content if ord(char) < 128)
+                # Keep Hungarian characters and basic punctuation
+                allowed = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,!?;:-_áéíóöőúüűÁÉÍÓÖŐÚÜŰ')
+                content = ''.join(char for char in content if char in allowed)
                 log(f"OpenAI content: '{content}'")
                 return content.strip() if content else "Szia! 😊"
             else:
@@ -259,7 +260,11 @@ def process_messages():
             msg_id = last_msg.get('uuid')
             sender = last_msg.get('sender', {}) or {}
 
-            if sender.get('uuid') != my_uuid and msg_id not in processed_messages:
+            if sender.get('uuid') != my_uuid and not is_message_processed(msg_id):
+                # Double-check to prevent race conditions
+                if is_message_processed(msg_id):
+                    log(f"Message {msg_id} was processed by another thread, skipping")
+                    continue
                 fan_name = sender.get('displayName') or 'babe'
                 text = last_msg.get('text') or ''
 
@@ -270,7 +275,9 @@ def process_messages():
                 log(f"NEW MSG from {fan_name}: {text[:50]}")
                 bot_status["messages_found"] += 1
 
-                reply = ask_openai(text, fan_name)
+                # Add context about the fan for more personalized replies
+                context = f"Fan name: {fan_name}. Their message: {text}"
+                reply = ask_openai(context, fan_name)
 
                 if reply and reply.strip():
                     if send_fanvue_message(chat_id, reply):
