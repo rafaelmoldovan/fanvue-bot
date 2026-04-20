@@ -40,6 +40,10 @@ def get_headers():
         "Content-Type": "application/json"
     }
 
+def safe_str(value):
+    """Convert None to empty string"""
+    return str(value) if value is not None else ""
+
 def test_fanvue_connection():
     """Test if Fanvue API is working"""
     url = "https://api.fanvue.com/chats"
@@ -107,30 +111,7 @@ def ask_kimi(message, fan_name, chat_history="", fan_known_name=""):
     
     name_to_use = fan_known_name if fan_known_name else ""
     
-    system = """You are """ + CREATOR_NAME + """. Reply to fan messages naturally in Hungarian.
-
-PERSONALITY:
-- Act innocent, sweet, slightly shy but curious
-- Make them feel special and understood
-- Build emotional connection - make them fall in love or feel deeply attracted
-- Never use their username (like 'john123') - only use their real name if they told you before
-- Take your time - reply thoughtfully, not instantly
-
-RULES:
-- Chat naturally, ask questions about them
-- Show genuine interest in their life
-- Be flirty but subtle - let them chase you
-- NEVER upsell photos or PPV directly
-- You can hint at things vaguely ("I have something special planned..." or "maybe I'll show you later") but NEVER push sales
-- Keep responses 20-40 words
-- Use emojis sparingly (1-2 max)
-- Wait 2 minutes for reply (simulate thinking time)
-
-GOAL:
-Make them emotionally invested. They should feel like they're getting to know the real you. Build anticipation.
-
-Fan name to use: """ + name_to_use + """
-Chat history: """ + chat_history
+    system = "You are " + CREATOR_NAME + ". Reply to fan messages naturally in Hungarian.\n\nPERSONALITY:\n- Act innocent, sweet, slightly shy but curious\n- Make them feel special and understood\n- Build emotional connection - make them fall in love or feel deeply attracted\n- Never use their username (like 'john123') - only use their real name if they told you before\n- Take your time - reply thoughtfully, not instantly\n\nRULES:\n- Chat naturally, ask questions about them\n- Show genuine interest in their life\n- Be flirty but subtle - let them chase you\n- NEVER upsell photos or PPV directly\n- You can hint at things vaguely but NEVER push sales\n- Keep responses 20-40 words\n- Use emojis sparingly (1-2 max)\n- Wait 2 minutes for reply (simulate thinking time)\n\nGOAL:\nMake them emotionally invested. They should feel like they're getting to know the real you. Build anticipation.\n\nFan name to use: " + name_to_use + "\nChat history: " + chat_history
     
     data = {
         "model": "kimi-k2.5",
@@ -150,6 +131,8 @@ Chat history: """ + chat_history
         return "Szia! 😊 Mi ujsag?"
 
 def extract_name(text):
+    if not text:
+        return ""
     text_lower = text.lower()
     if "nevem" in text_lower or "hívnak" in text_lower or "a nevem" in text_lower:
         import re
@@ -172,8 +155,10 @@ def process_all_chats():
     fan_known_names = {}
     
     for chat in chats:
-        chat_id = chat.get('user', {}).get('uuid')
+        user = chat.get('user', {}) or {}
+        chat_id = user.get('uuid')
         if not chat_id:
+            log("No chat_id found")
             continue
         
         messages = get_messages(chat_id)
@@ -181,28 +166,21 @@ def process_all_chats():
         
         for msg in messages:
             msg_id = msg.get('uuid')
-            sender = msg.get('sender', {})
+            sender = msg.get('sender', {}) or {}
             msg_time = msg.get('sentAt', '')
             fan_id = sender.get('uuid', '')
             
             # Skip messages from me (creator)
-            is_fan = sender.get('uuid') != '38a392fc-a751-49b3-9d74-01ac6447c490'
+            my_uuid = '38a392fc-a751-49b3-9d74-01ac6447c490'
+            is_fan = sender.get('uuid') != my_uuid
             
             is_new = msg_id not in processed_messages
             
-            # Parse times for comparison
-            try:
-                msg_dt = datetime.fromisoformat(msg_time.replace('Z', '+00:00'))
-                bot_dt = datetime.fromisoformat(bot_start_time.replace('Z', '+00:00'))
-                is_after_start = msg_dt > bot_dt
-            except:
-                is_after_start = True
-            
-            log(f"Msg: id={str(msg_id)[:8]}, fan={is_fan}, new={is_new}, after={is_after_start}, time={msg_time}")
+            log(f"Msg check: id={safe_str(msg_id)[:8]}, fan={is_fan}, new={is_new}")
             
             if is_fan and is_new:
-                fan_name = sender.get('displayName', 'babe')
-                text = msg.get('text', '')
+                fan_name = sender.get('displayName') or 'babe'
+                text = msg.get('text') or ''
                 
                 log(f"NEW MSG from {fan_name}: {text[:50]}")
                 bot_status["messages_found"] += 1
@@ -218,9 +196,10 @@ def process_all_chats():
                 recent_msgs = messages[-5:] if len(messages) > 5 else messages
                 history = ""
                 for m in recent_msgs:
-                    s = m.get('sender', {})
-                    role = "Fan" if s.get('uuid') != '38a392fc-a751-49b3-9d74-01ac6447c490' else "You"
-                    history += role + ": " + m.get('text', '') + "\n"
+                    s = m.get('sender', {}) or {}
+                    role = "Fan" if s.get('uuid') != my_uuid else "You"
+                    m_text = s.get('text') or ''
+                    history += role + ": " + m_text + "\n"
                 
                 log("Waiting 2 min...")
                 time.sleep(120)
@@ -263,6 +242,8 @@ def trigger_poll():
         return {"status": "ok", "messages_processed": count}
     except Exception as e:
         log(f"Trigger error: {e}")
+        import traceback
+        log(traceback.format_exc())
         return {"status": "error", "error": str(e)}
 
 @app.route('/webhook', methods=['POST'])
