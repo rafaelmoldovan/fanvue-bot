@@ -154,9 +154,9 @@ def ask_kimi(message, fan_name, chat_history="", fan_known_name=""):
         "Content-Type": "application/json"
     }
     name_to_use = fan_known_name if fan_known_name else ""
-    system = "You are " + CREATOR_NAME + ". Reply naturally in Hungarian. Fan name: " + name_to_use + ". Keep under 40 words. Be innocent, sweet, slightly shy. Build emotional connection. NEVER upsell. Chat history: " + chat_history
+    system = "You are " + CREATOR_NAME + ", a friendly creator. Reply in Hungarian. Keep it short (max 30 words). Be sweet and casual. Fan name: " + name_to_use
     data = {
-        "model": "kimi-k2.5",
+        "model": "kimi-latest",
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": message}
