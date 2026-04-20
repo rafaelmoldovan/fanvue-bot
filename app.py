@@ -165,10 +165,18 @@ def ask_kimi(message, fan_name, chat_history="", fan_known_name=""):
     }
     try:
         r = requests.post(url, headers=headers, json=data, timeout=15)
+        log(f"Kimi status: {r.status_code}")
         if r.status_code == 200:
-            return r.json()['choices'][0]['message']['content']
+            response_data = r.json()
+            log(f"Kimi response: {str(response_data)[:200]}")
+            content = response_data['choices'][0]['message']['content']
+            if content and content.strip():
+                return content.strip()
+            else:
+                log("Kimi returned empty content")
+                return "Szia! 😊 Mi ujsag?"
         else:
-            log(f"Kimi error: {r.status_code}")
+            log(f"Kimi error: {r.status_code} - {r.text[:200]}")
             return "Szia! 😊 Mi ujsag?"
     except Exception as e:
         log(f"Kimi exception: {e}")
