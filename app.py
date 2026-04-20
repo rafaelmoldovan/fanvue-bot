@@ -35,28 +35,39 @@ def log(msg):
         bot_status["errors"] = bot_status["errors"][-100:]
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY, refresh_token TEXT, access_token TEXT, expires_at TEXT)")
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY, refresh_token TEXT, access_token TEXT, expires_at TEXT)")
+        conn.commit()
+        conn.close()
+        log("Database initialized")
+    except Exception as e:
+        log(f"DB init error: {e}")
 
 def save_token(refresh_token, access_token=None, expires_at=None):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM tokens")
-    c.execute("INSERT INTO tokens (refresh_token, access_token, expires_at) VALUES (?, ?, ?)", (refresh_token, access_token, expires_at))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM tokens")
+        c.execute("INSERT INTO tokens (refresh_token, access_token, expires_at) VALUES (?, ?, ?)",
+                  (refresh_token, access_token, expires_at))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log(f"Save token error: {e}")
 
 def load_token():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT refresh_token, access_token, expires_at FROM tokens ORDER BY id DESC LIMIT 1")
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {"refresh_token": row[0], "access_token": row[1], "expires_at": row[2]}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT refresh_token, access_token, expires_at FROM tokens ORDER BY id DESC LIMIT 1")
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return {"refresh_token": row[0], "access_token": row[1], "expires_at": row[2]}
+    except Exception as e:
+        log(f"Load token error: {e}")
     return {}
 
 def get_basic_auth_header():
@@ -135,7 +146,7 @@ def get_chats():
     try:
         r = requests.get(url, headers=get_headers(), timeout=10)
         if r.status_code == 401:
-            save_token(load_token().get('refresh_token'), None, None)
+            save_token(load_token().get('refresh_token', ''), None, None)
             r = requests.get(url, headers=get_headers(), timeout=10)
         if r.status_code != 200:
             log(f"Chats error: {r.status_code}")
@@ -150,7 +161,7 @@ def get_messages(chat_id):
     try:
         r = requests.get(url, headers=get_headers(), timeout=10)
         if r.status_code == 401:
-            save_token(load_token().get('refresh_token'), None, None)
+            save_token(load_token().get('refresh_token', ''), None, None)
             r = requests.get(url, headers=get_headers(), timeout=10)
         if r.status_code != 200:
             return []
@@ -170,7 +181,7 @@ def send_fanvue_message(chat_id, text):
         r = requests.post(url, headers=headers, json=payload, timeout=10)
         log(f"Send status: {r.status_code}")
         if r.status_code == 401:
-            save_token(load_token().get('refresh_token'), None, None)
+            save_token(load_token().get('refresh_token', ''), None, None)
             headers["Authorization"] = "Bearer " + (get_fanvue_token() or "")
             r = requests.post(url, headers=headers, json=payload, timeout=10)
             log(f"Retry status: {r.status_code}")
@@ -318,13 +329,18 @@ def unblock_user():
 
 @app.route('/set_token', methods=['POST'])
 def set_token():
-    data = request.json
-    if data and 'refresh_token' in data:
-        save_token(data['refresh_token'])
-        return {"status": "ok", "message": "Token saved"}
-    return {"status": "error", "message": "No token provided"}
+    try:
+        init_db()  # Ensure table exists
+        data = request.json
+        if data and 'refresh_token' in data:
+            save_token(data['refresh_token'])
+            return {"status": "ok", "message": "Token saved"}
+        return {"status": "error", "message": "No token provided"}
+    except Exception as e:
+        log(f"Set token error: {e}")
+        return {"status": "error", "message": str(e)}
 
-# Initialize database on module load
+# Initialize on startup
 init_db()
 log("=" * 50)
 log("API BOT STARTING")
