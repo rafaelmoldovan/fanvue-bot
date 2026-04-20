@@ -168,7 +168,7 @@ def send_fanvue_message(chat_id, text):
     }
     # Ensure text is properly encoded
     safe_text = text.encode('utf-8').decode('utf-8')
-    payload = {"content": safe_text}
+    payload = {"text": safe_text}
     log(f"Sending message: '{safe_text[:50]}' to chat: {chat_id}")
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=10)
@@ -192,7 +192,7 @@ def ask_openai(message, fan_name=""):
         "Authorization": "Bearer " + OPENAI_API_KEY,
         "Content-Type": "application/json"
     }
-    system = f"You are {CREATOR_NAME}. Reply in English only. Keep under 30 words. Be sweet and casual."
+    system = f"You are {CREATOR_NAME}. Reply in Hungarian but use ONLY normal letters (a-z, no accents). Keep under 30 words. Be sweet and casual. Example: 'szia' not 'szia', 'egeszsegedre' not 'egészségedre'"
     data = {
         "model": "gpt-4o-mini",
         "messages": [
@@ -209,6 +209,10 @@ def ask_openai(message, fan_name=""):
             log(f"OpenAI response keys: {list(response_data.keys())}")
             if 'choices' in response_data and len(response_data['choices']) > 0:
                 content = response_data['choices'][0]['message']['content']
+                # Replace smart quotes with normal quotes
+                content = content.replace(chr(8216), "'").replace(chr(8217), "'").replace(chr(8220), '"').replace(chr(8221), '"')
+                # Remove any other non-ASCII characters
+                content = ''.join(char for char in content if ord(char) < 128)
                 log(f"OpenAI content: '{content}'")
                 return content.strip() if content else "Szia! 😊"
             else:
