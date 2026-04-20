@@ -2,7 +2,6 @@ from flask import Flask, request
 import requests
 import os
 import json
-import sqlite3
 import base64
 import time
 from datetime import datetime, timedelta
@@ -11,10 +10,11 @@ app = Flask(__name__)
 
 FANVUE_CLIENT_ID = os.environ.get('FANVUE_CLIENT_ID')
 FANVUE_CLIENT_SECRET = os.environ.get('FANVUE_CLIENT_SECRET')
-KIMI_API_KEY = os.environ.get('KIMI_API_KEY')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 CREATOR_NAME = os.environ.get('CREATOR_NAME', 'Creator')
 
-DB_PATH = '/tmp/fanvue_bot.db'
+# Token storage - use Railway variable as primary, fallback to memory
+RAILWAY_REFRESH_TOKEN = os.environ.get('FANVUE_REFRESH_TOKEN', '')
 
 bot_status = {
     "started": datetime.now().isoformat(),
@@ -26,6 +26,13 @@ bot_status = {
     "blocked_users": set()
 }
 
+# In-memory token storage (lost on restart, but Railway variable is primary)
+memory_tokens = {
+    "refresh_token": RAILWAY_REFRESH_TOKEN,
+    "access_token": None,
+    "expires_at": None
+}
+
 def log(msg):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {msg}"
@@ -34,40 +41,21 @@ def log(msg):
     if len(bot_status["errors"]) > 100:
         bot_status["errors"] = bot_status["errors"][-100:]
 
-def init_db():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY, refresh_token TEXT, access_token TEXT, expires_at TEXT)")
-        conn.commit()
-        conn.close()
-        log("Database initialized")
-    except Exception as e:
-        log(f"DB init error: {e}")
-
 def save_token(refresh_token, access_token=None, expires_at=None):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("DELETE FROM tokens")
-        c.execute("INSERT INTO tokens (refresh_token, access_token, expires_at) VALUES (?, ?, ?)",
-                  (refresh_token, access_token, expires_at))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        log(f"Save token error: {e}")
+    """Save token to memory (Railway variable is set manually)"""
+    memory_tokens["refresh_token"] = refresh_token
+    memory_tokens["access_token"] = access_token
+    memory_tokens["expires_at"] = expires_at
+    log(f"Token saved to memory. Refresh token: {refresh_token[:30]}...")
 
 def load_token():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT refresh_token, access_token, expires_at FROM tokens ORDER BY id DESC LIMIT 1")
-        row = c.fetchone()
-        conn.close()
-        if row:
-            return {"refresh_token": row[0], "access_token": row[1], "expires_at": row[2]}
-    except Exception as e:
-        log(f"Load token error: {e}")
+    """Load token from memory or Railway variable"""
+    if memory_tokens["refresh_token"]:
+        return memory_tokens
+    # Fallback to Railway variable
+    if RAILWAY_REFRESH_TOKEN:
+        memory_tokens["refresh_token"] = RAILWAY_REFRESH_TOKEN
+        return memory_tokens
     return {}
 
 def get_basic_auth_header():
@@ -80,7 +68,7 @@ def refresh_fanvue_token():
     refresh_token = tokens.get('refresh_token')
 
     if not refresh_token:
-        log("No refresh token in database!")
+        log("No refresh token found! Set FANVUE_REFRESH_TOKEN in Railway or use /set_token")
         return None
 
     url = "https://auth.fanvue.com/oauth2/token"
@@ -104,10 +92,12 @@ def refresh_fanvue_token():
             expires_in = data.get('expires_in', 3600)
             expires_at = (datetime.now() + timedelta(seconds=expires_in - 60)).isoformat()
 
+            # Save to memory
             save_token(new_refresh or refresh_token, access_token, expires_at)
 
             if new_refresh and new_refresh != refresh_token:
-                log("Token rotated and saved to database")
+                log("WARNING: Token was rotated. Update FANVUE_REFRESH_TOKEN in Railway with:")
+                log(new_refresh)
 
             log("Got new access token")
             return access_token
@@ -176,7 +166,10 @@ def send_fanvue_message(chat_id, text):
         "Authorization": "Bearer " + (get_fanvue_token() or ""),
         "Content-Type": "application/json"
     }
-    payload = {"content": text}
+    # Ensure text is properly encoded
+    safe_text = text.encode('utf-8').decode('utf-8')
+    payload = {"content": safe_text}
+    log(f"Sending message: '{safe_text[:50]}' to chat: {chat_id}")
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=10)
         log(f"Send status: {r.status_code}")
@@ -193,15 +186,13 @@ def send_fanvue_message(chat_id, text):
         log(f"Send error: {e}")
         return False
 
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-
 def ask_openai(message, fan_name=""):
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         "Authorization": "Bearer " + OPENAI_API_KEY,
         "Content-Type": "application/json"
     }
-    system = f"You are {CREATOR_NAME}. Reply in Hungarian. Keep under 30 words. Be sweet and casual."
+    system = f"You are {CREATOR_NAME}. Reply in English only. Keep under 30 words. Be sweet and casual."
     data = {
         "model": "gpt-4o-mini",
         "messages": [
@@ -215,10 +206,14 @@ def ask_openai(message, fan_name=""):
         log(f"OpenAI status: {r.status_code}")
         if r.status_code == 200:
             response_data = r.json()
-            log(f"OpenAI response: {json.dumps(response_data)[:300]}")
-            content = response_data['choices'][0]['message']['content']
-            log(f"OpenAI content: '{content}'")
-            return content.strip() if content else "Szia! 😊"
+            log(f"OpenAI response keys: {list(response_data.keys())}")
+            if 'choices' in response_data and len(response_data['choices']) > 0:
+                content = response_data['choices'][0]['message']['content']
+                log(f"OpenAI content: '{content}'")
+                return content.strip() if content else "Szia! 😊"
+            else:
+                log(f"OpenAI no choices: {response_data}")
+                return "Szia! 😊 Mi ujsag?"
         else:
             log(f"OpenAI error: {r.status_code} - {r.text[:200]}")
             return "Szia! 😊 Mi ujsag?"
@@ -243,6 +238,12 @@ def process_messages():
         try:
             user = chat.get('user', {}) or {}
             chat_id = user.get('uuid')
+            # Also try other possible fields
+            if not chat_id:
+                chat_id = chat.get('uuid')
+            if not chat_id:
+                chat_id = chat.get('id')
+            log(f"Chat ID: {chat_id}, User: {user}")
             if not chat_id:
                 continue
 
@@ -267,11 +268,14 @@ def process_messages():
 
                 reply = ask_openai(text, fan_name)
 
-                if send_fanvue_message(chat_id, reply):
-                    bot_status["replies_sent"] += 1
-                    replied += 1
-                    processed_messages.add(msg_id)
-                    log(f"Replied: {reply[:50]}")
+                if reply and reply.strip():
+                    if send_fanvue_message(chat_id, reply):
+                        bot_status["replies_sent"] += 1
+                        replied += 1
+                        processed_messages.add(msg_id)
+                        log(f"Replied: {reply[:50]}")
+                else:
+                    log("Empty reply, skipping")
 
                 time.sleep(2)
 
@@ -336,24 +340,33 @@ def unblock_user():
 @app.route('/set_token', methods=['POST'])
 def set_token():
     try:
-        init_db()  # Ensure table exists
         data = request.json
         if data and 'refresh_token' in data:
             save_token(data['refresh_token'])
-            return {"status": "ok", "message": "Token saved"}
+            return {"status": "ok", "message": "Token saved to memory. ALSO add to Railway variables for persistence!"}
         return {"status": "error", "message": "No token provided"}
     except Exception as e:
         log(f"Set token error: {e}")
         return {"status": "error", "message": str(e)}
 
-# Initialize on startup
-init_db()
+@app.route('/get_current_token')
+def get_current_token():
+    """Show current token so you can update Railway variable"""
+    tokens = load_token()
+    refresh = tokens.get('refresh_token', '')
+    return {
+        "refresh_token": refresh[:50] + "..." if len(refresh) > 50 else refresh,
+        "note": "If token was rotated, copy this and update FANVUE_REFRESH_TOKEN in Railway"
+    }
+
+# Initialize
 log("=" * 50)
 log("API BOT STARTING")
 log("=" * 50)
-tokens = load_token()
-if not tokens.get('refresh_token'):
-    log("WARNING: No refresh token. Use /set_token to set it.")
+if RAILWAY_REFRESH_TOKEN:
+    log("Refresh token loaded from Railway variable")
+else:
+    log("WARNING: No FANVUE_REFRESH_TOKEN in Railway variables!")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
