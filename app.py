@@ -5,8 +5,7 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-FANVUE_CLIENT_ID = os.environ.get('FANVUE_CLIENT_ID')
-FANVUE_CLIENT_SECRET = os.environ.get('FANVUE_CLIENT_SECRET')
+FANVUE_REFRESH_TOKEN = os.environ.get('FANVUE_REFRESH_TOKEN')
 KIMI_API_KEY = os.environ.get('KIMI_API_KEY')
 CREATOR_NAME = os.environ.get('CREATOR_NAME', 'Creator')
 
@@ -28,40 +27,45 @@ def log(msg):
     if len(bot_status["errors"]) > 100:
         bot_status["errors"] = bot_status["errors"][-100:]
 
-log("FANVUE_CLIENT_ID: " + ("SET" if FANVUE_CLIENT_ID else "EMPTY"))
+log("FANVUE_REFRESH_TOKEN: " + ("SET" if FANVUE_REFRESH_TOKEN else "EMPTY"))
 log("KIMI_API_KEY: " + ("SET" if KIMI_API_KEY else "EMPTY"))
 
 processed_messages = set()
 pending_messages = {}
 
-def get_fanvue_token():
+def refresh_fanvue_token():
     global fanvue_access_token, token_expires_at
-    if fanvue_access_token and token_expires_at and datetime.now() < token_expires_at:
-        return fanvue_access_token
 
-    url = "https://api.fanvue.com/oauth/token"
+    url = "https://auth.fanvue.com/oauth2/token"
     payload = {
-        "grant_type": "client_credentials",
-        "client_id": FANVUE_CLIENT_ID,
-        "client_secret": FANVUE_CLIENT_SECRET,
-        "scope": "read write"
+        "grant_type": "refresh_token",
+        "refresh_token": FANVUE_REFRESH_TOKEN
     }
 
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, data=payload, timeout=10)
         if r.status_code == 200:
             data = r.json()
             fanvue_access_token = data.get('access_token')
+            new_refresh = data.get('refresh_token')
             expires_in = data.get('expires_in', 3600)
             token_expires_at = datetime.now() + timedelta(seconds=expires_in - 60)
-            log("Got new Fanvue access token")
+            log("Got new Fanvue access token via refresh")
+            # Update refresh token if rotated
+            if new_refresh and new_refresh != FANVUE_REFRESH_TOKEN:
+                log("Refresh token was rotated - update your Railway variable!")
             return fanvue_access_token
         else:
-            log(f"Token error: {r.status_code} - {r.text[:200]}")
+            log(f"Refresh error: {r.status_code} - {r.text[:200]}")
             return None
     except Exception as e:
-        log(f"Token exception: {e}")
+        log(f"Refresh exception: {e}")
         return None
+
+def get_fanvue_token():
+    if fanvue_access_token and token_expires_at and datetime.now() < token_expires_at:
+        return fanvue_access_token
+    return refresh_fanvue_token()
 
 def get_headers():
     token = get_fanvue_token()
