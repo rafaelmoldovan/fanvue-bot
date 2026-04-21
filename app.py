@@ -338,18 +338,18 @@ def was_manual_reply_recent(messages, minutes=30):
     if not messages:
         return False
     
-    for msg in reversed(messages[-5:]):
-        sender_uuid = msg.get('sender', {}).get('uuid')
-        msg_time = msg.get('createdAt', '')
-        msg_type = msg.get('type', '')
-        
-        if sender_uuid == MY_UUID and msg_type != 'AUTOMATED_NEW_FOLLOWER':
-            try:
-                msg_dt = datetime.fromisoformat(msg_time.replace('Z', '+00:00').replace('+00:00', ''))
-                if (datetime.now() - msg_dt).total_seconds() < minutes * 60:
-                    return True
-            except:
+    last_msg = messages[-1]
+    sender_uuid = last_msg.get('sender', {}).get('uuid')
+    msg_time = last_msg.get('createdAt', '')
+    msg_type = last_msg.get('type', '')
+    
+    if sender_uuid == MY_UUID and msg_type != 'AUTOMATED_NEW_FOLLOWER':
+        try:
+            msg_dt = datetime.fromisoformat(msg_time.replace('Z', '+00:00').replace('+00:00', ''))
+            if (datetime.now() - msg_dt).total_seconds() < minutes * 60:
                 return True
+        except:
+            return True
     
     return False
 
