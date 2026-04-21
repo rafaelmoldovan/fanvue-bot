@@ -6,11 +6,11 @@ import base64
 import sqlite3
 import threading
 import time
-import pytz
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 # Budapest timezone
-BUDAPEST_TZ = pytz.timezone('Europe/Budapest')
+BUDAPEST_TZ = ZoneInfo('Europe/Budapest')
 
 def get_budapest_now():
     """Get current time in Budapest timezone"""
