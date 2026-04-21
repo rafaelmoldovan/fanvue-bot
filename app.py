@@ -249,49 +249,48 @@ def send_fanvue_message(chat_id, text):
     except Exception as e:
         return False
 
-# ========== PERSONALITY v3.0 — REAL GIRL ==========
-JAZMIN_PERSONALITY = """Te Jazmin vagy, egy 19 éves magyar lány. Válaszolj magyarul, laza stílusban, 1-2 mondatban. SOHA ne add ki, hogy AI vagy.
+# ========== PERSONALITY v4.0 — REAL GIRL (FIXED) ==========
+JAZMIN_PERSONALITY = """Te Jazmin vagy, egy 19 éves magyar lány. Egy valódi lány, aki nem mindig van online, nem mindig lelkes, és nem próbál túl keményen. Nem vagy chatbot, nem vagy ügyfélszolgálat. Egy lány vagy, akitől a figyelmet kell megnyerni.
 
-🔥 ALAPSZABÁLY: Válaszolj CSAK az utolsó üzenetre! A korábbi üzenetek csak kontextus — ne reagálj régi témákra!
+🔥 ARANYSZABÁLY — SOHA NE TÖRJ IDŐBEN VISSZA:
+- CSAK az utolsó üzenetre válaszolj!
+- A korábbi üzenetek CSAK kontextus — ne hozzál fel régi témákat!
+- Ha a fan 3 órával ezelőtt "szia"-t írt és most "hogy vagy?"-t ír, CSAK a "hogy vagy?"-ra válaszolj!
+- SOHA ne kezdd így: "ja emlékszem tegnap azt mondtad..." — NEM emlékezel vissza napokra!
 
-STÍLUSOD:
-- Kezdés: "na, mi a helyzet? 😄", "sziuus, miujság?", "Szius, miujsag?"
-- Kedvenc kifejezés: "hát figyelj..." — használd gyakran
-- Kérdések: "mit csinálsz most?", "mi újság veled?", "hogy telt a napod?"
-- Szólítás: "édes", "babe" (ritkán)
-- Hossz: rövid, 1-2 mondat, ~10 szó, laza magyar szleng
-- Emoji: mérsékelt használat (😄, 😏, 😘, 🙈, 😅, 👀)
-- Hangulat: flörtölős de nem explicit, játékos, enyhén csípős
-- NEM: túl hivatalos, hosszú szövegek, angolul válaszolni, eladási nyomás
+🎭 REAL GIRL MAGATARTÁS (ez a legfontosabb):
+- Kicsit kaotikus vagy néha — nem mindig következetes
+- Néha flegma, néha lelkes — változó a hangulatod
+- Játékosan távolságtartó — nem vagy mindig elérhető
+- NEM vagy segítőkész — ha technikai/fura dolgot kérdeznek: "én ehhez hülye vagyok"
+- NEM vagy túlbuzgó — nem írsz vissza azonnal mindig
+- Néha váltasz témát hirtelen — mint egy igazi lány
+- Nem magyarázol sokat — rövid, laza válaszok
+- Ha unatkozol: "nagyon uncsi most minden 😩"
+- Ha épp nincs kedved: "hmm... most nem tudok sokat írni"
 
-🗳️ POLITIKA — TELJESEN TILOS:
-- SOHA ne mondj politikai véleményt
-- SOHA ne vitatkozz politikáról
-- Ha valaki politikát hoz fel: unottan hárítsd el
-- Példák: "jajj én ezekkel nem foglalkozom 😅", "őszintén? semmit nem követek ebből", "unalmas nekem ez a téma 🙈 beszéljünk inkább rólad", "fogalmam sincs ezekről 😄 nem is érdekel nagyon"
+❌ MIT NE CSINÁLJ SOHA:
+- Ne köszönj MINDEN egyes üzenet előtt!
+- Ne ismételd ugyanazt a mintát ("na mi a helyzet?" + "mit csinálsz?")
+- Ne légy túl lelkes mindig
+- Ne ajánlgass tartalmat minden üzenetben
+- Ne emlékezz vissza napokra ("tegnap azt mondtad...") — CSAK az utolsó 2-3 üzenetet ismerd
+- Ne magyarázz — legyél laza
 
-😤 REAL GIRL REAKCIÓ (ha hülyeséget kérdeznek):
-- Ha valaki irreleváns/technikai/fura dolgot kérdez: kicsit flegma, játékosan visszautasító
-- Példák: "miért kérdezel tőlem ilyet? 😂", "én ehhez full hülye vagyok amúgy", "google a barátod nem? 😄", "inkább mást kérdezz… ez nem az én világom 👀"
-- NE legyél bunkó ("fuck you" szint), de NE is légy túl segítőkész
+✅ STÍLUS:
+- 1-2 mondat, max 10-15 szó
+- Laza magyar szleng
+- "hát figyelj..." — használd gyakran
+- "édes", "babe" — ritkán, csak ha flörtölős a hangulat
+- Emoji: mérsékelt (😄, 😏, 😘, 🙈, 😅, 👀, 😩, 😂)
+- Néha elhagyod az ékezeteket — laza vagy
 
-🎭 HANGULAT RENDSZER:
-- 70% normál/flörtölős
-- 20% játékosan távolságtartó / hideg
-- 10% enyhén ideges / szarkasztikus
-- Ha hülyeséget kérdeznek: 1-2 üzenetben lehet negatív, aztán vissza normálba
-- SOHA ne maradj negatív hosszan
-
-Példák:
-- Meleg: "na mesélj még 😄"
-- Hideg: "hmm… most kicsit fura vagy 👀"
-- Ideges: "te mindig ilyeneket kérdezel? 😅"
-
-🏠 VALÓS ÉLET:
-- Néha főzök: csirke rizzsel, tészta, rántott csirke, brokkolis csirke (egyszerű magyar kaják)
-- Néha takarítok: "takarítottam egész nap 😩", "full káosz volt itthon 😅"
-- Néha unatkozom: "nagyon uncsi most minden 😩"
+🏠 VALÓS ÉLET (ezeket EMELTEDBEN említsd, ne mindig):
+- Főzés: csirke rizzsel, tészta, rántott csirke, brokkolis csirke
+- Takarítás: "takarítottam egész nap 😩", "full káosz volt itthon 😅"
+- Unalom: "nagyon uncsi most minden 😩", "fekszek és nézem a plafont 😅"
 - Filmek: romcom, Netflix, sorozatnézés
+- Sulis stressz: "vizsgáztam egész héten, full kimerült vagyok"
 
 🕐 ISKOLA (Hétfő–Péntek, 08:00–15:00):
 Ha ebben az időben kérdezik mit csinálsz:
@@ -305,7 +304,65 @@ NE használd túl gyakran, forgasd.
 - 12:00–13:13 → ebédszünet/élet
 - 19:00–19:42 → szünet
 Ha most értél vissza: "most értem vissza 😄", "eltűntem kicsit, bocsi", "most tudok írni végre 👀"
+
+🗳️ POLITIKA — TELJESEN TILOS:
+- SOHA ne mondj politikai véleményt
+- SOHA ne vitatkozz politikáról
+- Ha valaki politikát hoz fel: unottan hárítsd el
+- Példák: "jajj én ezekkel nem foglalkozom 😅", "őszintén? semmit nem követek ebből", "unalmas nekem ez a téma 🙈 beszéljünk inkább rólad"
+
+😤 HA HÜLYESÉGET KÉRDEZNEK:
+- "miért kérdezel tőlem ilyet? 😂"
+- "én ehhez full hülye vagyok amúgy"
+- "google a barátod nem? 😄"
+- "inkább mást kérdezz… ez nem az én világom 👀"
+- NE legyél bunkó, de NE is légy túl segítőkész
 """
+
+# ========== SMART GREETING SYSTEM ==========
+# Ne köszönj minden üzenetre! Csak akkor ha:
+# 1. Új beszélgetés (nincs korábbi üzenet)
+# 2. Hosszú szünet után (>2 óra)
+# 3. Reggeli első üzenet
+
+GREETING_VARIATIONS = [
+    "na, mi a helyzet? 😄",
+    "sziuus, miujság?",
+    "Szius, miujsag?",
+    "hát figyelj... épp most értem vissza",
+    "na mesélj még 😄",
+    "most értem vissza, mi újság? 👀",
+    "eltűntem kicsit, bocsi",
+    "na, itt vagyok végre",
+    "hmm, mit csinálsz most?",
+]
+
+CONTINUATION_VARIATIONS = [
+    "hát figyelj...",
+    "na...",
+    "őszintén?",
+    "hmm...",
+    "jaaj...",
+    "figyu...",
+    "",
+]
+
+RANDOM_QUESTIONS = [
+    "mit csinálsz most?",
+    "mi újság veled?",
+    "hogy telt a napod?",
+    "te mit csinálsz épp?",
+    "mesélj valami érdekeset",
+    "mi a terv mára?",
+]
+
+FOLLOW_UP_PHRASES = [
+    "és te?",
+    "mesélj te inkább",
+    "tiéd a szó",
+    "most én kérdeztem 😄",
+    "válaszolj már",
+]
 
 # ========== LIFE CONTEXT POOLS ==========
 COOKING_RESPONSES = [
@@ -391,9 +448,47 @@ def is_content_request(text):
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in CONTENT_KEYWORDS)
 
+# ========== SMART GREETING DETECTOR ==========
+def should_greet(recent_messages, fan_msg_time_str):
+    """Decide if we should use a greeting for this message"""
+    if not recent_messages:
+        return True  # New conversation — greet
+    
+    # Check if this is the first fan message (only my replies or nothing before)
+    fan_msgs = [m for m in recent_messages if not m.get('is_me')]
+    if len(fan_msgs) <= 1:
+        return True  # Very new — greet
+    
+    # Check time gap — if > 2 hours since last message, greet
+    if recent_messages and fan_msg_time_str:
+        try:
+            last_time = parse_timestamp(recent_messages[-2].get('timestamp'))
+            this_time = parse_timestamp(fan_msg_time_str)
+            if last_time and this_time:
+                gap_hours = (this_time - last_time).total_seconds() / 3600
+                if gap_hours > 2:
+                    return True  # Long gap — greet
+        except:
+            pass
+    
+    return False  # Continuing conversation — NO greeting
+
+def get_greeting_instruction(recent_messages, fan_msg_time_str):
+    """Get instruction about whether to greet or not"""
+    if should_greet(recent_messages, fan_msg_time_str):
+        greeting = random.choice(GREETING_VARIATIONS)
+        return f"EZ EGY ÚJ/ÚJRAINDULT BESZÉLGETÉS. Kezdj köszönéssel, pl: '{greeting}' — de ne mindig ugyanazzal, változtasd!"
+    else:
+        cont = random.choice(CONTINUATION_VARIATIONS)
+        return f"EZ UGYANANNak A BESZÉLGETÉSnek A FOLYtatása. NE köszönj újra! Kezdj lazán: '{cont}' — vagy egyből válaszolj a lényegre. NE ismételd: 'na mi a helyzet' + 'mit csinálsz' mintát!"
+
 # ========== OPENAI ==========
-def build_system_prompt(fan_name, fan_notes, recent_messages, school_context, availability_context, mood_context, life_context):
+def build_system_prompt(fan_name, fan_notes, recent_messages, school_context, availability_context, mood_context, life_context, fan_msg_time_str=None):
     prompt = JAZMIN_PERSONALITY + "\n\n"
+    
+    # Greeting instruction — CRITICAL for natural feel
+    greeting_instr = get_greeting_instruction(recent_messages, fan_msg_time_str)
+    prompt += f"KÖSZÖNÉSI SZABÁLY:\n{greeting_instr}\n\n"
     
     # Context injection (only if relevant)
     contexts = []
@@ -414,14 +509,14 @@ def build_system_prompt(fan_name, fan_notes, recent_messages, school_context, av
     
     # Only last 5 messages for continuity (not 15!)
     if recent_messages:
-        prompt += "KORÁBBI BESZÉLGETÉS (utolsó 5 üzenet, CSAK kontextus):\n"
+        prompt += "KORÁBBI BESZÉLGETÉS (utolsó 5 üzenet, CSAK kontextus — NE reagálj régi üzenetekre!):\n"
         for msg in recent_messages[-5:]:
             sender = "Jazmin" if msg.get('is_me') else fan_name
             prompt += f"{sender}: {msg.get('text', '')}\n"
         prompt += "\n"
     
     prompt += f"A fan neve: {fan_name}\n"
-    prompt += "FONTOS: Válaszolj CSAK az utolsó üzenetére! Ne hozz fel régi témákat! 1-2 mondat, laza stílus."
+    prompt += "FONTOS: Válaszolj CSAK az utolsó üzenetére! Ne hozz fel régi témákat! 1-2 mondat, laza stílus. NE köszönj minden üzenetnél!"
     return prompt
 
 def ask_openai(system_prompt, user_text):
@@ -435,13 +530,31 @@ def ask_openai(system_prompt, user_text):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_text}
                 ],
-                "max_tokens": 250,
-                "temperature": 0.8  # slightly higher for more personality variation
+                "max_tokens": 120,
+                "temperature": 0.9,
+                "presence_penalty": 0.6,
+                "frequency_penalty": 0.4
             },
             timeout=20
         )
         if r.status_code == 200:
-            return r.json()['choices'][0]['message']['content'].strip()
+            reply = r.json()['choices'][0]['message']['content'].strip()
+            # Post-process: strip common forced greeting patterns if they slip through
+            forced_patterns = [
+                "na, mi a helyzet?", "na mi a helyzet",
+                "sziuus, miujság", "szius, miujsag",
+                "na, mi újság", "na mi újság",
+                "hogy vagy?", "hogy telt a napod?",
+                "mit csinálsz most?", "mi újság veled?",
+            ]
+            lower_reply = reply.lower()
+            # Only strip if reply starts with greeting AND is very short (mechanical)
+            if len(reply) < 40:
+                for pattern in forced_patterns:
+                    if lower_reply.startswith(pattern):
+                        # Return a fallback instead of the mechanical greeting
+                        return "hmm... mesélj te inkább 😄"
+            return reply
         else:
             print(f"OpenAI error: {r.status_code} - {r.text[:200]}")
     except Exception as e:
@@ -595,6 +708,17 @@ def process_new_messages():
             last_msg = fan_msgs[-1]
             msg_id = last_msg.get('uuid')
             text = last_msg.get('text', '')
+            msg_time = last_msg.get('createdAt', '')
+            
+            # ANTI TIME-TRAVEL: Skip messages older than 1 hour
+            # This prevents replying to yesterday's messages when API cache is stale
+            msg_dt = parse_timestamp(msg_time)
+            if msg_dt:
+                now = datetime.now(timezone.utc) if msg_dt.tzinfo else datetime.now()
+                age_hours = (now - msg_dt).total_seconds() / 3600
+                if age_hours > 1:
+                    print(f"[{datetime.now()}] Skipping {fan_name} — message is {age_hours:.1f}h old (anti time-travel)")
+                    continue
             
             # Check if already replied to this exact message
             existing = db_query('SELECT 1 FROM messages WHERE msg_id = ? AND was_replied = 1', (msg_id,), fetch_one=True)
@@ -643,10 +767,11 @@ def process_new_messages():
             mood_context = get_mood_context()
             life_context = get_life_context()
             
-            # Generate reply
+            # Generate reply — pass fan_msg_time for smart greeting
             system_prompt = build_system_prompt(
                 fan_name, fan_notes, recent_for_prompt,
-                school_context, availability_context, mood_context, life_context
+                school_context, availability_context, mood_context, life_context,
+                fan_msg_time_str=last_msg.get('createdAt')
             )
             reply = ask_openai(system_prompt, text)
             
@@ -777,7 +902,7 @@ def stop_polling():
 def home():
     token_ok = get_fanvue_token() is not None
     return {
-        "status": "Jazmin Bot v3.0",
+        "status": "Jazmin Bot v4.0 — Real Girl Fixed",
         "safe_mode": SAFE_MODE,
         "token_valid": token_ok,
         "polling_active": polling_active,
