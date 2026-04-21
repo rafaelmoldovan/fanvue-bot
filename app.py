@@ -593,7 +593,7 @@ def process_new_messages():
 
             print(f"[{datetime.now()}] Processing {fan_name} — new message: '{text[:50]}'")
 
-            # Build context (newest 5 messages — API returns newest-first)
+            # Build context (newest 5 messages — API returns newest-first, then reverse to chronological)
             recent_for_prompt = []
             for msg in messages[:5]:
                 sender_uuid = msg.get('sender', {}).get('uuid')
@@ -603,6 +603,8 @@ def process_new_messages():
                     'timestamp': msg.get('sentAt') or msg.get('createdAt', ''),
                     'type': msg.get('type', '')
                 })
+            # Reverse to chronological order (oldest first) so prompt reads naturally
+            recent_for_prompt.reverse()
 
             fan_notes = profile.get('fan_notes', '') if profile else ''
             content_request = is_content_request(text)
