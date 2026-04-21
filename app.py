@@ -475,10 +475,13 @@ def process_new_messages():
                 print(f"[{datetime.now()}] Skipping {fan_name} — Jazmin manually replied recently")
                 continue
             
-            # Check if already scheduled for this chat
-            pending = db_query("SELECT * FROM scheduled_replies WHERE chat_id = ? AND status = 'pending'", (chat_id,), fetch_one=True)
-            if pending:
-                print(f"[{datetime.now()}] {fan_name} already has pending reply, will reschedule")
+            # Check if this exact message already has a scheduled or sent reply
+            already_scheduled = db_query(
+                "SELECT 1 FROM scheduled_replies WHERE fan_msg_id = ? AND status IN ('pending', 'sent')",
+                (msg_id,), fetch_one=True
+            )
+            if already_scheduled:
+                continue
             
             # Build context
             recent_for_prompt = []
@@ -588,15 +591,15 @@ def poll_loop():
     while polling_active:
         try:
             if get_fanvue_token():
-                # Step 1: Check for new messages and schedule replies
-                scheduled, status = process_new_messages()
-                if scheduled > 0:
-                    print(f"[{datetime.now()}] Scheduled {scheduled} replies")
-                
-                # Step 2: Send any due replies
+                # Step 1: Send any due replies FIRST
                 sent = send_due_replies()
                 if sent > 0:
                     print(f"[{datetime.now()}] Sent {sent} scheduled replies")
+                
+                # Step 2: Check for new messages and schedule replies
+                scheduled, status = process_new_messages()
+                if scheduled > 0:
+                    print(f"[{datetime.now()}] Scheduled {scheduled} replies")
             else:
                 print(f"[{datetime.now()}] No valid token")
         except Exception as e:
@@ -661,11 +664,11 @@ def trigger():
     if not get_fanvue_token():
         return {"error": "No valid token. Use /set_token to add refresh token."}
     
-    scheduled, status = process_new_messages()
     sent = send_due_replies()
+    scheduled, status = process_new_messages()
     return {
-        "scheduled": scheduled,
         "sent": sent,
+        "scheduled": scheduled,
         "status": status,
         "safe_mode": SAFE_MODE
     }
