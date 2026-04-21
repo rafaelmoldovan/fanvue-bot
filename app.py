@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect
+from flask import Flask, request
 import requests
 import os
 import json
@@ -102,47 +102,6 @@ def get_basic_auth_header():
     credentials = f"{FANVUE_CLIENT_ID}:{FANVUE_CLIENT_SECRET}"
     encoded = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
     return f"Basic {encoded}"
-
-def exchange_code_for_token(auth_code):
-    """Exchange authorization code for tokens"""
-    try:
-        r = requests.post("https://auth.fanvue.com/oauth2/token",
-            data={
-                "grant_type": "authorization_code",
-                "code": auth_code,
-                "redirect_uri": "https://web-production-f0a39.up.railway.app/callback"
-            },
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Authorization": get_basic_auth_header()
-            },
-            timeout=15)
-        
-        if r.status_code == 200:
-            data = r.json()
-            access_token = data.get('access_token')
-            refresh_token = data.get('refresh_token')
-            expires_in = data.get('expires_in', 3600)
-            expires_at = (datetime.now() + timedelta(seconds=expires_in - 300)).isoformat()
-            
-            save_token('refresh_token', refresh_token)
-            save_token('access_token', access_token)
-            save_token('expires_at', expires_at)
-            
-            return {
-                "success": True,
-                "access_token_preview": access_token[:20] + "...",
-                "refresh_token_preview": refresh_token[:20] + "...",
-                "expires_in": expires_in
-            }
-        else:
-            return {
-                "success": False,
-                "error": f"HTTP {r.status_code}",
-                "details": r.text[:500]
-            }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
 
 def refresh_fanvue_token():
     refresh_token = load_token('refresh_token')
@@ -389,7 +348,7 @@ def safe_fetch():
 @app.route('/trigger')
 def trigger():
     if not get_fanvue_token():
-        return {"error": "No valid token. Use /callback or /set_token to add refresh token."}
+        return {"error": "No valid token. Use /set_token to add refresh token."}
     
     count, status = process_messages()
     return {"replied": count, "status": status, "safe_mode": SAFE_MODE}
@@ -406,28 +365,31 @@ def set_token():
 
 @app.route('/callback')
 def callback():
-    """OAuth2 callback — Fanvue redirects here with ?code=..."""
+    """Just display the code — don't auto-exchange"""
     auth_code = request.args.get('code')
     error = request.args.get('error')
     
     if error:
-        return {"error": error, "description": request.args.get('error_description')}
+        return f"""
+        <h1>OAuth Error</h1>
+        <p>Error: {error}</p>
+        <p>Description: {request.args.get('error_description')}</p>
+        """
     
     if not auth_code:
-        return {"error": "No code provided. Visit the OAuth URL first."}
+        return "<h1>No code provided</h1><p>Visit the OAuth URL first.</p>"
     
-    result = exchange_code_for_token(auth_code)
-    
-    if result.get('success'):
-        send_telegram(f"✅ <b>Token saved!</b>\nAccess: {result['access_token_preview']}\nRefresh: {result['refresh_token_preview']}")
-        return {
-            "success": True,
-            "message": "Token saved to database. Bot is ready.",
-            "access_token": result['access_token_preview'],
-            "refresh_token": result['refresh_token_preview']
-        }
-    else:
-        return result
+    return f"""
+    <html>
+    <head><title>Auth Code Received</title></head>
+    <body style="font-family:monospace; padding:40px; background:#111; color:#0f0;">
+        <h1>✅ AUTH CODE RECEIVED</h1>
+        <p>Copy this code and paste it in CMD:</p>
+        <textarea style="width:100%; height:100px; font-size:16px; background:#222; color:#0f0; border:2px solid #0f0; padding:10px;" readonly onclick="this.select()">{auth_code}</textarea>
+        <p>Now run your get_token.py with this code.</p>
+    </body>
+    </html>
+    """
 
 @app.route('/test_telegram')
 def test_telegram():
