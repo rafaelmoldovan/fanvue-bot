@@ -390,7 +390,11 @@ def parse_timestamp(ts_str):
             except:
                 return None
 
-def was_manual_reply_recent(messages, minutes=30):
+def was_manual_reply_recent(chat_id, messages, minutes=30):
+    """
+    Check if Jazmin (the human) manually replied recently.
+    IMPORTANT: Exclude bot's own replies by comparing against last_reply_time in DB.
+    """
     if not messages:
         return False
     
@@ -401,16 +405,26 @@ def was_manual_reply_recent(messages, minutes=30):
     
     if sender_uuid == MY_UUID and msg_type != 'AUTOMATED_NEW_FOLLOWER':
         msg_dt = parse_timestamp(msg_time)
-        if msg_dt:
-            # Make both timezone-aware or both naive
-            now = datetime.now(timezone.utc) if msg_dt.tzinfo else datetime.now()
-            if msg_dt.tzinfo:
-                now = datetime.now(timezone.utc)
-            else:
-                now = datetime.now()
-                
-            if (now - msg_dt).total_seconds() < minutes * 60:
-                return True
+        if not msg_dt:
+            return False
+        
+        # Get when the bot last replied to this chat
+        profile = db_query('SELECT last_reply_time FROM fan_profiles WHERE chat_id = ?', (chat_id,), fetch_one=True)
+        last_bot_time = parse_timestamp(profile['last_reply_time']) if profile and profile.get('last_reply_time') else None
+        
+        # If last message is BEFORE or EQUAL to last bot reply, it's the bot's own message
+        if last_bot_time and msg_dt <= last_bot_time:
+            print(f"[{datetime.now()}] Last message in {chat_id} is bot's own reply, not manual")
+            return False
+        
+        # Last message is AFTER last bot reply → it's a real manual reply
+        now = datetime.now(timezone.utc) if msg_dt.tzinfo else datetime.now()
+        if msg_dt.tzinfo:
+            now = datetime.now(timezone.utc)
+        
+        if (now - msg_dt).total_seconds() < minutes * 60:
+            print(f"[{datetime.now()}] Skipping {chat_id} — Jazmin manually replied at {msg_time}")
+            return True
     
     return False
 
@@ -487,7 +501,7 @@ def process_new_messages():
                   text, last_msg.get('createdAt', datetime.now().isoformat())))
             
             # Check if manual reply recently (skip if Jazmin is active)
-            if was_manual_reply_recent(messages, minutes=30):
+            if was_manual_reply_recent(chat_id, messages, minutes=30):
                 continue
             
             # Check if this exact message already has a scheduled or sent reply
@@ -548,9 +562,6 @@ def process_new_messages():
             # Schedule the reply
             schedule_reply(chat_id, fan_name, msg_id, text, reply)
             scheduled += 1
-            
-            db_query('UPDATE fan_profiles SET last_reply_time = ? WHERE chat_id = ?',
-                     (datetime.now().isoformat(), chat_id))
         
         except Exception as e:
             print(f"[{datetime.now()}] Process error in chat {chat_id}: {e}")
@@ -576,7 +587,7 @@ def send_due_replies():
             
             # Double-check manual reply didn't happen since scheduling
             messages = get_messages(chat_id)
-            if was_manual_reply_recent(messages, minutes=30):
+            if was_manual_reply_recent(chat_id, messages, minutes=30):
                 print(f"[{datetime.now()}] Cancelling scheduled reply for {fan_name} — Jazmin manually replied")
                 db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (reply_id,))
                 continue
@@ -586,6 +597,11 @@ def send_due_replies():
                 db_query('UPDATE messages SET was_replied = 1, reply_text = ?, bot_replied_at = ? WHERE msg_id = ?',
                          (reply_text, datetime.now().isoformat(), fan_msg_id))
                 mark_reply_sent(reply_id)
+                
+                # Update last_reply_time so we can distinguish bot replies from manual
+                db_query('UPDATE fan_profiles SET last_reply_time = ? WHERE chat_id = ?',
+                         (datetime.now().isoformat(), chat_id))
+                
                 sent += 1
                 
                 if SAFE_MODE:
