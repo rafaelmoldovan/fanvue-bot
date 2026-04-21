@@ -1,9 +1,8 @@
-from flask import Flask, request
+from flask import Flask, request, redirect
 import requests
 import os
 import json
 import base64
-import time
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -18,7 +17,6 @@ MY_UUID = os.environ.get('MY_UUID', '38a392fc-a751-49b3-9d74-01ac6447c490')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8141197294:AAE9aH9mptY_ZzAK6sSc_alh2PtRjF1ASWs')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '8571222647')
 
-# SAFE MODE: True = replies go to Telegram instead of Fanvue
 SAFE_MODE = True
 
 # ========== SQLITE SETUP ==========
@@ -104,6 +102,47 @@ def get_basic_auth_header():
     credentials = f"{FANVUE_CLIENT_ID}:{FANVUE_CLIENT_SECRET}"
     encoded = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
     return f"Basic {encoded}"
+
+def exchange_code_for_token(auth_code):
+    """Exchange authorization code for tokens"""
+    try:
+        r = requests.post("https://auth.fanvue.com/oauth2/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": auth_code,
+                "redirect_uri": "https://web-production-f0a39.up.railway.app/callback"
+            },
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": get_basic_auth_header()
+            },
+            timeout=15)
+        
+        if r.status_code == 200:
+            data = r.json()
+            access_token = data.get('access_token')
+            refresh_token = data.get('refresh_token')
+            expires_in = data.get('expires_in', 3600)
+            expires_at = (datetime.now() + timedelta(seconds=expires_in - 300)).isoformat()
+            
+            save_token('refresh_token', refresh_token)
+            save_token('access_token', access_token)
+            save_token('expires_at', expires_at)
+            
+            return {
+                "success": True,
+                "access_token_preview": access_token[:20] + "...",
+                "refresh_token_preview": refresh_token[:20] + "...",
+                "expires_in": expires_in
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"HTTP {r.status_code}",
+                "details": r.text[:500]
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 def refresh_fanvue_token():
     refresh_token = load_token('refresh_token')
@@ -325,7 +364,7 @@ def home():
         "status": "Jazmin Bot",
         "safe_mode": SAFE_MODE,
         "token_valid": get_fanvue_token() is not None,
-        "endpoints": ["/status", "/safe_fetch", "/trigger", "/set_token", "/test_telegram", "/refresh_manual"]
+        "endpoints": ["/status", "/safe_fetch", "/trigger", "/set_token", "/test_telegram", "/callback"]
     }
 
 @app.route('/status')
@@ -350,7 +389,7 @@ def safe_fetch():
 @app.route('/trigger')
 def trigger():
     if not get_fanvue_token():
-        return {"error": "No valid token. Use /set_token to add refresh token."}
+        return {"error": "No valid token. Use /callback or /set_token to add refresh token."}
     
     count, status = process_messages()
     return {"replied": count, "status": status, "safe_mode": SAFE_MODE}
@@ -365,10 +404,30 @@ def set_token():
         return {"saved": True, "test": msg, "access_token_preview": access[:20] + "..." if access else None}
     return {"error": "No refresh_token provided"}
 
-@app.route('/refresh_manual', methods=['POST'])
-def refresh_manual():
-    access, msg = refresh_fanvue_token()
-    return {"access_token": access[:30] + "..." if access else None, "message": msg}
+@app.route('/callback')
+def callback():
+    """OAuth2 callback — Fanvue redirects here with ?code=..."""
+    auth_code = request.args.get('code')
+    error = request.args.get('error')
+    
+    if error:
+        return {"error": error, "description": request.args.get('error_description')}
+    
+    if not auth_code:
+        return {"error": "No code provided. Visit the OAuth URL first."}
+    
+    result = exchange_code_for_token(auth_code)
+    
+    if result.get('success'):
+        send_telegram(f"✅ <b>Token saved!</b>\nAccess: {result['access_token_preview']}\nRefresh: {result['refresh_token_preview']}")
+        return {
+            "success": True,
+            "message": "Token saved to database. Bot is ready.",
+            "access_token": result['access_token_preview'],
+            "refresh_token": result['refresh_token_preview']
+        }
+    else:
+        return result
 
 @app.route('/test_telegram')
 def test_telegram():
