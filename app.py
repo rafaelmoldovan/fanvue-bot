@@ -523,6 +523,15 @@ def process_new_messages():
             fan_msgs = [m for m in messages if m.get('sender', {}).get('uuid') != MY_UUID]
             if not fan_msgs:
                 continue
+            
+            # DEBUG: Log all fan message timestamps to understand API ordering
+            all_fan_times = []
+            for m in fan_msgs:
+                t = m.get('sentAt') or m.get('createdAt') or m.get('timestamp') or ''
+                txt = m.get('text', '')[:30]
+                all_fan_times.append(f"{t}:{txt}")
+            print(f"[{datetime.now()}] DEBUG {fan_name} all {len(fan_msgs)} fan msgs: {all_fan_times[-3:]}")
+            
             last_msg = fan_msgs[-1]
             msg_id = last_msg.get('uuid')
             text = last_msg.get('text', '')
