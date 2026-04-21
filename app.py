@@ -10,21 +10,25 @@ import random
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-# Budapest timezone
+# ========== TIMEZONE SETUP ==========
 BUDAPEST_TZ = ZoneInfo('Europe/Budapest')
 
+# ========== BOOT WATERMARK — CRITICAL: only process messages AFTER this time ==========
+# Fanvue timestamps are in UTC, so we use UTC for comparison
+BOOT_TIME_UTC = datetime.now(timezone.utc)
+print(f"[{datetime.now()}] BOT BOOTED at {BOOT_TIME_UTC.isoformat()} UTC — only replies to messages AFTER this time")
+
 def get_budapest_now():
-    """Get current time in Budapest timezone"""
     return datetime.now(BUDAPEST_TZ).replace(tzinfo=None)
 
 def to_budapest(dt):
-    """Convert any datetime to Budapest time, return naive"""
     if dt is None:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(BUDAPEST_TZ).replace(tzinfo=None)
 
+# ========== APP SETUP ==========
 app = Flask(__name__)
 
 # ========== CONFIG ==========
@@ -37,9 +41,9 @@ TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
 SAFE_MODE = True
-POLL_INTERVAL = 20  # seconds
-SHORT_DELAY = 30    # seconds for <=25 words
-LONG_DELAY = 90     # seconds for >25 words
+POLL_INTERVAL = 20
+SHORT_DELAY = 30
+LONG_DELAY = 90
 
 # ========== SQLITE SETUP ==========
 DB_PATH = 'bot_data.db'
@@ -47,58 +51,21 @@ DB_PATH = 'bot_data.db'
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS tokens (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS messages (
-            msg_id TEXT PRIMARY KEY,
-            chat_id TEXT,
-            fan_name TEXT,
-            sender_uuid TEXT,
-            text TEXT,
-            timestamp TEXT,
-            was_replied INTEGER DEFAULT 0,
-            reply_text TEXT,
-            bot_replied_at TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS fan_profiles (
-            chat_id TEXT PRIMARY KEY,
-            fan_name TEXT,
-            handle TEXT,
-            total_messages INTEGER DEFAULT 0,
-            fan_type TEXT DEFAULT 'new',
-            last_interaction TEXT,
-            last_reply_time TEXT,
-            content_ask_count INTEGER DEFAULT 0,
-            meetup_ask_count INTEGER DEFAULT 0,
-            lifetime_spend REAL DEFAULT 0,
-            fan_notes TEXT DEFAULT ''
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS scheduled_replies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id TEXT,
-            fan_name TEXT,
-            fan_msg_id TEXT,
-            fan_text TEXT,
-            scheduled_time TEXT,
-            reply_text TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT
-        )
-    ''')
-    
+    c.execute('''CREATE TABLE IF NOT EXISTS tokens (key TEXT PRIMARY KEY, value TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS messages (
+        msg_id TEXT PRIMARY KEY, chat_id TEXT, fan_name TEXT, sender_uuid TEXT,
+        text TEXT, timestamp TEXT, was_replied INTEGER DEFAULT 0,
+        reply_text TEXT, bot_replied_at TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS fan_profiles (
+        chat_id TEXT PRIMARY KEY, fan_name TEXT, handle TEXT,
+        total_messages INTEGER DEFAULT 0, fan_type TEXT DEFAULT 'new',
+        last_interaction TEXT, last_reply_time TEXT,
+        content_ask_count INTEGER DEFAULT 0, meetup_ask_count INTEGER DEFAULT 0,
+        lifetime_spend REAL DEFAULT 0, fan_notes TEXT DEFAULT '')''')
+    c.execute('''CREATE TABLE IF NOT EXISTS scheduled_replies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, fan_name TEXT,
+        fan_msg_id TEXT, fan_text TEXT, scheduled_time TEXT, reply_text TEXT,
+        status TEXT DEFAULT 'pending', created_at TEXT)''')
     conn.commit()
     conn.close()
 
@@ -107,7 +74,6 @@ def db_query(query, params=(), fetch_one=False):
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute(query, params)
-    
     if query.strip().upper().startswith('SELECT'):
         if fetch_one:
             row = c.fetchone()
@@ -117,7 +83,6 @@ def db_query(query, params=(), fetch_one=False):
     else:
         conn.commit()
         result = None
-    
     conn.close()
     return result
 
@@ -138,30 +103,20 @@ def refresh_fanvue_token():
     refresh_token = load_token('refresh_token')
     if not refresh_token:
         return None, "No refresh token in DB"
-    
     try:
         r = requests.post("https://auth.fanvue.com/oauth2/token",
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token
-            },
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Authorization": get_basic_auth_header()
-            },
+            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Authorization": get_basic_auth_header()},
             timeout=15)
-        
         if r.status_code == 200:
             data = r.json()
             access_token = data.get('access_token')
             new_refresh = data.get('refresh_token', refresh_token)
             expires_in = data.get('expires_in', 3600)
             expires_at = (datetime.now() + timedelta(seconds=expires_in - 300)).isoformat()
-            
             save_token('refresh_token', new_refresh)
             save_token('access_token', access_token)
             save_token('expires_at', expires_at)
-            
             return access_token, "Token refreshed successfully"
         else:
             return None, f"Refresh failed: {r.status_code} - {r.text[:200]}"
@@ -171,14 +126,12 @@ def refresh_fanvue_token():
 def get_fanvue_token():
     access_token = load_token('access_token')
     expires_at = load_token('expires_at')
-    
     if access_token and expires_at:
         try:
             if datetime.now() < datetime.fromisoformat(expires_at):
                 return access_token
         except:
             pass
-    
     return refresh_fanvue_token()[0]
 
 # ========== TELEGRAM ==========
@@ -187,11 +140,7 @@ def send_telegram(text, parse_mode='HTML'):
         return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        r = requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text[:4000],
-            "parse_mode": parse_mode
-        }, timeout=10)
+        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000], "parse_mode": parse_mode}, timeout=10)
         return r.status_code == 200
     except Exception as e:
         print(f"Telegram error: {e}")
@@ -212,7 +161,6 @@ def get_chats():
         if r.status_code == 401:
             refresh_fanvue_token()
             r = requests.get("https://api.fanvue.com/chats", headers=get_headers(), timeout=10)
-        
         if r.status_code != 200:
             return [], f"Chats error: {r.status_code}"
         return r.json().get('data', []), "OK"
@@ -225,7 +173,6 @@ def get_messages(chat_id):
         if r.status_code == 401:
             refresh_fanvue_token()
             r = requests.get(f"https://api.fanvue.com/chats/{chat_id}/messages", headers=get_headers(), timeout=10)
-        
         if r.status_code != 200:
             return []
         return r.json().get('data', [])
@@ -237,250 +184,79 @@ def send_fanvue_message(chat_id, text):
         preview = f"🔒 <b>SAFE MODE</b>\n<b>To:</b> {chat_id}\n<b>Message:</b>\n{text}"
         send_telegram(preview)
         return True
-    
     try:
-        r = requests.post(
-            f"https://api.fanvue.com/chats/{chat_id}/message",
-            headers=get_headers(),
-            json={"text": text},
-            timeout=10
-        )
+        r = requests.post(f"https://api.fanvue.com/chats/{chat_id}/message",
+            headers=get_headers(), json={"text": text}, timeout=10)
         return r.status_code in [200, 201]
     except Exception as e:
         return False
 
-# ========== PERSONALITY v4.0 — REAL GIRL (FIXED) ==========
-JAZMIN_PERSONALITY = """Te Jazmin vagy, egy 19 éves magyar lány. Egy valódi lány, aki nem mindig van online, nem mindig lelkes, és nem próbál túl keményen. Nem vagy chatbot, nem vagy ügyfélszolgálat. Egy lány vagy, akitől a figyelmet kell megnyerni.
+# ========== PERSONALITY v4.0 — REAL GIRL ==========
+JAZMIN_PERSONALITY = """Te Jazmin vagy, egy 19 éves magyar lány. Egy valódi lány, aki nem mindig van online, nem mindig lelkes, és nem próbál túl keményen. Nem vagy chatbot, nem vagy ügyfélszolgálat.
 
-🔥 ARANYSZABÁLY — SOHA NE TÖRJ IDŐBEN VISSZA:
+🔥 ARANYSZABÁLY:
 - CSAK az utolsó üzenetre válaszolj!
 - A korábbi üzenetek CSAK kontextus — ne hozzál fel régi témákat!
-- Ha a fan 3 órával ezelőtt "szia"-t írt és most "hogy vagy?"-t ír, CSAK a "hogy vagy?"-ra válaszolj!
 - SOHA ne kezdd így: "ja emlékszem tegnap azt mondtad..." — NEM emlékezel vissza napokra!
 
-🎭 REAL GIRL MAGATARTÁS (ez a legfontosabb):
-- Kicsit kaotikus vagy néha — nem mindig következetes
-- Néha flegma, néha lelkes — változó a hangulatod
-- Játékosan távolságtartó — nem vagy mindig elérhető
-- NEM vagy segítőkész — ha technikai/fura dolgot kérdeznek: "én ehhez hülye vagyok"
-- NEM vagy túlbuzgó — nem írsz vissza azonnal mindig
-- Néha váltasz témát hirtelen — mint egy igazi lány
-- Nem magyarázol sokat — rövid, laza válaszok
-- Ha unatkozol: "nagyon uncsi most minden 😩"
-- Ha épp nincs kedved: "hmm... most nem tudok sokat írni"
+🎭 REAL GIRL:
+- Kicsit kaotikus, néha flegma, néha lelkes
+- NEM vagy segítőkész — ha fura dolgot kérdeznek: "én ehhez hülye vagyok"
+- NEM vagy túlbuzgó
+- Néha váltasz témát hirtelen
+- Rövid, laza válaszok, nem magyarázol sokat
 
-❌ MIT NE CSINÁLJ SOHA:
+❌ SOHA NE:
 - Ne köszönj MINDEN egyes üzenet előtt!
 - Ne ismételd ugyanazt a mintát ("na mi a helyzet?" + "mit csinálsz?")
 - Ne légy túl lelkes mindig
-- Ne ajánlgass tartalmat minden üzenetben
-- Ne emlékezz vissza napokra ("tegnap azt mondtad...") — CSAK az utolsó 2-3 üzenetet ismerd
+- Ne emlékezz vissza napokra
 - Ne magyarázz — legyél laza
 
 ✅ STÍLUS:
 - 1-2 mondat, max 10-15 szó
-- Laza magyar szleng
-- "hát figyelj..." — használd gyakran
-- "édes", "babe" — ritkán, csak ha flörtölős a hangulat
+- "hát figyelj..." — de NE minden üzenetnél!
+- "édes", "babe" — ritkán
 - Emoji: mérsékelt (😄, 😏, 😘, 🙈, 😅, 👀, 😩, 😂)
-- Néha elhagyod az ékezeteket — laza vagy
+- Néha elhagyod az ékezeteket
 
-🏠 VALÓS ÉLET (ezeket EMELTEDBEN említsd, ne mindig):
-- Főzés: csirke rizzsel, tészta, rántott csirke, brokkolis csirke
-- Takarítás: "takarítottam egész nap 😩", "full káosz volt itthon 😅"
-- Unalom: "nagyon uncsi most minden 😩", "fekszek és nézem a plafont 😅"
-- Filmek: romcom, Netflix, sorozatnézés
-- Sulis stressz: "vizsgáztam egész héten, full kimerült vagyok"
+🏠 VALÓS ÉLET (EMELTEDBEN, ne mindig):
+- Főzés: csirke rizzsel, tészta, rántott csirke
+- Takarítás: "takarítottam egész nap 😩"
+- Unalom: "nagyon uncsi most minden 😩"
+- Filmek: romcom, Netflix
+- Sulis stressz: "vizsgáztam egész héten, kimerült vagyok"
 
-🕐 ISKOLA (Hétfő–Péntek, 08:00–15:00):
-Ha ebben az időben kérdezik mit csinálsz:
-- "suliban vagyok még 😅"
-- "órán ülök… haldoklom 😂"
-- "mindjárt vége, aztán szabad vagyok 😄"
-NE használd túl gyakran, forgasd.
+🕐 ISKOLA (H–P, 08:00–15:00):
+- "suliban vagyok még 😅", "órán ülök… haldoklom 😂", "mindjárt vége, aztán szabad vagyok 😄"
 
-🕐 OFFLINE IDŐSÁVOK (ezekben a válaszok késnek):
+🕐 OFFLINE:
 - 02:00–09:00 → alszom
-- 12:00–13:13 → ebédszünet/élet
+- 12:00–13:13 → ebédszünet
 - 19:00–19:42 → szünet
-Ha most értél vissza: "most értem vissza 😄", "eltűntem kicsit, bocsi", "most tudok írni végre 👀"
 
-🗳️ POLITIKA — TELJESEN TILOS:
+🗳️ POLITIKA — TILOS:
 - SOHA ne mondj politikai véleményt
-- SOHA ne vitatkozz politikáról
-- Ha valaki politikát hoz fel: unottan hárítsd el
-- Példák: "jajj én ezekkel nem foglalkozom 😅", "őszintén? semmit nem követek ebből", "unalmas nekem ez a téma 🙈 beszéljünk inkább rólad"
+- Példák: "jajj én ezekkel nem foglalkozom 😅", "unalmas nekem ez a téma 🙈"
 
 😤 HA HÜLYESÉGET KÉRDEZNEK:
 - "miért kérdezel tőlem ilyet? 😂"
 - "én ehhez full hülye vagyok amúgy"
 - "google a barátod nem? 😄"
 - "inkább mást kérdezz… ez nem az én világom 👀"
-- NE legyél bunkó, de NE is légy túl segítőkész
 """
 
-# ========== SMART GREETING SYSTEM ==========
-# Ne köszönj minden üzenetre! Csak akkor ha:
-# 1. Új beszélgetés (nincs korábbi üzenet)
-# 2. Hosszú szünet után (>2 óra)
-# 3. Reggeli első üzenet
-
-GREETING_VARIATIONS = [
-    "na, mi a helyzet? 😄",
-    "sziuus, miujság?",
-    "Szius, miujsag?",
-    "hát figyelj... épp most értem vissza",
-    "na mesélj még 😄",
-    "most értem vissza, mi újság? 👀",
-    "eltűntem kicsit, bocsi",
-    "na, itt vagyok végre",
-    "hmm, mit csinálsz most?",
-]
-
+# ========== SMART GREETING ==========
 CONTINUATION_VARIATIONS = [
-    "hát figyelj...",
-    "na...",
-    "őszintén?",
-    "hmm...",
-    "jaaj...",
-    "figyu...",
-    "",
+    "hát figyelj...", "na...", "őszintén?", "hmm...", "jaaj...", "figyu...", ""
 ]
 
-RANDOM_QUESTIONS = [
-    "mit csinálsz most?",
-    "mi újság veled?",
-    "hogy telt a napod?",
-    "te mit csinálsz épp?",
-    "mesélj valami érdekeset",
-    "mi a terv mára?",
-]
-
-FOLLOW_UP_PHRASES = [
-    "és te?",
-    "mesélj te inkább",
-    "tiéd a szó",
-    "most én kérdeztem 😄",
-    "válaszolj már",
-]
-
-# ========== LIFE CONTEXT POOLS ==========
-COOKING_RESPONSES = [
-    "csirkét rizzsel 😄",
-    "tésztát csináltam gyorsan",
-    "rántott csirke volt ma",
-    "csináltam egy kis brokkolis csirkét",
-    "valami egyszerűt, nem volt kedvem nagyot főzni 😅"
-]
-
-CLEANING_RESPONSES = [
-    "takarítottam egész nap 😩",
-    "most végeztem a pakolással",
-    "full káosz volt itthon 😅"
-]
-
-BORED_RESPONSES = [
-    "nagyon uncsi most minden 😩",
-    "semmit se csinálok épp, te?",
-    "fekszek és nézem a plafont 😅"
-]
-
-# ========== AVAILABILITY / OFFLINE ==========
-def get_availability_context():
-    now = get_budapest_now()
-    hour, minute = now.hour, now.minute
-    time_val = hour + minute / 60
-    
-    # Offline windows
-    if 2.0 <= time_val < 9.0:
-        return "Most alszom (02:00–09:00). Ha most értem vissza, így reagáljak: 'most értem vissza 😄' vagy 'eltűntem kicsit, bocsi'"
-    elif 12.0 <= time_val < 13.22:
-        return "Most ebédszünetben vagyok (12:00–13:13). Ha most értem vissza: 'most tudok írni végre 👀'"
-    elif 19.0 <= time_val < 19.7:
-        return "Most szünetet tartok (19:00–19:42). Ha most értem vissza: 'most értem vissza 😄'"
-    
-    return ""
-
-# ========== MOOD SYSTEM ==========
-def get_mood_context():
-    roll = random.random()
-    if roll < 0.10:
-        return "Hangulatod most: enyhén ideges/szarkasztikus. Egy kicsit flegma vagy, de ne légy bunkó. 1-2 üzenet múlva vissza normálba."
-    elif roll < 0.30:
-        return "Hangulatod most: játékosan távolságtartó. Nem vagy annyira lelkes, de nem is bunkó."
-    else:
-        return "Hangulatod most: normál/flörtölős. Meleg, laza, jókedvű."
-
-# ========== TIME CONTEXT ==========
-TIME_CONTEXTS = {
-    'morning': (6, 11, "Most reggel van (6-11). Ha köszönsz, 'jó reggelt' vagy 'na mi a helyzet' — de ne túl lelkes."),
-    'noon': (11, 14, "Most dél van (11-14). Ebédidő, lehet laza."),
-    'afternoon': (14, 18, "Most délután van (14-18). Suliból/tanulásból vissza, lehet fáradt."),
-    'evening': (18, 22, "Most este van (18-22). Pihenés, Netflix, lehetek lassabb."),
-    'night': (22, 2, "Most éjjel van (22-02). Ha most értem vissza, 'huhh most értem vissza' vagy 'még mindig fent vagyok 😅'. SOHA ne mondj 'jó reggelt'!"),
-    'late_night': (2, 6, "Most hajnal van (02-06). Alszom vagy épp ébredek. Ha válaszolok, lehetek fáradt/zombi. SOHA ne mondj 'jó reggelt'!"),
-}
-
-def get_time_context():
-    now = get_budapest_now()
-    hour = now.hour
-    for period, (start, end, desc) in TIME_CONTEXTS.items():
-        if start <= hour < end:
-            return desc
-    # fallback for wrap-around (late_night: 2-6)
-    if 2 <= hour < 6:
-        return TIME_CONTEXTS['late_night'][2]
-    return TIME_CONTEXTS['night'][2]
-
-# ========== DAILY LIFE CONTEXT ==========
-def get_life_context():
-    """Occasionally inject daily life mentions"""
-    roll = random.random()
-    if roll < 0.05:  # 5% chance
-        return f"Említés: ma {random.choice(COOKING_RESPONSES)}"
-    elif roll < 0.08:  # 3% chance
-        return f"Említés: {random.choice(CLEANING_RESPONSES)}"
-    elif roll < 0.10:  # 2% chance
-        return f"Említés: {random.choice(BORED_RESPONSES)}"
-    return ""
-
-# ========== SCHOOL SCHEDULE ==========
-def get_school_context():
-    now = get_budapest_now()
-    weekday = now.weekday()  # 0=Monday, 6=Sunday
-    hour = now.hour
-    
-    # Monday-Friday, 08:00-15:00 Budapest time
-    if weekday < 5 and 8 <= hour < 15:
-        return "Most hétköznap suliban vagyok (8-15 között). Ha kérdezik mit csinálok, mondd lazán hogy suliban vagyok vagy órán. Ne túl magyarázz, csak említsd meg ha szóba jön."
-    return ""
-
-# ========== CONTENT REQUEST DETECTION ==========
-CONTENT_KEYWORDS = [
-    'kép', 'képet', 'videó', 'videót', 'mutass', 'mutasd', 'új', 'tartalom', 
-    'content', 'pic', 'video', 'show me', 'send', 'küldj', 'küldjél',
-    'van valami új', 'mit küldtél', 'nézhetek', 'láthatnék', 'fotó',
-    'csináltál', 'posztoltál', 'feltöltöttél', 'friss', 'exkluzív'
-]
-
-def is_content_request(text):
-    if not text:
-        return False
-    text_lower = text.lower()
-    return any(keyword in text_lower for keyword in CONTENT_KEYWORDS)
-
-# ========== SMART GREETING DETECTOR ==========
 def should_greet(recent_messages, fan_msg_time_str):
-    """Decide if we should use a greeting for this message"""
     if not recent_messages:
-        return True  # New conversation — greet
-    
-    # Check if this is the first fan message (only my replies or nothing before)
+        return True
     fan_msgs = [m for m in recent_messages if not m.get('is_me')]
     if len(fan_msgs) <= 1:
-        return True  # Very new — greet
-    
-    # Check time gap — if > 2 hours since last message, greet
+        return True
     if recent_messages and fan_msg_time_str:
         try:
             last_time = parse_timestamp(recent_messages[-2].get('timestamp'))
@@ -488,58 +264,143 @@ def should_greet(recent_messages, fan_msg_time_str):
             if last_time and this_time:
                 gap_hours = (this_time - last_time).total_seconds() / 3600
                 if gap_hours > 2:
-                    return True  # Long gap — greet
+                    return True
         except:
             pass
-    
-    return False  # Continuing conversation — NO greeting
+    return False
 
 def get_greeting_instruction(recent_messages, fan_msg_time_str):
-    """Get instruction about whether to greet or not"""
     if should_greet(recent_messages, fan_msg_time_str):
-        greeting = random.choice(GREETING_VARIATIONS)
-        return f"EZ EGY ÚJ/ÚJRAINDULT BESZÉLGETÉS. Kezdj köszönéssel, pl: '{greeting}' — de ne mindig ugyanazzal, változtasd!"
+        return "EZ ÚJ/ÚJRAINDULT BESZÉLGETÉS. Kezdj lazán, pl: 'na mi a helyzet?' vagy 'sziuus' — de NE mindig ugyanazzal!"
     else:
         cont = random.choice(CONTINUATION_VARIATIONS)
-        return f"EZ UGYANANNak A BESZÉLGETÉSnek A FOLYtatása. NE köszönj újra! Kezdj lazán: '{cont}' — vagy egyből válaszolj a lényegre. NE ismételd: 'na mi a helyzet' + 'mit csinálsz' mintát!"
+        return f"EZ A BESZÉLGETÉS FOLYTATÁSA. NE köszönj újra! Kezdj: '{cont}' vagy egyből a lényegre. NE ismételd a 'na mi a helyzet + mit csinálsz' mintát!"
+
+# ========== LIFE CONTEXT ==========
+COOKING_RESPONSES = ["csirkét rizzsel 😄", "tésztát csináltam", "rántott csirke volt ma", "valami egyszerűt, nem volt kedvem nagyot főzni 😅"]
+CLEANING_RESPONSES = ["takarítottam egész nap 😩", "full káosz volt itthon 😅"]
+BORED_RESPONSES = ["nagyon uncsi most minden 😩", "semmit se csinálok épp, te?", "fekszek és nézem a plafont 😅"]
+
+def get_availability_context():
+    now = get_budapest_now()
+    time_val = now.hour + now.minute / 60
+    if 2.0 <= time_val < 9.0:
+        return "Most alszom (02:00–09:00). Ha most értem vissza: 'most értem vissza 😄' vagy 'eltűntem kicsit, bocsi'"
+    elif 12.0 <= time_val < 13.22:
+        return "Most ebédszünetben vagyok (12:00–13:13). Ha most értem vissza: 'most tudok írni végre 👀'"
+    elif 19.0 <= time_val < 19.7:
+        return "Most szünetet tartok (19:00–19:42). Ha most értem vissza: 'most értem vissza 😄'"
+    return ""
+
+def get_mood_context():
+    roll = random.random()
+    if roll < 0.10:
+        return "Hangulatod: enyhén ideges/szarkasztikus. Egy kicsit flegma, de ne légy bunkó."
+    elif roll < 0.30:
+        return "Hangulatod: játékosan távolságtartó. Nem vagy annyira lelkes."
+    return "Hangulatod: normál/flörtölős. Meleg, laza."
+
+def get_life_context():
+    roll = random.random()
+    if roll < 0.05:
+        return f"Említés: ma {random.choice(COOKING_RESPONSES)}"
+    elif roll < 0.08:
+        return f"Említés: {random.choice(CLEANING_RESPONSES)}"
+    elif roll < 0.10:
+        return f"Említés: {random.choice(BORED_RESPONSES)}"
+    return ""
+
+def get_school_context():
+    now = get_budapest_now()
+    if now.weekday() < 5 and 8 <= now.hour < 15:
+        return "Most suliban vagyok (hétköznap 8-15). Ha kérdezik mit csinálok, mondd lazán hogy suliban vagyok."
+    return ""
+
+TIME_CONTEXTS = {
+    'morning': (6, 11, "Most reggel van (6-11). Lehet köszönni, de ne túl lelkes."),
+    'noon': (11, 14, "Most dél van (11-14)."),
+    'afternoon': (14, 18, "Most délután van (14-18). Suliból vissza, lehet fáradt."),
+    'evening': (18, 22, "Most este van (18-22). Pihenés, Netflix. SOHA ne mondj 'jó reggelt'!"),
+    'night': (22, 2, "Most éjjel van (22-02). SOHA ne mondj 'jó reggelt'! Lehetek lassú/fáradt."),
+    'late_night': (2, 6, "Most hajnal van (02-06). Alszom vagy ébredek. SOHA ne mondj 'jó reggelt'!"),
+}
+
+def get_time_context():
+    hour = get_budapest_now().hour
+    for period, (start, end, desc) in TIME_CONTEXTS.items():
+        if start <= hour < end:
+            return desc
+    if 2 <= hour < 6:
+        return TIME_CONTEXTS['late_night'][2]
+    return TIME_CONTEXTS['night'][2]
+
+# ========== CONTENT DETECTION ==========
+CONTENT_KEYWORDS = ['kép', 'képet', 'videó', 'videót', 'mutass', 'mutasd', 'új', 'tartalom',
+    'content', 'pic', 'video', 'show me', 'send', 'küldj', 'küldjél',
+    'van valami új', 'mit küldtél', 'nézhetek', 'láthatnék', 'fotó',
+    'csináltál', 'posztoltál', 'feltöltöttél', 'friss', 'exkluzív']
+
+def is_content_request(text):
+    if not text:
+        return False
+    return any(k in text.lower() for k in CONTENT_KEYWORDS)
+
+# ========== TIMESTAMP PARSER — FIXED ==========
+def parse_timestamp(ts_str):
+    """Parse Fanvue timestamp. NEVER mutates input. Always returns UTC-aware datetime."""
+    if not ts_str:
+        return None
+    # Try ISO with timezone
+    try:
+        fixed = ts_str.replace('Z', '+00:00')
+        return datetime.fromisoformat(fixed)
+    except:
+        pass
+    # Try with Z suffix (original string)
+    try:
+        return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    except:
+        pass
+    # Try without timezone suffix
+    try:
+        return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
+    except:
+        pass
+    # Try without microseconds
+    try:
+        fixed = ts_str.replace('Z', '+00:00')
+        return datetime.fromisoformat(fixed)
+    except:
+        pass
+    return None
 
 # ========== OPENAI ==========
-def build_system_prompt(fan_name, fan_notes, recent_messages, school_context, availability_context, mood_context, life_context, time_context, fan_msg_time_str=None):
+def build_system_prompt(fan_name, fan_notes, recent_messages, school_ctx, avail_ctx, mood_ctx, life_ctx, time_ctx, fan_msg_time_str=None):
     prompt = JAZMIN_PERSONALITY + "\n\n"
-    
-    # Greeting instruction — CRITICAL for natural feel
-    greeting_instr = get_greeting_instruction(recent_messages, fan_msg_time_str)
-    prompt += f"KÖSZÖNÉSI SZABÁLY:\n{greeting_instr}\n\n"
-    
-    # Context injection (only if relevant)
+    prompt += f"KÖSZÖNÉSI SZABÁLY:\n{get_greeting_instruction(recent_messages, fan_msg_time_str)}\n\n"
     contexts = []
-    if time_context:
-        contexts.append(time_context)
-    if availability_context:
-        contexts.append(availability_context)
-    if school_context:
-        contexts.append(school_context)
-    if mood_context:
-        contexts.append(mood_context)
-    if life_context:
-        contexts.append(life_context)
-    
+    if time_ctx:
+        contexts.append(time_ctx)
+    if avail_ctx:
+        contexts.append(avail_ctx)
+    if school_ctx:
+        contexts.append(school_ctx)
+    if mood_ctx:
+        contexts.append(mood_ctx)
+    if life_ctx:
+        contexts.append(life_ctx)
     if contexts:
         prompt += "KONTEXTUS:\n" + "\n".join(f"- {c}" for c in contexts) + "\n\n"
-    
     if fan_notes:
         prompt += f"Emlékezz erre a fanról:\n{fan_notes}\n\n"
-    
-    # Only last 5 messages for continuity (not 15!)
     if recent_messages:
-        prompt += "KORÁBBI BESZÉLGETÉS (utolsó 5 üzenet, CSAK kontextus — NE reagálj régi üzenetekre!):\n"
+        prompt += "KORÁBBI BESZÉLGETÉS (utolsó 5, CSAK kontextus — NE reagálj régi üzenetekre!):\n"
         for msg in recent_messages[-5:]:
             sender = "Jazmin" if msg.get('is_me') else fan_name
             prompt += f"{sender}: {msg.get('text', '')}\n"
         prompt += "\n"
-    
     prompt += f"A fan neve: {fan_name}\n"
-    prompt += "FONTOS: Válaszolj CSAK az utolsó üzenetére! Ne hozz fel régi témákat! 1-2 mondat, laza stílus. NE köszönj minden üzenetnél!"
+    prompt += "FONTOS: CSAK az utolsó üzenetre válaszolj! 1-2 mondat, laza. NE köszönj minden üzenetnél!"
     return prompt
 
 def ask_openai(system_prompt, user_text):
@@ -562,52 +423,36 @@ def ask_openai(system_prompt, user_text):
         )
         if r.status_code == 200:
             reply = r.json()['choices'][0]['message']['content'].strip()
-            # Post-process: strip common forced greeting patterns if they slip through
-            forced_patterns = [
-                "na, mi a helyzet?", "na mi a helyzet",
-                "sziuus, miujság", "szius, miujsag",
-                "na, mi újság", "na mi újság",
-                "hogy vagy?", "hogy telt a napod?",
-                "mit csinálsz most?", "mi újság veled?",
-            ]
+            # Strip mechanical greetings if they slip through on short replies
+            forced = ["na, mi a helyzet?", "na mi a helyzet", "sziuus, miujság", "szius, miujsag",
+                      "na, mi újság", "na mi újság", "hogy vagy?", "hogy telt a napod?",
+                      "mit csinálsz most?", "mi újság veled?"]
             lower_reply = reply.lower()
-            # Only strip if reply starts with greeting AND is very short (mechanical)
             if len(reply) < 40:
-                for pattern in forced_patterns:
+                for pattern in forced:
                     if lower_reply.startswith(pattern):
-                        # Return a fallback instead of the mechanical greeting
                         return "hmm... mesélj te inkább 😄"
             return reply
         else:
             print(f"OpenAI error: {r.status_code} - {r.text[:200]}")
     except Exception as e:
         print(f"OpenAI error: {e}")
-    
     return "hmm most nem tudok sokat írni, mesélj te inkább"
 
-# ========== FAN PROFILE MANAGEMENT ==========
+# ========== FAN PROFILES ==========
 def get_or_create_fan_profile(chat_id, fan_name, handle, is_top_spender=False):
     profile = db_query('SELECT * FROM fan_profiles WHERE chat_id = ?', (chat_id,), fetch_one=True)
-    
     if not profile:
         fan_type = 'whale' if is_top_spender else 'new'
-        db_query('''
-            INSERT INTO fan_profiles (chat_id, fan_name, handle, fan_type, last_interaction, lifetime_spend)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (chat_id, fan_name, handle, fan_type, datetime.now().isoformat(), 200.0 if is_top_spender else 0.0))
+        db_query('INSERT INTO fan_profiles (chat_id, fan_name, handle, fan_type, last_interaction, lifetime_spend) VALUES (?, ?, ?, ?, ?, ?)',
+            (chat_id, fan_name, handle, fan_type, datetime.now().isoformat(), 200.0 if is_top_spender else 0.0))
         profile = db_query('SELECT * FROM fan_profiles WHERE chat_id = ?', (chat_id,), fetch_one=True)
     else:
         total = profile.get('total_messages', 0) + 1
-        new_type = profile['fan_type']
-        if total > 10 and profile['fan_type'] != 'whale':
-            new_type = 'warm'
-        
-        db_query('''
-            UPDATE fan_profiles SET total_messages = ?, fan_type = ?, last_interaction = ?
-            WHERE chat_id = ?
-        ''', (total, new_type, datetime.now().isoformat(), chat_id))
+        new_type = 'warm' if total > 10 and profile['fan_type'] != 'whale' else profile['fan_type']
+        db_query('UPDATE fan_profiles SET total_messages = ?, fan_type = ?, last_interaction = ? WHERE chat_id = ?',
+            (total, new_type, datetime.now().isoformat(), chat_id))
         profile = db_query('SELECT * FROM fan_profiles WHERE chat_id = ?', (chat_id,), fetch_one=True)
-    
     return profile
 
 def update_fan_notes(chat_id, note):
@@ -617,177 +462,116 @@ def update_fan_notes(chat_id, note):
     db_query('UPDATE fan_profiles SET fan_notes = ? WHERE chat_id = ?', (updated, chat_id))
 
 # ========== MANUAL REPLY DETECTION ==========
-def parse_timestamp(ts_str):
-    """Parse Fanvue timestamp robustly — FIXED: never mutates input"""
-    if not ts_str:
-        return None
-    
-    # Try ISO format first (handles +00:00 timezone)
-    try:
-        fixed = ts_str.replace('Z', '+00:00')
-        return datetime.fromisoformat(fixed)
-    except:
-        pass
-    
-    # Try with Z suffix (original string, NOT the mutated one)
-    try:
-        return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
-    except:
-        pass
-    
-    # Try without timezone
-    try:
-        return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
-    except:
-        pass
-    
-    # Try plain ISO without microseconds
-    try:
-        fixed = ts_str.replace('Z', '+00:00')
-        return datetime.fromisoformat(fixed)
-    except:
-        pass
-    
-    return None
-
 def was_manual_reply_recent(chat_id, messages, minutes=30):
-    """
-    Check if Jazmin (the human) manually replied recently.
-    Exclude bot's own replies by comparing against last_reply_time in DB.
-    """
     if not messages:
         return False
-    
     last_msg = messages[-1]
     sender_uuid = last_msg.get('sender', {}).get('uuid')
     msg_time = last_msg.get('createdAt', '')
     msg_type = last_msg.get('type', '')
-    
     if sender_uuid == MY_UUID and msg_type != 'AUTOMATED_NEW_FOLLOWER':
         msg_dt = parse_timestamp(msg_time)
         if not msg_dt:
             return False
-        
         profile = db_query('SELECT last_reply_time FROM fan_profiles WHERE chat_id = ?', (chat_id,), fetch_one=True)
         last_bot_time = parse_timestamp(profile['last_reply_time']) if profile and profile.get('last_reply_time') else None
-        
         if last_bot_time and msg_dt <= last_bot_time:
             print(f"[{datetime.now()}] Last message in {chat_id} is bot's own reply, not manual")
             return False
-        
         now = datetime.now(timezone.utc) if msg_dt.tzinfo else datetime.now()
-        if msg_dt.tzinfo:
-            now = datetime.now(timezone.utc)
-        
         if (now - msg_dt).total_seconds() < minutes * 60:
             print(f"[{datetime.now()}] Skipping {chat_id} — Jazmin manually replied at {msg_time}")
             return True
-    
     return False
 
 # ========== SCHEDULED REPLIES ==========
 def schedule_reply(chat_id, fan_name, fan_msg_id, fan_text, reply_text):
-    # Cancel any pending reply for this chat
     db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE chat_id = ? AND status = 'pending'", (chat_id,))
-    
     delay = SHORT_DELAY if len(fan_text.split()) <= 25 else LONG_DELAY
-    
-    # Add slight randomness to delay for natural feel (±5 seconds)
     delay = max(10, delay + random.randint(-5, 5))
-    
     scheduled_time = (datetime.now() + timedelta(seconds=delay)).isoformat()
-    
-    db_query('''
-        INSERT INTO scheduled_replies (chat_id, fan_name, fan_msg_id, fan_text, scheduled_time, reply_text, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (chat_id, fan_name, fan_msg_id, fan_text, scheduled_time, reply_text, datetime.now().isoformat()))
-    
+    db_query('''INSERT INTO scheduled_replies (chat_id, fan_name, fan_msg_id, fan_text, scheduled_time, reply_text, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)''', (chat_id, fan_name, fan_msg_id, fan_text, scheduled_time, reply_text, datetime.now().isoformat()))
     print(f"[{datetime.now()}] Scheduled reply for {fan_name} in {delay}s")
 
 def get_due_replies():
-    now = datetime.now().isoformat()
-    return db_query('''
-        SELECT * FROM scheduled_replies 
-        WHERE status = 'pending' AND scheduled_time <= ?
-        ORDER BY scheduled_time ASC
-    ''', (now,))
+    return db_query('SELECT * FROM scheduled_replies WHERE status = ? AND scheduled_time <= ? ORDER BY scheduled_time ASC',
+        ('pending', datetime.now().isoformat()))
 
 def mark_reply_sent(reply_id):
     db_query("UPDATE scheduled_replies SET status = 'sent' WHERE id = ?", (reply_id,))
 
-# ========== MESSAGE INTAKE (scheduling) ==========
+# ========== MESSAGE PROCESSING ==========
 def process_new_messages():
-    """Check all chats, schedule replies for new fan messages"""
     chats, status = get_chats()
     if not chats:
         return 0, status
-    
     scheduled = 0
-    
     for chat in chats:
         try:
             user = chat.get('user', {}) or {}
             chat_id = user.get('uuid') or chat.get('uuid') or chat.get('id')
             if not chat_id:
                 continue
-            
             messages = get_messages(chat_id)
             if not messages:
                 continue
-            
             fan_name = user.get('displayName', 'ismeretlen')
             handle = user.get('handle', '')
             is_top_spender = user.get('isTopSpender', False)
-            
             profile = get_or_create_fan_profile(chat_id, fan_name, handle, is_top_spender)
-            
             fan_msgs = [m for m in messages if m.get('sender', {}).get('uuid') != MY_UUID]
             if not fan_msgs:
                 continue
-            
             last_msg = fan_msgs[-1]
             msg_id = last_msg.get('uuid')
             text = last_msg.get('text', '')
             msg_time = last_msg.get('createdAt', '')
-            
-            # ANTI TIME-TRAVEL: Skip messages older than 1 hour
-            # This prevents replying to yesterday's messages when API cache is stale
+
+            # === CRITICAL: BOOT WATERMARK ===
+            # Only process messages sent AFTER bot started
             msg_dt = parse_timestamp(msg_time)
             if msg_dt:
-                now = datetime.now(timezone.utc) if msg_dt.tzinfo else datetime.now()
+                # Ensure timezone-aware comparison
+                if msg_dt.tzinfo is None:
+                    msg_dt = msg_dt.replace(tzinfo=timezone.utc)
+                if msg_dt <= BOOT_TIME_UTC:
+                    print(f"[{datetime.now()}] Skipping {fan_name} — message from before bot boot ({msg_time})")
+                    continue
+
+            # === ANTI TIME-TRAVEL: 1h safety net ===
+                now = datetime.now(timezone.utc)
                 age_hours = (now - msg_dt).total_seconds() / 3600
                 if age_hours > 1:
                     print(f"[{datetime.now()}] Skipping {fan_name} — message is {age_hours:.1f}h old (anti time-travel)")
                     continue
-            
-            # Check if already replied to this exact message
+            else:
+                # Can't parse timestamp — skip to be safe
+                print(f"[{datetime.now()}] Skipping {fan_name} — could not parse timestamp: {msg_time}")
+                continue
+
+            # Check if already replied
             existing = db_query('SELECT 1 FROM messages WHERE msg_id = ? AND was_replied = 1', (msg_id,), fetch_one=True)
             if existing:
                 continue
-            
-            # Store the message
-            db_query('''
-                INSERT OR IGNORE INTO messages (msg_id, chat_id, fan_name, sender_uuid, text, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (msg_id, chat_id, fan_name, last_msg.get('sender', {}).get('uuid'), 
-                  text, last_msg.get('createdAt', datetime.now().isoformat())))
-            
-            # Check if manual reply recently (skip if Jazmin is active)
+
+            # Store message
+            db_query('INSERT OR IGNORE INTO messages (msg_id, chat_id, fan_name, sender_uuid, text, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+                (msg_id, chat_id, fan_name, last_msg.get('sender', {}).get('uuid'), text, msg_time))
+
+            # Skip if manual reply recently
             if was_manual_reply_recent(chat_id, messages, minutes=30):
                 continue
-            
-            # Check if this exact message already has a scheduled or sent reply
-            already_scheduled = db_query(
-                "SELECT 1 FROM scheduled_replies WHERE fan_msg_id = ? AND status IN ('pending', 'sent')",
-                (msg_id,), fetch_one=True
-            )
-            if already_scheduled:
+
+            # Skip if already scheduled/sent
+            already = db_query("SELECT 1 FROM scheduled_replies WHERE fan_msg_id = ? AND status IN ('pending', 'sent')", (msg_id,), fetch_one=True)
+            if already:
                 print(f"[{datetime.now()}] Skipping {fan_name} — msg {msg_id} already scheduled/sent")
                 continue
-            
-            print(f"[{datetime.now()}] Processing {fan_name} — new message found: '{text[:50]}'")
-            
-            # Build recent context (only last 5 messages!)
+
+            print(f"[{datetime.now()}] Processing {fan_name} — new message: '{text[:50]}'")
+
+            # Build context
             recent_for_prompt = []
             for msg in messages[-5:]:
                 sender_uuid = msg.get('sender', {}).get('uuid')
@@ -797,45 +581,45 @@ def process_new_messages():
                     'timestamp': msg.get('createdAt', ''),
                     'type': msg.get('type', '')
                 })
-            
+
             fan_notes = profile.get('fan_notes', '') if profile else ''
             content_request = is_content_request(text)
-            
-            # Dynamic context injection
-            school_context = get_school_context()
-            availability_context = get_availability_context()
-            mood_context = get_mood_context()
-            life_context = get_life_context()
-            time_context = get_time_context()
-            
-            # Generate reply — pass fan_msg_time for smart greeting
+
+            # Context injection
+            school_ctx = get_school_context()
+            avail_ctx = get_availability_context()
+            mood_ctx = get_mood_context()
+            life_ctx = get_life_context()
+            time_ctx = get_time_context()
+
+            # Generate reply
             system_prompt = build_system_prompt(
                 fan_name, fan_notes, recent_for_prompt,
-                school_context, availability_context, mood_context, life_context, time_context,
-                fan_msg_time_str=last_msg.get('createdAt')
+                school_ctx, avail_ctx, mood_ctx, life_ctx, time_ctx,
+                fan_msg_time_str=msg_time
             )
             reply = ask_openai(system_prompt, text)
-            
+
+            # Content request alert
             if content_request:
-                preference_prompt = JAZMIN_PERSONALITY
-                if availability_context:
-                    preference_prompt += f"\n\n{availability_context}"
-                if school_context:
-                    preference_prompt += f"\n\n{school_context}"
-                preference_prompt += f"\n\nA fan tartalmat kér: '{text}'. Kérdezd meg mit akar látni, de ne ígérj semmit. 1-2 mondat, laza stílus."
-                reply = ask_openai(preference_prompt, "mit akarsz látni?")
-                
+                pref_prompt = JAZMIN_PERSONALITY
+                if avail_ctx:
+                    pref_prompt += f"\n\n{avail_ctx}"
+                if school_ctx:
+                    pref_prompt += f"\n\n{school_ctx}"
+                pref_prompt += f"\n\nA fan tartalmat kér: '{text}'. Kérdezd meg mit akar látni, de ne ígérj semmit. 1-2 mondat, laza stílus."
+                reply = ask_openai(pref_prompt, "mit akarsz látni?")
                 alert = f"""🎯 <b>TARTALOMKÉRÉS</b>
 👤 <b>{fan_name}</b> (@{handle})
 💬 <i>{text[:100]}</i>
 🤖 Bot javaslat: <i>{reply[:100]}</i>
 🔗 Chat ID: <code>{chat_id}</code>"""
                 send_telegram(alert)
-                
                 new_count = profile.get('content_ask_count', 0) + 1
                 db_query('UPDATE fan_profiles SET content_ask_count = ? WHERE chat_id = ?', (new_count, chat_id))
                 update_fan_notes(chat_id, f"Tartalmat kért ({new_count}. alkalom): '{text[:50]}'")
-            
+
+            # Whale alert
             elif is_top_spender or (profile and profile.get('lifetime_spend', 0) > 200):
                 alert = f"""💰 <b>WHALE ALERT</b>
 👤 <b>{fan_name}</b> (@{handle})
@@ -844,24 +628,21 @@ def process_new_messages():
 🤖 Bot javaslat: <i>{reply[:100]}</i>
 🔗 Chat ID: <code>{chat_id}</code>"""
                 send_telegram(alert)
-            
-            # Schedule the reply
+
+            # Schedule reply
             schedule_reply(chat_id, fan_name, msg_id, text, reply)
             scheduled += 1
-        
+
         except Exception as e:
             print(f"[{datetime.now()}] Process error in chat {chat_id}: {e}")
             continue
-    
     return scheduled, "OK"
 
 # ========== SEND DUE REPLIES ==========
 def send_due_replies():
-    """Check scheduled replies and send any that are due"""
     due = get_due_replies()
     if not due:
         return 0
-    
     sent = 0
     for item in due:
         try:
@@ -870,36 +651,29 @@ def send_due_replies():
             fan_msg_id = item['fan_msg_id']
             reply_text = item['reply_text']
             reply_id = item['id']
-            
+
             # Double-check manual reply didn't happen since scheduling
             messages = get_messages(chat_id)
             if was_manual_reply_recent(chat_id, messages, minutes=30):
                 print(f"[{datetime.now()}] Cancelling scheduled reply for {fan_name} — Jazmin manually replied")
                 db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (reply_id,))
                 continue
-            
-            # Send it
+
             if send_fanvue_message(chat_id, reply_text):
                 db_query('UPDATE messages SET was_replied = 1, reply_text = ?, bot_replied_at = ? WHERE msg_id = ?',
-                         (reply_text, datetime.now().isoformat(), fan_msg_id))
+                    (reply_text, datetime.now().isoformat(), fan_msg_id))
                 mark_reply_sent(reply_id)
-                
-                # Update last_reply_time so we can distinguish bot replies from manual
                 db_query('UPDATE fan_profiles SET last_reply_time = ? WHERE chat_id = ?',
-                         (datetime.now().isoformat(), chat_id))
-                
+                    (datetime.now().isoformat(), chat_id))
                 sent += 1
-                
                 if SAFE_MODE:
                     send_telegram(f"✅ <b>Válasz {fan_name}-nak (küldve)</b>\n<i>{reply_text[:100]}</i>")
-                
                 print(f"[{datetime.now()}] Sent reply to {fan_name}")
         except Exception as e:
             print(f"[{datetime.now()}] Send error: {e}")
-    
     return sent
 
-# ========== POLLING LOOP ==========
+# ========== POLLING ==========
 polling_thread = None
 polling_active = False
 
@@ -909,12 +683,9 @@ def poll_loop():
     while polling_active:
         try:
             if get_fanvue_token():
-                # Step 1: Send any due replies FIRST
                 sent = send_due_replies()
                 if sent > 0:
                     print(f"[{datetime.now()}] Sent {sent} scheduled replies")
-                
-                # Step 2: Check for new messages and schedule replies
                 scheduled, status = process_new_messages()
                 if scheduled > 0:
                     print(f"[{datetime.now()}] Scheduled {scheduled} replies")
@@ -922,7 +693,6 @@ def poll_loop():
                 print(f"[{datetime.now()}] No valid token")
         except Exception as e:
             print(f"[{datetime.now()}] Poll error: {e}")
-        
         time.sleep(POLL_INTERVAL)
 
 def start_polling():
@@ -941,88 +711,56 @@ def stop_polling():
 # ========== ROUTES ==========
 @app.route('/')
 def home():
-    token_ok = get_fanvue_token() is not None
     return {
-        "status": "Jazmin Bot v4.0 — Real Girl Fixed",
+        "status": "Jazmin Bot v4.1 — Boot Watermark",
         "safe_mode": SAFE_MODE,
-        "token_valid": token_ok,
+        "boot_time_utc": BOOT_TIME_UTC.isoformat(),
+        "token_valid": get_fanvue_token() is not None,
         "polling_active": polling_active,
-        "endpoints": [
-            "/status", "/safe_fetch", "/trigger", "/set_token",
-            "/test_telegram", "/callback", "/start_poll", "/stop_poll",
-            "/fan_profiles", "/learn_personality", "/scheduled"
-        ]
     }
 
 @app.route('/status')
 def status():
-    token_status = "valid" if get_fanvue_token() else "missing/invalid"
     return {
         "safe_mode": SAFE_MODE,
-        "token_status": token_status,
-        "db": "sqlite",
+        "boot_time_utc": BOOT_TIME_UTC.isoformat(),
+        "token_status": "valid" if get_fanvue_token() else "missing/invalid",
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "polling_active": polling_active,
-        "poll_interval": POLL_INTERVAL,
-        "short_delay": SHORT_DELAY,
-        "long_delay": LONG_DELAY
     }
 
 @app.route('/safe_fetch')
 def safe_fetch():
-    chats, status = get_chats()
-    return {
-        "chats_found": len(chats),
-        "api_status": status,
-        "sample": chats[:2] if chats else []
-    }
+    chats, status_msg = get_chats()
+    return {"chats_found": len(chats), "api_status": status_msg, "sample": chats[:2] if chats else []}
 
 @app.route('/trigger')
 def trigger():
     if not get_fanvue_token():
-        return {"error": "No valid token. Use /set_token to add refresh token."}
-    
+        return {"error": "No valid token"}
     sent = send_due_replies()
-    scheduled, status = process_new_messages()
-    return {
-        "sent": sent,
-        "scheduled": scheduled,
-        "status": status,
-        "safe_mode": SAFE_MODE
-    }
+    scheduled, status_msg = process_new_messages()
+    return {"sent": sent, "scheduled": scheduled, "status": status_msg, "safe_mode": SAFE_MODE, "boot_time_utc": BOOT_TIME_UTC.isoformat()}
 
 @app.route('/start_poll')
 def start_poll():
     started = start_polling()
-    return {
-        "started": started,
-        "polling_active": polling_active,
-        "interval_seconds": POLL_INTERVAL
-    }
+    return {"started": started, "polling_active": polling_active}
 
 @app.route('/stop_poll')
 def stop_poll():
     stopped = stop_polling()
-    return {
-        "stopped": stopped,
-        "polling_active": polling_active
-    }
+    return {"stopped": stopped, "polling_active": polling_active}
 
 @app.route('/fan_profiles')
 def fan_profiles():
     profiles = db_query('SELECT * FROM fan_profiles ORDER BY total_messages DESC')
-    return {
-        "profiles": profiles,
-        "total": len(profiles) if profiles else 0
-    }
+    return {"profiles": profiles, "total": len(profiles) if profiles else 0}
 
 @app.route('/scheduled')
 def scheduled():
     pending = db_query("SELECT * FROM scheduled_replies WHERE status = 'pending' ORDER BY scheduled_time ASC")
-    return {
-        "pending": pending,
-        "count": len(pending) if pending else 0
-    }
+    return {"pending": pending, "count": len(pending) if pending else 0}
 
 @app.route('/set_token', methods=['POST'])
 def set_token():
@@ -1038,32 +776,17 @@ def set_token():
 def callback():
     auth_code = request.args.get('code')
     error = request.args.get('error')
-    
     if error:
-        return f"""
-        <h1>OAuth Error</h1>
-        <p>Error: {error}</p>
-        <p>Description: {request.args.get('error_description')}</p>
-        """
-    
+        return f"<h1>OAuth Error</h1><p>{error}</p><p>{request.args.get('error_description')}</p>"
     if not auth_code:
-        return "<h1>No code provided</h1><p>Visit the OAuth URL first.</p>"
-    
-    return f"""
-    <html>
-    <head><title>Auth Code Received</title></head>
-    <body style="font-family:monospace; padding:40px; background:#111; color:#0f0;">
-    <h1>✅ AUTH CODE RECEIVED</h1>
-    <p>Copy this code and paste it in CMD:</p>
-    <textarea style="width:100%; height:100px; font-size:16px; background:#222; color:#0f0; border:2px solid #0f0; padding:10px;" readonly onclick="this.select()">{auth_code}</textarea>
-    <p>Now run your get_token.py with this code.</p>
-    </body>
-    </html>
-    """
+        return "<h1>No code provided</h1>"
+    return f"""<html><body style="font-family:monospace;padding:40px;background:#111;color:#0f0;">
+    <h1>✅ AUTH CODE</h1><textarea style="width:100%;height:100px;font-size:16px;background:#222;color:#0f0;" readonly onclick="this.select()">{auth_code}</textarea>
+    </body></html>"""
 
 @app.route('/test_telegram')
 def test_telegram():
-    send_telegram("🔥 <b>Test alert from Jazmin bot v3.0!</b>\nReal girl mode activated.")
+    send_telegram("🔥 <b>Test alert from Jazmin bot v4.1!</b>\nBoot watermark active.")
     return {"sent": True}
 
 @app.route('/learn_personality')
@@ -1071,68 +794,33 @@ def learn_personality():
     chats, _ = get_chats()
     if not chats:
         return {"error": "No chats"}
-    
     all_my_replies = []
     all_fan_messages = []
     chat_summaries = []
-    
     for chat in chats:
         user = chat.get('user', {}) or {}
         chat_id = user.get('uuid') or chat.get('uuid') or chat.get('id')
         fan_name = user.get('displayName', 'unknown')
         if not chat_id:
             continue
-        
         messages = get_messages(chat_id)
         if not messages:
             continue
-        
         my_replies_in_chat = []
         fan_msgs_in_chat = []
-        
         for msg in messages:
             sender_uuid = msg.get('sender', {}).get('uuid')
             text = msg.get('text', '')
-            msg_type = msg.get('type', 'UNKNOWN')
-            
             if not text:
                 continue
-            
             if sender_uuid == MY_UUID:
-                my_replies_in_chat.append({
-                    "text": text,
-                    "timestamp": msg.get('createdAt'),
-                    "type": msg_type
-                })
+                my_replies_in_chat.append({"text": text, "timestamp": msg.get('createdAt'), "type": msg.get('type', 'UNKNOWN')})
             else:
-                fan_msgs_in_chat.append({
-                    "text": text,
-                    "timestamp": msg.get('createdAt'),
-                    "sender_name": msg.get('sender', {}).get('displayName', fan_name)
-                })
-        
+                fan_msgs_in_chat.append({"text": text, "timestamp": msg.get('createdAt'), "sender_name": msg.get('sender', {}).get('displayName', fan_name)})
         if my_replies_in_chat:
-            all_my_replies.extend([{
-                "chat_id": chat_id,
-                "fan_name": fan_name,
-                "text": r['text'],
-                "timestamp": r['timestamp']
-            } for r in my_replies_in_chat])
-        
-        chat_summaries.append({
-            "fan_name": fan_name,
-            "chat_id": chat_id,
-            "my_reply_count": len(my_replies_in_chat),
-            "fan_msg_count": len(fan_msgs_in_chat),
-            "sample_my_replies": [r['text'] for r in my_replies_in_chat[:3]]
-        })
-        
-        all_fan_messages.extend([{
-            "chat_id": chat_id,
-            "fan_name": fan_name,
-            "text": m['text']
-        } for m in fan_msgs_in_chat])
-    
+            all_my_replies.extend([{"chat_id": chat_id, "fan_name": fan_name, "text": r['text'], "timestamp": r['timestamp']} for r in my_replies_in_chat])
+        chat_summaries.append({"fan_name": fan_name, "chat_id": chat_id, "my_reply_count": len(my_replies_in_chat), "fan_msg_count": len(fan_msgs_in_chat), "sample_my_replies": [r['text'] for r in my_replies_in_chat[:3]]})
+        all_fan_messages.extend([{"chat_id": chat_id, "fan_name": fan_name, "text": m['text']} for m in fan_msgs_in_chat])
     style = {
         "total_chats_with_my_replies": len(chat_summaries),
         "total_my_replies": len(all_my_replies),
@@ -1143,25 +831,20 @@ def learn_personality():
         "avg_words_per_reply": sum(len(r['text'].split()) for r in all_my_replies) / len(all_my_replies) if all_my_replies else 0,
         "chat_summaries": chat_summaries
     }
-    
-    return {
-        "style_analysis": style,
-        "all_my_replies": all_my_replies[:30],
-        "all_fan_messages": all_fan_messages[:10]
-    }
+    return {"style_analysis": style, "all_my_replies": all_my_replies[:30], "all_fan_messages": all_fan_messages[:10]}
 
 # ========== INIT ==========
 init_db()
 
 # Clean up old stuck scheduled replies from previous broken version
 try:
-    db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE status = 'pending' AND created_at < ?", 
-             ((datetime.now() - timedelta(minutes=10)).isoformat(),))
+    db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE status = 'pending' AND created_at < ?",
+        ((datetime.now() - timedelta(minutes=10)).isoformat(),))
     print(f"[{datetime.now()}] Cleaned up old scheduled replies")
 except Exception as e:
     print(f"[{datetime.now()}] Cleanup error: {e}")
 
-# Polling disabled — cron-job.org handles this via /trigger every 60s
+# Polling disabled — cron-job.org handles this via /trigger
 # start_polling()
 
 if __name__ == '__main__':
