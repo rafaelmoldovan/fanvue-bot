@@ -396,7 +396,63 @@ def test_telegram():
     send_telegram("🔥 <b>Test alert from Jazmin bot!</b>\nEverything is working.")
     return {"sent": True}
 
+@app.route('/learn_personality')
+def learn_personality():
+    """Fetch all chat history and extract your style"""
+    chats, _ = get_chats()
+    if not chats:
+        return {"error": "No chats"}
+    
+    all_my_replies = []
+    all_fan_messages = []
+    
+    for chat in chats[:5]:  # First 5 chats
+        user = chat.get('user', {}) or {}
+        chat_id = user.get('uuid') or chat.get('uuid') or chat.get('id')
+        if not chat_id:
+            continue
+        
+        messages = get_messages(chat_id)
+        if not messages:
+            continue
+        
+        for msg in messages:
+            sender_uuid = msg.get('sender', {}).get('uuid')
+            text = msg.get('text', '')
+            
+            if sender_uuid == MY_UUID and text:
+                all_my_replies.append({
+                    "chat_id": chat_id,
+                    "fan_name": user.get('displayName'),
+                    "text": text,
+                    "timestamp": msg.get('createdAt')
+                })
+            elif text:
+                all_fan_messages.append({
+                    "chat_id": chat_id,
+                    "fan_name": user.get('displayName'),
+                    "text": text
+                })
+    
+    # Analyze style
+    style = {
+        "total_my_replies": len(all_my_replies),
+        "total_fan_messages": len(all_fan_messages),
+        "avg_reply_length": sum(len(r['text']) for r in all_my_replies) / len(all_my_replies) if all_my_replies else 0,
+        "sample_replies": [r['text'] for r in all_my_replies[:10]],
+        "common_phrases": [],
+        "uses_emoji": any(ord(c) > 127 for r in all_my_replies for c in r['text']),
+        "avg_words_per_reply": sum(len(r['text'].split()) for r in all_my_replies) / len(all_my_replies) if all_my_replies else 0
+    }
+    
+    return {
+        "style_analysis": style,
+        "all_my_replies": all_my_replies[:20],
+        "all_fan_messages": all_fan_messages[:10]
+    }
+
 # ========== INIT ==========
+init_db()
 init_db()
 
 if __name__ == '__main__':
