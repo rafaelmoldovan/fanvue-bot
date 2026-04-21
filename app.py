@@ -465,9 +465,10 @@ def update_fan_notes(chat_id, note):
 def was_manual_reply_recent(chat_id, messages, minutes=30):
     if not messages:
         return False
-    last_msg = messages[-1]
+    # API returns messages newest-first, so [0] is the latest
+    last_msg = messages[0]
     sender_uuid = last_msg.get('sender', {}).get('uuid')
-    msg_time = last_msg.get('createdAt', '')
+    msg_time = last_msg.get('sentAt') or last_msg.get('createdAt', '')
     msg_type = last_msg.get('type', '')
     if sender_uuid == MY_UUID and msg_type != 'AUTOMATED_NEW_FOLLOWER':
         msg_dt = parse_timestamp(msg_time)
@@ -524,15 +525,16 @@ def process_new_messages():
             if not fan_msgs:
                 continue
             
-            # DEBUG: Log all fan message timestamps to understand API ordering
+            # DEBUG: Log newest 3 fan messages (API returns newest-first)
             all_fan_times = []
-            for m in fan_msgs:
+            for m in fan_msgs[:5]:
                 t = m.get('sentAt') or m.get('createdAt') or m.get('timestamp') or ''
                 txt = m.get('text', '')[:30]
                 all_fan_times.append(f"{t}:{txt}")
-            print(f"[{datetime.now()}] DEBUG {fan_name} all {len(fan_msgs)} fan msgs: {all_fan_times[-3:]}")
+            print(f"[{datetime.now()}] DEBUG {fan_name} newest 5 fan msgs: {all_fan_times}")
             
-            last_msg = fan_msgs[-1]
+            # API returns messages newest-first, so [0] is the latest
+            last_msg = fan_msgs[0]
             msg_id = last_msg.get('uuid')
             text = last_msg.get('text', '')
             
@@ -591,14 +593,14 @@ def process_new_messages():
 
             print(f"[{datetime.now()}] Processing {fan_name} — new message: '{text[:50]}'")
 
-            # Build context
+            # Build context (newest 5 messages — API returns newest-first)
             recent_for_prompt = []
-            for msg in messages[-5:]:
+            for msg in messages[:5]:
                 sender_uuid = msg.get('sender', {}).get('uuid')
                 recent_for_prompt.append({
                     'is_me': sender_uuid == MY_UUID,
                     'text': msg.get('text', ''),
-                    'timestamp': msg.get('createdAt', ''),
+                    'timestamp': msg.get('sentAt') or msg.get('createdAt', ''),
                     'type': msg.get('type', '')
                 })
 
