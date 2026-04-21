@@ -487,7 +487,7 @@ def process_new_messages():
                   text, last_msg.get('createdAt', datetime.now().isoformat())))
             
             # Check if manual reply recently (skip if Jazmin is active)
-            if was_manual_reply_recent(chat_id, messages, minutes=30):
+            if was_manual_reply_recent(messages, minutes=30):
                 continue
             
             # Check if this exact message already has a scheduled or sent reply
