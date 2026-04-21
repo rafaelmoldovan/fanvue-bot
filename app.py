@@ -859,5 +859,8 @@ try:
 except Exception as e:
     print(f"[{datetime.now()}] Cleanup error: {e}")
 
+# Auto-start polling on boot (Railway/Gunicorn worker restarts kill the thread)
+start_polling()
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
