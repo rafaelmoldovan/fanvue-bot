@@ -411,6 +411,27 @@ def get_mood_context():
     else:
         return "Hangulatod most: normál/flörtölős. Meleg, laza, jókedvű."
 
+# ========== TIME CONTEXT ==========
+TIME_CONTEXTS = {
+    'morning': (6, 11, "Most reggel van (6-11). Ha köszönsz, 'jó reggelt' vagy 'na mi a helyzet' — de ne túl lelkes."),
+    'noon': (11, 14, "Most dél van (11-14). Ebédidő, lehet laza."),
+    'afternoon': (14, 18, "Most délután van (14-18). Suliból/tanulásból vissza, lehet fáradt."),
+    'evening': (18, 22, "Most este van (18-22). Pihenés, Netflix, lehetek lassabb."),
+    'night': (22, 2, "Most éjjel van (22-02). Ha most értem vissza, 'huhh most értem vissza' vagy 'még mindig fent vagyok 😅'. SOHA ne mondj 'jó reggelt'!"),
+    'late_night': (2, 6, "Most hajnal van (02-06). Alszom vagy épp ébredek. Ha válaszolok, lehetek fáradt/zombi. SOHA ne mondj 'jó reggelt'!"),
+}
+
+def get_time_context():
+    now = get_budapest_now()
+    hour = now.hour
+    for period, (start, end, desc) in TIME_CONTEXTS.items():
+        if start <= hour < end:
+            return desc
+    # fallback for wrap-around (late_night: 2-6)
+    if 2 <= hour < 6:
+        return TIME_CONTEXTS['late_night'][2]
+    return TIME_CONTEXTS['night'][2]
+
 # ========== DAILY LIFE CONTEXT ==========
 def get_life_context():
     """Occasionally inject daily life mentions"""
@@ -483,7 +504,7 @@ def get_greeting_instruction(recent_messages, fan_msg_time_str):
         return f"EZ UGYANANNak A BESZÉLGETÉSnek A FOLYtatása. NE köszönj újra! Kezdj lazán: '{cont}' — vagy egyből válaszolj a lényegre. NE ismételd: 'na mi a helyzet' + 'mit csinálsz' mintát!"
 
 # ========== OPENAI ==========
-def build_system_prompt(fan_name, fan_notes, recent_messages, school_context, availability_context, mood_context, life_context, fan_msg_time_str=None):
+def build_system_prompt(fan_name, fan_notes, recent_messages, school_context, availability_context, mood_context, life_context, time_context, fan_msg_time_str=None):
     prompt = JAZMIN_PERSONALITY + "\n\n"
     
     # Greeting instruction — CRITICAL for natural feel
@@ -492,6 +513,8 @@ def build_system_prompt(fan_name, fan_notes, recent_messages, school_context, av
     
     # Context injection (only if relevant)
     contexts = []
+    if time_context:
+        contexts.append(time_context)
     if availability_context:
         contexts.append(availability_context)
     if school_context:
@@ -595,20 +618,37 @@ def update_fan_notes(chat_id, note):
 
 # ========== MANUAL REPLY DETECTION ==========
 def parse_timestamp(ts_str):
-    """Parse Fanvue timestamp robustly"""
+    """Parse Fanvue timestamp robustly — FIXED: never mutates input"""
     if not ts_str:
         return None
+    
+    # Try ISO format first (handles +00:00 timezone)
     try:
-        ts_str = ts_str.replace('Z', '+00:00')
-        return datetime.fromisoformat(ts_str)
+        fixed = ts_str.replace('Z', '+00:00')
+        return datetime.fromisoformat(fixed)
     except:
-        try:
-            return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
-        except:
-            try:
-                return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
-            except:
-                return None
+        pass
+    
+    # Try with Z suffix (original string, NOT the mutated one)
+    try:
+        return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    except:
+        pass
+    
+    # Try without timezone
+    try:
+        return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
+    except:
+        pass
+    
+    # Try plain ISO without microseconds
+    try:
+        fixed = ts_str.replace('Z', '+00:00')
+        return datetime.fromisoformat(fixed)
+    except:
+        pass
+    
+    return None
 
 def was_manual_reply_recent(chat_id, messages, minutes=30):
     """
@@ -766,11 +806,12 @@ def process_new_messages():
             availability_context = get_availability_context()
             mood_context = get_mood_context()
             life_context = get_life_context()
+            time_context = get_time_context()
             
             # Generate reply — pass fan_msg_time for smart greeting
             system_prompt = build_system_prompt(
                 fan_name, fan_notes, recent_for_prompt,
-                school_context, availability_context, mood_context, life_context,
+                school_context, availability_context, mood_context, life_context, time_context,
                 fan_msg_time_str=last_msg.get('createdAt')
             )
             reply = ask_openai(system_prompt, text)
