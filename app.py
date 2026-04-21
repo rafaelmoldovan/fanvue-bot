@@ -6,7 +6,23 @@ import base64
 import sqlite3
 import threading
 import time
+import pytz
 from datetime import datetime, timedelta, timezone
+
+# Budapest timezone
+BUDAPEST_TZ = pytz.timezone('Europe/Budapest')
+
+def get_budapest_now():
+    """Get current time in Budapest timezone"""
+    return datetime.now(BUDAPEST_TZ).replace(tzinfo=None)
+
+def to_budapest(dt):
+    """Convert any datetime to Budapest time, return naive"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(BUDAPEST_TZ).replace(tzinfo=None)
 
 app = Flask(__name__)
 
@@ -257,11 +273,11 @@ PÉLDÁK A STÍLUSODRA:
 
 # ========== SCHOOL SCHEDULE ==========
 def get_school_context():
-    now = datetime.now()
+    now = get_budapest_now()
     weekday = now.weekday()  # 0=Monday, 6=Sunday
     hour = now.hour
     
-    # Monday-Friday, 7:00-15:00
+    # Monday-Friday, 7:00-15:00 Budapest time
     if weekday < 5 and 7 <= hour < 15:
         return "Most hétköznap suliban vagyok (7-15 között). Ha kérdezik mit csinálok, mondd lazán hogy suliban vagyok vagy órán. Ne túl magyarázz, csak említsd meg ha szóba jön."
     return ""
@@ -471,8 +487,7 @@ def process_new_messages():
                   text, last_msg.get('createdAt', datetime.now().isoformat())))
             
             # Check if manual reply recently (skip if Jazmin is active)
-            if was_manual_reply_recent(messages, minutes=30):
-                print(f"[{datetime.now()}] Skipping {fan_name} — Jazmin manually replied recently")
+            if was_manual_reply_recent(chat_id, messages, minutes=30):
                 continue
             
             # Check if this exact message already has a scheduled or sent reply
@@ -481,9 +496,10 @@ def process_new_messages():
                 (msg_id,), fetch_one=True
             )
             if already_scheduled:
+                print(f"[{datetime.now()}] Skipping {fan_name} — msg {msg_id} already scheduled/sent")
                 continue
             
-            # Build context
+            print(f"[{datetime.now()}] Processing {fan_name} — new message found: '{text[:50]}'")
             recent_for_prompt = []
             for msg in messages[-15:]:
                 sender_uuid = msg.get('sender', {}).get('uuid')
@@ -834,6 +850,14 @@ def learn_personality():
 
 # ========== INIT ==========
 init_db()
+
+# Clean up old stuck scheduled replies from previous broken version
+try:
+    db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE status = 'pending' AND created_at < ?", 
+             ((datetime.now() - timedelta(minutes=10)).isoformat(),))
+    print(f"[{datetime.now()}] Cleaned up old scheduled replies")
+except Exception as e:
+    print(f"[{datetime.now()}] Cleanup error: {e}")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
