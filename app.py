@@ -405,10 +405,12 @@ def learn_personality():
     
     all_my_replies = []
     all_fan_messages = []
+    chat_summaries = []
     
-    for chat in chats[:5]:  # First 5 chats
+    for chat in chats:
         user = chat.get('user', {}) or {}
         chat_id = user.get('uuid') or chat.get('uuid') or chat.get('id')
+        fan_name = user.get('displayName', 'unknown')
         if not chat_id:
             continue
         
@@ -416,38 +418,67 @@ def learn_personality():
         if not messages:
             continue
         
+        my_replies_in_chat = []
+        fan_msgs_in_chat = []
+        
         for msg in messages:
             sender_uuid = msg.get('sender', {}).get('uuid')
             text = msg.get('text', '')
+            msg_type = msg.get('type', 'UNKNOWN')
             
-            if sender_uuid == MY_UUID and text:
-                all_my_replies.append({
-                    "chat_id": chat_id,
-                    "fan_name": user.get('displayName'),
+            if not text:
+                continue
+            
+            if sender_uuid == MY_UUID:
+                my_replies_in_chat.append({
                     "text": text,
-                    "timestamp": msg.get('createdAt')
+                    "timestamp": msg.get('createdAt'),
+                    "type": msg_type
                 })
-            elif text:
-                all_fan_messages.append({
-                    "chat_id": chat_id,
-                    "fan_name": user.get('displayName'),
-                    "text": text
+            else:
+                fan_msgs_in_chat.append({
+                    "text": text,
+                    "timestamp": msg.get('createdAt'),
+                    "sender_name": msg.get('sender', {}).get('displayName', fan_name)
                 })
+        
+        if my_replies_in_chat:
+            all_my_replies.extend([{
+                "chat_id": chat_id,
+                "fan_name": fan_name,
+                "text": r['text'],
+                "timestamp": r['timestamp']
+            } for r in my_replies_in_chat])
+            
+            chat_summaries.append({
+                "fan_name": fan_name,
+                "chat_id": chat_id,
+                "my_reply_count": len(my_replies_in_chat),
+                "fan_msg_count": len(fan_msgs_in_chat),
+                "sample_my_replies": [r['text'] for r in my_replies_in_chat[:3]]
+            })
+        
+        all_fan_messages.extend([{
+            "chat_id": chat_id,
+            "fan_name": fan_name,
+            "text": m['text']
+        } for m in fan_msgs_in_chat])
     
-    # Analyze style
+    # Analyze style from REAL replies only
     style = {
+        "total_chats_with_my_replies": len(chat_summaries),
         "total_my_replies": len(all_my_replies),
         "total_fan_messages": len(all_fan_messages),
         "avg_reply_length": sum(len(r['text']) for r in all_my_replies) / len(all_my_replies) if all_my_replies else 0,
-        "sample_replies": [r['text'] for r in all_my_replies[:10]],
-        "common_phrases": [],
+        "sample_replies": [r['text'] for r in all_my_replies[:15]],
         "uses_emoji": any(ord(c) > 127 for r in all_my_replies for c in r['text']),
-        "avg_words_per_reply": sum(len(r['text'].split()) for r in all_my_replies) / len(all_my_replies) if all_my_replies else 0
+        "avg_words_per_reply": sum(len(r['text'].split()) for r in all_my_replies) / len(all_my_replies) if all_my_replies else 0,
+        "chat_summaries": chat_summaries
     }
     
     return {
         "style_analysis": style,
-        "all_my_replies": all_my_replies[:20],
+        "all_my_replies": all_my_replies[:30],
         "all_fan_messages": all_fan_messages[:10]
     }
 
