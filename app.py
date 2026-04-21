@@ -6,21 +6,23 @@ import base64
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
 
 # ========== CONFIG ==========
-FANVUE_CLIENT_ID = os.environ.get('FANVUE_CLIENT_ID', '23cc2e68-0e23-4cff-914b-eec2bdb56268')
-FANVUE_CLIENT_SECRET = os.environ.get('FANVUE_CLIENT_SECRET', 'dc30583e61d42c70b23ede8d29c1bfd0662ac77234eae479bdaec1bcc5968efa')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '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')
+FANVUE_CLIENT_ID = os.environ.get('FANVUE_CLIENT_ID', '')
+FANVUE_CLIENT_SECRET = os.environ.get('FANVUE_CLIENT_SECRET', '')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 CREATOR_NAME = os.environ.get('CREATOR_NAME', 'jazmin07')
 MY_UUID = os.environ.get('MY_UUID', '38a392fc-a751-49b3-9d74-01ac6447c490')
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8141197294:AAE9aH9mptY_ZzAK6sSc_alh2PtRjF1ASWs')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '8571222647')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
 SAFE_MODE = True
-POLL_INTERVAL = 60  # seconds
+POLL_INTERVAL = 20  # seconds
+SHORT_DELAY = 30    # seconds for <=25 words
+LONG_DELAY = 90     # seconds for >25 words
 
 # ========== SQLITE SETUP ==========
 DB_PATH = 'bot_data.db'
@@ -67,9 +69,16 @@ def init_db():
     ''')
     
     c.execute('''
-        CREATE TABLE IF NOT EXISTS cooldown (
-            chat_id TEXT PRIMARY KEY,
-            last_reply_time TEXT
+        CREATE TABLE IF NOT EXISTS scheduled_replies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT,
+            fan_name TEXT,
+            fan_msg_id TEXT,
+            fan_text TEXT,
+            scheduled_time TEXT,
+            reply_text TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT
         )
     ''')
     
@@ -246,6 +255,17 @@ PÉLDÁK A STÍLUSODRA:
 - "na látod, ha még ügyes vagy akkor a partnerem is lehetsz :)))"
 """
 
+# ========== SCHOOL SCHEDULE ==========
+def get_school_context():
+    now = datetime.now()
+    weekday = now.weekday()  # 0=Monday, 6=Sunday
+    hour = now.hour
+    
+    # Monday-Friday, 7:00-15:00
+    if weekday < 5 and 7 <= hour < 15:
+        return "Most hétköznap suliban vagyok (7-15 között). Ha kérdezik mit csinálok, mondd lazán hogy suliban vagyok vagy órán. Ne túl magyarázz, csak említsd meg ha szóba jön."
+    return ""
+
 # ========== CONTENT REQUEST DETECTION ==========
 CONTENT_KEYWORDS = [
     'kép', 'képet', 'videó', 'videót', 'mutass', 'mutasd', 'új', 'tartalom', 
@@ -261,8 +281,11 @@ def is_content_request(text):
     return any(keyword in text_lower for keyword in CONTENT_KEYWORDS)
 
 # ========== OPENAI ==========
-def build_system_prompt(fan_name, fan_notes, recent_messages):
+def build_system_prompt(fan_name, fan_notes, recent_messages, school_context):
     prompt = JAZMIN_PERSONALITY + "\n\n"
+    
+    if school_context:
+        prompt += f"IDŐSZAKOS INFORMÁCIÓ (csak ha szükséges):\n{school_context}\n\n"
     
     if fan_notes:
         prompt += f"Emlékezz erre a fanról:\n{fan_notes}\n\n"
@@ -334,6 +357,23 @@ def update_fan_notes(chat_id, note):
     db_query('UPDATE fan_profiles SET fan_notes = ? WHERE chat_id = ?', (updated, chat_id))
 
 # ========== MANUAL REPLY DETECTION ==========
+def parse_timestamp(ts_str):
+    """Parse Fanvue timestamp robustly"""
+    if not ts_str:
+        return None
+    try:
+        # Handle various formats
+        ts_str = ts_str.replace('Z', '+00:00')
+        return datetime.fromisoformat(ts_str)
+    except:
+        try:
+            return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        except:
+            try:
+                return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
+            except:
+                return None
+
 def was_manual_reply_recent(messages, minutes=30):
     if not messages:
         return False
@@ -344,37 +384,54 @@ def was_manual_reply_recent(messages, minutes=30):
     msg_type = last_msg.get('type', '')
     
     if sender_uuid == MY_UUID and msg_type != 'AUTOMATED_NEW_FOLLOWER':
-        try:
-            msg_dt = datetime.fromisoformat(msg_time.replace('Z', '+00:00').replace('+00:00', ''))
-            if (datetime.now() - msg_dt).total_seconds() < minutes * 60:
+        msg_dt = parse_timestamp(msg_time)
+        if msg_dt:
+            # Make both timezone-aware or both naive
+            now = datetime.now(timezone.utc) if msg_dt.tzinfo else datetime.now()
+            if msg_dt.tzinfo:
+                now = datetime.now(timezone.utc)
+            else:
+                now = datetime.now()
+                
+            if (now - msg_dt).total_seconds() < minutes * 60:
                 return True
-        except:
-            return True
     
     return False
 
-# ========== COOLDOWN ==========
-def is_on_cooldown(chat_id):
-    row = db_query('SELECT last_reply_time FROM cooldown WHERE chat_id = ?', (chat_id,), fetch_one=True)
-    if not row or not row['last_reply_time']:
-        return False
-    try:
-        last = datetime.fromisoformat(row['last_reply_time'])
-        return (datetime.now() - last).total_seconds() < 180
-    except:
-        return False
+# ========== SCHEDULED REPLIES ==========
+def schedule_reply(chat_id, fan_name, fan_msg_id, fan_text, reply_text):
+    # Cancel any pending reply for this chat
+    db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE chat_id = ? AND status = 'pending'", (chat_id,))
+    
+    delay = SHORT_DELAY if len(fan_text.split()) <= 25 else LONG_DELAY
+    scheduled_time = (datetime.now() + timedelta(seconds=delay)).isoformat()
+    
+    db_query('''
+        INSERT INTO scheduled_replies (chat_id, fan_name, fan_msg_id, fan_text, scheduled_time, reply_text, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (chat_id, fan_name, fan_msg_id, fan_text, scheduled_time, reply_text, datetime.now().isoformat()))
+    
+    print(f"[{datetime.now()}] Scheduled reply for {fan_name} in {delay}s")
 
-def set_cooldown(chat_id):
-    db_query('INSERT OR REPLACE INTO cooldown (chat_id, last_reply_time) VALUES (?, ?)',
-             (chat_id, datetime.now().isoformat()))
+def get_due_replies():
+    now = datetime.now().isoformat()
+    return db_query('''
+        SELECT * FROM scheduled_replies 
+        WHERE status = 'pending' AND scheduled_time <= ?
+        ORDER BY scheduled_time ASC
+    ''', (now,))
 
-# ========== MESSAGE PROCESSING ==========
-def process_messages():
+def mark_reply_sent(reply_id):
+    db_query("UPDATE scheduled_replies SET status = 'sent' WHERE id = ?", (reply_id,))
+
+# ========== MESSAGE INTAKE (scheduling) ==========
+def process_new_messages():
+    """Check all chats, schedule replies for new fan messages"""
     chats, status = get_chats()
     if not chats:
         return 0, status
     
-    replied = 0
+    scheduled = 0
     
     for chat in chats:
         try:
@@ -401,23 +458,29 @@ def process_messages():
             msg_id = last_msg.get('uuid')
             text = last_msg.get('text', '')
             
+            # Check if already replied to this exact message
             existing = db_query('SELECT 1 FROM messages WHERE msg_id = ? AND was_replied = 1', (msg_id,), fetch_one=True)
             if existing:
                 continue
             
+            # Store the message
             db_query('''
                 INSERT OR IGNORE INTO messages (msg_id, chat_id, fan_name, sender_uuid, text, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (msg_id, chat_id, fan_name, last_msg.get('sender', {}).get('uuid'), 
                   text, last_msg.get('createdAt', datetime.now().isoformat())))
             
-            if is_on_cooldown(chat_id):
-                continue
-            
+            # Check if manual reply recently (skip if Jazmin is active)
             if was_manual_reply_recent(messages, minutes=30):
-                print(f"Skipping {fan_name} — Jazmin manually replied recently")
+                print(f"[{datetime.now()}] Skipping {fan_name} — Jazmin manually replied recently")
                 continue
             
+            # Check if already scheduled for this chat
+            pending = db_query("SELECT * FROM scheduled_replies WHERE chat_id = ? AND status = 'pending'", (chat_id,), fetch_one=True)
+            if pending:
+                print(f"[{datetime.now()}] {fan_name} already has pending reply, will reschedule")
+            
+            # Build context
             recent_for_prompt = []
             for msg in messages[-15:]:
                 sender_uuid = msg.get('sender', {}).get('uuid')
@@ -430,54 +493,90 @@ def process_messages():
             
             fan_notes = profile.get('fan_notes', '') if profile else ''
             content_request = is_content_request(text)
+            school_context = get_school_context()
             
-            system_prompt = build_system_prompt(fan_name, fan_notes, recent_for_prompt)
+            # Generate reply
+            system_prompt = build_system_prompt(fan_name, fan_notes, recent_for_prompt, school_context)
             reply = ask_openai(system_prompt, text)
             
-            if reply:
-                if content_request:
-                    preference_prompt = JAZMIN_PERSONALITY + f"\n\nA fan tartalmat kér: '{text}'. Kérdezd meg mit akar látni, de ne ígérj semmit. 1-2 mondat, laza stílus."
-                    reply = ask_openai(preference_prompt, "mit akarsz látni?")
-                    
-                    alert = f"""🎯 <b>TARTALOMKÉRÉS</b>
+            if content_request:
+                preference_prompt = JAZMIN_PERSONALITY
+                if school_context:
+                    preference_prompt += f"\n\n{school_context}"
+                preference_prompt += f"\n\nA fan tartalmat kér: '{text}'. Kérdezd meg mit akar látni, de ne ígérj semmit. 1-2 mondat, laza stílus."
+                reply = ask_openai(preference_prompt, "mit akarsz látni?")
+                
+                alert = f"""🎯 <b>TARTALOMKÉRÉS</b>
 👤 <b>{fan_name}</b> (@{handle})
 💬 <i>{text[:100]}</i>
 🤖 Bot javaslat: <i>{reply[:100]}</i>
 🔗 Chat ID: <code>{chat_id}</code>"""
-                    send_telegram(alert)
-                    
-                    new_count = profile.get('content_ask_count', 0) + 1
-                    db_query('UPDATE fan_profiles SET content_ask_count = ? WHERE chat_id = ?', (new_count, chat_id))
-                    update_fan_notes(chat_id, f"Tartalmat kért ({new_count}. alkalom): '{text[:50]}'")
+                send_telegram(alert)
                 
-                elif is_top_spender or (profile and profile.get('lifetime_spend', 0) > 200):
-                    alert = f"""💰 <b>WHALE ALERT</b>
+                new_count = profile.get('content_ask_count', 0) + 1
+                db_query('UPDATE fan_profiles SET content_ask_count = ? WHERE chat_id = ?', (new_count, chat_id))
+                update_fan_notes(chat_id, f"Tartalmat kért ({new_count}. alkalom): '{text[:50]}'")
+            
+            elif is_top_spender or (profile and profile.get('lifetime_spend', 0) > 200):
+                alert = f"""💰 <b>WHALE ALERT</b>
 👤 <b>{fan_name}</b> (@{handle})
 💰 Top Spender / $200+
 💬 <i>{text[:100]}</i>
 🤖 Bot javaslat: <i>{reply[:100]}</i>
 🔗 Chat ID: <code>{chat_id}</code>"""
-                    send_telegram(alert)
-                
-                if send_fanvue_message(chat_id, reply):
-                    db_query('''
-                        UPDATE messages SET was_replied = 1, reply_text = ?, bot_replied_at = ?
-                        WHERE msg_id = ?
-                    ''', (reply, datetime.now().isoformat(), msg_id))
-                    set_cooldown(chat_id)
-                    replied += 1
-                    
-                    db_query('UPDATE fan_profiles SET last_reply_time = ? WHERE chat_id = ?',
-                             (datetime.now().isoformat(), chat_id))
-                    
-                    if SAFE_MODE:
-                        send_telegram(f"✅ <b>Válasz {fan_name}-nak</b>\n<i>{reply[:100]}</i>")
+                send_telegram(alert)
+            
+            # Schedule the reply
+            schedule_reply(chat_id, fan_name, msg_id, text, reply)
+            scheduled += 1
+            
+            db_query('UPDATE fan_profiles SET last_reply_time = ? WHERE chat_id = ?',
+                     (datetime.now().isoformat(), chat_id))
         
         except Exception as e:
-            print(f"Process error in chat {chat_id}: {e}")
+            print(f"[{datetime.now()}] Process error in chat {chat_id}: {e}")
             continue
     
-    return replied, "OK"
+    return scheduled, "OK"
+
+# ========== SEND DUE REPLIES ==========
+def send_due_replies():
+    """Check scheduled replies and send any that are due"""
+    due = get_due_replies()
+    if not due:
+        return 0
+    
+    sent = 0
+    for item in due:
+        try:
+            chat_id = item['chat_id']
+            fan_name = item['fan_name']
+            fan_msg_id = item['fan_msg_id']
+            reply_text = item['reply_text']
+            reply_id = item['id']
+            
+            # Double-check manual reply didn't happen since scheduling
+            messages = get_messages(chat_id)
+            if was_manual_reply_recent(messages, minutes=30):
+                print(f"[{datetime.now()}] Cancelling scheduled reply for {fan_name} — Jazmin manually replied")
+                db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (reply_id,))
+                continue
+            
+            # Send it
+            if send_fanvue_message(chat_id, reply_text):
+                db_query('UPDATE messages SET was_replied = 1, reply_text = ?, bot_replied_at = ? WHERE msg_id = ?',
+                         (reply_text, datetime.now().isoformat(), fan_msg_id))
+                mark_reply_sent(reply_id)
+                sent += 1
+                
+                if SAFE_MODE:
+                    send_telegram(f"✅ <b>Válasz {fan_name}-nak (küldve)</b>\n<i>{reply_text[:100]}</i>")
+                
+                print(f"[{datetime.now()}] Sent reply to {fan_name}")
+        except Exception as e:
+            print(f"[{datetime.now()}] Send error: {e}")
+    
+    return sent
 
 # ========== POLLING LOOP ==========
 polling_thread = None
@@ -489,9 +588,15 @@ def poll_loop():
     while polling_active:
         try:
             if get_fanvue_token():
-                count, status = process_messages()
-                if count > 0:
-                    print(f"[{datetime.now()}] Replied to {count} fans")
+                # Step 1: Check for new messages and schedule replies
+                scheduled, status = process_new_messages()
+                if scheduled > 0:
+                    print(f"[{datetime.now()}] Scheduled {scheduled} replies")
+                
+                # Step 2: Send any due replies
+                sent = send_due_replies()
+                if sent > 0:
+                    print(f"[{datetime.now()}] Sent {sent} scheduled replies")
             else:
                 print(f"[{datetime.now()}] No valid token")
         except Exception as e:
@@ -517,14 +622,14 @@ def stop_polling():
 def home():
     token_ok = get_fanvue_token() is not None
     return {
-        "status": "Jazmin Bot v2",
+        "status": "Jazmin Bot v2.1",
         "safe_mode": SAFE_MODE,
         "token_valid": token_ok,
         "polling_active": polling_active,
         "endpoints": [
             "/status", "/safe_fetch", "/trigger", "/set_token",
             "/test_telegram", "/callback", "/start_poll", "/stop_poll",
-            "/fan_profiles", "/learn_personality"
+            "/fan_profiles", "/learn_personality", "/scheduled"
         ]
     }
 
@@ -536,7 +641,10 @@ def status():
         "token_status": token_status,
         "db": "sqlite",
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
-        "polling_active": polling_active
+        "polling_active": polling_active,
+        "poll_interval": POLL_INTERVAL,
+        "short_delay": SHORT_DELAY,
+        "long_delay": LONG_DELAY
     }
 
 @app.route('/safe_fetch')
@@ -553,8 +661,14 @@ def trigger():
     if not get_fanvue_token():
         return {"error": "No valid token. Use /set_token to add refresh token."}
     
-    count, status = process_messages()
-    return {"replied": count, "status": status, "safe_mode": SAFE_MODE}
+    scheduled, status = process_new_messages()
+    sent = send_due_replies()
+    return {
+        "scheduled": scheduled,
+        "sent": sent,
+        "status": status,
+        "safe_mode": SAFE_MODE
+    }
 
 @app.route('/start_poll')
 def start_poll():
@@ -579,6 +693,14 @@ def fan_profiles():
     return {
         "profiles": profiles,
         "total": len(profiles) if profiles else 0
+    }
+
+@app.route('/scheduled')
+def scheduled():
+    pending = db_query("SELECT * FROM scheduled_replies WHERE status = 'pending' ORDER BY scheduled_time ASC")
+    return {
+        "pending": pending,
+        "count": len(pending) if pending else 0
     }
 
 @app.route('/set_token', methods=['POST'])
@@ -620,7 +742,7 @@ def callback():
 
 @app.route('/test_telegram')
 def test_telegram():
-    send_telegram("🔥 <b>Test alert from Jazmin bot v2!</b>\nEverything is working.")
+    send_telegram("🔥 <b>Test alert from Jazmin bot v2.1!</b>\nSmart delay system active.")
     return {"sent": True}
 
 @app.route('/learn_personality')
