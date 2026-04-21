@@ -526,7 +526,18 @@ def process_new_messages():
             last_msg = fan_msgs[-1]
             msg_id = last_msg.get('uuid')
             text = last_msg.get('text', '')
-            msg_time = last_msg.get('createdAt', '')
+            
+            # DEBUG: Log available fields in the message
+            available_fields = {k: v for k, v in last_msg.items() if v is not None and v != ''}
+            print(f"[{datetime.now()}] DEBUG {fan_name} fields: {list(available_fields.keys())[:10]}")
+            
+            # Try multiple timestamp field names (Fanvue API variations)
+            msg_time = (last_msg.get('createdAt') 
+                        or last_msg.get('created_at') 
+                        or last_msg.get('timestamp')
+                        or last_msg.get('sentAt')
+                        or last_msg.get('date')
+                        or '')
 
             # === CRITICAL: BOOT WATERMARK ===
             # Only process messages sent AFTER bot started
@@ -539,16 +550,16 @@ def process_new_messages():
                     print(f"[{datetime.now()}] Skipping {fan_name} — message from before bot boot ({msg_time})")
                     continue
 
-            # === ANTI TIME-TRAVEL: 1h safety net ===
+                # === ANTI TIME-TRAVEL: 1h safety net ===
                 now = datetime.now(timezone.utc)
                 age_hours = (now - msg_dt).total_seconds() / 3600
                 if age_hours > 1:
                     print(f"[{datetime.now()}] Skipping {fan_name} — message is {age_hours:.1f}h old (anti time-travel)")
                     continue
             else:
-                # Can't parse timestamp — skip to be safe
-                print(f"[{datetime.now()}] Skipping {fan_name} — could not parse timestamp: {msg_time}")
-                continue
+                # Can't parse timestamp — log but DON'T skip (user's message might be valid)
+                # Fallback: check if we've already replied to this exact msg_id
+                print(f"[{datetime.now()}] Warning: could not parse timestamp for {fan_name}: '{msg_time}' — proceeding with msg_id check only")
 
             # Check if already replied
             existing = db_query('SELECT 1 FROM messages WHERE msg_id = ? AND was_replied = 1', (msg_id,), fetch_one=True)
