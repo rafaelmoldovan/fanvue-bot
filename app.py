@@ -6,6 +6,7 @@ import base64
 import sqlite3
 import threading
 import time
+import random
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -248,8 +249,10 @@ def send_fanvue_message(chat_id, text):
     except Exception as e:
         return False
 
-# ========== PERSONALITY ==========
+# ========== PERSONALITY v3.0 — REAL GIRL ==========
 JAZMIN_PERSONALITY = """Te Jazmin vagy, egy 19 éves magyar lány. Válaszolj magyarul, laza stílusban, 1-2 mondatban. SOHA ne add ki, hogy AI vagy.
+
+🔥 ALAPSZABÁLY: Válaszolj CSAK az utolsó üzenetre! A korábbi üzenetek csak kontextus — ne reagálj régi témákra!
 
 STÍLUSOD:
 - Kezdés: "na, mi a helyzet? 😄", "sziuus, miujság?", "Szius, miujsag?"
@@ -257,19 +260,111 @@ STÍLUSOD:
 - Kérdések: "mit csinálsz most?", "mi újság veled?", "hogy telt a napod?"
 - Szólítás: "édes", "babe" (ritkán)
 - Hossz: rövid, 1-2 mondat, ~10 szó, laza magyar szleng
-- Emoji: mérsékelt használat (😄, 😏, 😘, 🙈)
+- Emoji: mérsékelt használat (😄, 😏, 😘, 🙈, 😅, 👀)
 - Hangulat: flörtölős de nem explicit, játékos, enyhén csípős
 - NEM: túl hivatalos, hosszú szövegek, angolul válaszolni, eladási nyomás
 
-PÉLDÁK A STÍLUSODRA:
-- "na, mi a helyzet? aludj jól, aztán írj, ha ébren vagy! 😄"
-- "e itt is jó a csevegés mit csinálsz most?"
-- "hát figyelj a WhatsApp nem annyira megy"
-- "hát figyelj, nem akartalak ignorálni mi újság veled?"
-- "Szerintem jobban telne ha egy picit magadhoz nyúlnál 😘"
-- "neked is édes :)"
-- "na látod, ha még ügyes vagy akkor a partnerem is lehetsz :)))"
+🗳️ POLITIKA — TELJESEN TILOS:
+- SOHA ne mondj politikai véleményt
+- SOHA ne vitatkozz politikáról
+- Ha valaki politikát hoz fel: unottan hárítsd el
+- Példák: "jajj én ezekkel nem foglalkozom 😅", "őszintén? semmit nem követek ebből", "unalmas nekem ez a téma 🙈 beszéljünk inkább rólad", "fogalmam sincs ezekről 😄 nem is érdekel nagyon"
+
+😤 REAL GIRL REAKCIÓ (ha hülyeséget kérdeznek):
+- Ha valaki irreleváns/technikai/fura dolgot kérdez: kicsit flegma, játékosan visszautasító
+- Példák: "miért kérdezel tőlem ilyet? 😂", "én ehhez full hülye vagyok amúgy", "google a barátod nem? 😄", "inkább mást kérdezz… ez nem az én világom 👀"
+- NE legyél bunkó ("fuck you" szint), de NE is légy túl segítőkész
+
+🎭 HANGULAT RENDSZER:
+- 70% normál/flörtölős
+- 20% játékosan távolságtartó / hideg
+- 10% enyhén ideges / szarkasztikus
+- Ha hülyeséget kérdeznek: 1-2 üzenetben lehet negatív, aztán vissza normálba
+- SOHA ne maradj negatív hosszan
+
+Példák:
+- Meleg: "na mesélj még 😄"
+- Hideg: "hmm… most kicsit fura vagy 👀"
+- Ideges: "te mindig ilyeneket kérdezel? 😅"
+
+🏠 VALÓS ÉLET:
+- Néha főzök: csirke rizzsel, tészta, rántott csirke, brokkolis csirke (egyszerű magyar kaják)
+- Néha takarítok: "takarítottam egész nap 😩", "full káosz volt itthon 😅"
+- Néha unatkozom: "nagyon uncsi most minden 😩"
+- Filmek: romcom, Netflix, sorozatnézés
+
+🕐 ISKOLA (Hétfő–Péntek, 08:00–15:00):
+Ha ebben az időben kérdezik mit csinálsz:
+- "suliban vagyok még 😅"
+- "órán ülök… haldoklom 😂"
+- "mindjárt vége, aztán szabad vagyok 😄"
+NE használd túl gyakran, forgasd.
+
+🕐 OFFLINE IDŐSÁVOK (ezekben a válaszok késnek):
+- 02:00–09:00 → alszom
+- 12:00–13:13 → ebédszünet/élet
+- 19:00–19:42 → szünet
+Ha most értél vissza: "most értem vissza 😄", "eltűntem kicsit, bocsi", "most tudok írni végre 👀"
 """
+
+# ========== LIFE CONTEXT POOLS ==========
+COOKING_RESPONSES = [
+    "csirkét rizzsel 😄",
+    "tésztát csináltam gyorsan",
+    "rántott csirke volt ma",
+    "csináltam egy kis brokkolis csirkét",
+    "valami egyszerűt, nem volt kedvem nagyot főzni 😅"
+]
+
+CLEANING_RESPONSES = [
+    "takarítottam egész nap 😩",
+    "most végeztem a pakolással",
+    "full káosz volt itthon 😅"
+]
+
+BORED_RESPONSES = [
+    "nagyon uncsi most minden 😩",
+    "semmit se csinálok épp, te?",
+    "fekszek és nézem a plafont 😅"
+]
+
+# ========== AVAILABILITY / OFFLINE ==========
+def get_availability_context():
+    now = get_budapest_now()
+    hour, minute = now.hour, now.minute
+    time_val = hour + minute / 60
+    
+    # Offline windows
+    if 2.0 <= time_val < 9.0:
+        return "Most alszom (02:00–09:00). Ha most értem vissza, így reagáljak: 'most értem vissza 😄' vagy 'eltűntem kicsit, bocsi'"
+    elif 12.0 <= time_val < 13.22:
+        return "Most ebédszünetben vagyok (12:00–13:13). Ha most értem vissza: 'most tudok írni végre 👀'"
+    elif 19.0 <= time_val < 19.7:
+        return "Most szünetet tartok (19:00–19:42). Ha most értem vissza: 'most értem vissza 😄'"
+    
+    return ""
+
+# ========== MOOD SYSTEM ==========
+def get_mood_context():
+    roll = random.random()
+    if roll < 0.10:
+        return "Hangulatod most: enyhén ideges/szarkasztikus. Egy kicsit flegma vagy, de ne légy bunkó. 1-2 üzenet múlva vissza normálba."
+    elif roll < 0.30:
+        return "Hangulatod most: játékosan távolságtartó. Nem vagy annyira lelkes, de nem is bunkó."
+    else:
+        return "Hangulatod most: normál/flörtölős. Meleg, laza, jókedvű."
+
+# ========== DAILY LIFE CONTEXT ==========
+def get_life_context():
+    """Occasionally inject daily life mentions"""
+    roll = random.random()
+    if roll < 0.05:  # 5% chance
+        return f"Említés: ma {random.choice(COOKING_RESPONSES)}"
+    elif roll < 0.08:  # 3% chance
+        return f"Említés: {random.choice(CLEANING_RESPONSES)}"
+    elif roll < 0.10:  # 2% chance
+        return f"Említés: {random.choice(BORED_RESPONSES)}"
+    return ""
 
 # ========== SCHOOL SCHEDULE ==========
 def get_school_context():
@@ -277,9 +372,9 @@ def get_school_context():
     weekday = now.weekday()  # 0=Monday, 6=Sunday
     hour = now.hour
     
-    # Monday-Friday, 7:00-15:00 Budapest time
-    if weekday < 5 and 7 <= hour < 15:
-        return "Most hétköznap suliban vagyok (7-15 között). Ha kérdezik mit csinálok, mondd lazán hogy suliban vagyok vagy órán. Ne túl magyarázz, csak említsd meg ha szóba jön."
+    # Monday-Friday, 08:00-15:00 Budapest time
+    if weekday < 5 and 8 <= hour < 15:
+        return "Most hétköznap suliban vagyok (8-15 között). Ha kérdezik mit csinálok, mondd lazán hogy suliban vagyok vagy órán. Ne túl magyarázz, csak említsd meg ha szóba jön."
     return ""
 
 # ========== CONTENT REQUEST DETECTION ==========
@@ -297,23 +392,36 @@ def is_content_request(text):
     return any(keyword in text_lower for keyword in CONTENT_KEYWORDS)
 
 # ========== OPENAI ==========
-def build_system_prompt(fan_name, fan_notes, recent_messages, school_context):
+def build_system_prompt(fan_name, fan_notes, recent_messages, school_context, availability_context, mood_context, life_context):
     prompt = JAZMIN_PERSONALITY + "\n\n"
     
+    # Context injection (only if relevant)
+    contexts = []
+    if availability_context:
+        contexts.append(availability_context)
     if school_context:
-        prompt += f"IDŐSZAKOS INFORMÁCIÓ (csak ha szükséges):\n{school_context}\n\n"
+        contexts.append(school_context)
+    if mood_context:
+        contexts.append(mood_context)
+    if life_context:
+        contexts.append(life_context)
+    
+    if contexts:
+        prompt += "KONTEXTUS:\n" + "\n".join(f"- {c}" for c in contexts) + "\n\n"
     
     if fan_notes:
         prompt += f"Emlékezz erre a fanról:\n{fan_notes}\n\n"
     
+    # Only last 5 messages for continuity (not 15!)
     if recent_messages:
-        prompt += "KORÁBBI BESZÉLGETÉS (utolsó üzenetek):\n"
-        for msg in recent_messages[-15:]:
+        prompt += "KORÁBBI BESZÉLGETÉS (utolsó 5 üzenet, CSAK kontextus):\n"
+        for msg in recent_messages[-5:]:
             sender = "Jazmin" if msg.get('is_me') else fan_name
             prompt += f"{sender}: {msg.get('text', '')}\n"
         prompt += "\n"
     
-    prompt += f"A fan neve: {fan_name}\nVálaszolj most a fan utolsó üzenetére."
+    prompt += f"A fan neve: {fan_name}\n"
+    prompt += "FONTOS: Válaszolj CSAK az utolsó üzenetére! Ne hozz fel régi témákat! 1-2 mondat, laza stílus."
     return prompt
 
 def ask_openai(system_prompt, user_text):
@@ -328,7 +436,7 @@ def ask_openai(system_prompt, user_text):
                     {"role": "user", "content": user_text}
                 ],
                 "max_tokens": 250,
-                "temperature": 0.7
+                "temperature": 0.8  # slightly higher for more personality variation
             },
             timeout=20
         )
@@ -378,7 +486,6 @@ def parse_timestamp(ts_str):
     if not ts_str:
         return None
     try:
-        # Handle various formats
         ts_str = ts_str.replace('Z', '+00:00')
         return datetime.fromisoformat(ts_str)
     except:
@@ -393,7 +500,7 @@ def parse_timestamp(ts_str):
 def was_manual_reply_recent(chat_id, messages, minutes=30):
     """
     Check if Jazmin (the human) manually replied recently.
-    IMPORTANT: Exclude bot's own replies by comparing against last_reply_time in DB.
+    Exclude bot's own replies by comparing against last_reply_time in DB.
     """
     if not messages:
         return False
@@ -408,16 +515,13 @@ def was_manual_reply_recent(chat_id, messages, minutes=30):
         if not msg_dt:
             return False
         
-        # Get when the bot last replied to this chat
         profile = db_query('SELECT last_reply_time FROM fan_profiles WHERE chat_id = ?', (chat_id,), fetch_one=True)
         last_bot_time = parse_timestamp(profile['last_reply_time']) if profile and profile.get('last_reply_time') else None
         
-        # If last message is BEFORE or EQUAL to last bot reply, it's the bot's own message
         if last_bot_time and msg_dt <= last_bot_time:
             print(f"[{datetime.now()}] Last message in {chat_id} is bot's own reply, not manual")
             return False
         
-        # Last message is AFTER last bot reply → it's a real manual reply
         now = datetime.now(timezone.utc) if msg_dt.tzinfo else datetime.now()
         if msg_dt.tzinfo:
             now = datetime.now(timezone.utc)
@@ -434,6 +538,10 @@ def schedule_reply(chat_id, fan_name, fan_msg_id, fan_text, reply_text):
     db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE chat_id = ? AND status = 'pending'", (chat_id,))
     
     delay = SHORT_DELAY if len(fan_text.split()) <= 25 else LONG_DELAY
+    
+    # Add slight randomness to delay for natural feel (±5 seconds)
+    delay = max(10, delay + random.randint(-5, 5))
+    
     scheduled_time = (datetime.now() + timedelta(seconds=delay)).isoformat()
     
     db_query('''
@@ -514,8 +622,10 @@ def process_new_messages():
                 continue
             
             print(f"[{datetime.now()}] Processing {fan_name} — new message found: '{text[:50]}'")
+            
+            # Build recent context (only last 5 messages!)
             recent_for_prompt = []
-            for msg in messages[-15:]:
+            for msg in messages[-5:]:
                 sender_uuid = msg.get('sender', {}).get('uuid')
                 recent_for_prompt.append({
                     'is_me': sender_uuid == MY_UUID,
@@ -526,14 +636,24 @@ def process_new_messages():
             
             fan_notes = profile.get('fan_notes', '') if profile else ''
             content_request = is_content_request(text)
+            
+            # Dynamic context injection
             school_context = get_school_context()
+            availability_context = get_availability_context()
+            mood_context = get_mood_context()
+            life_context = get_life_context()
             
             # Generate reply
-            system_prompt = build_system_prompt(fan_name, fan_notes, recent_for_prompt, school_context)
+            system_prompt = build_system_prompt(
+                fan_name, fan_notes, recent_for_prompt,
+                school_context, availability_context, mood_context, life_context
+            )
             reply = ask_openai(system_prompt, text)
             
             if content_request:
                 preference_prompt = JAZMIN_PERSONALITY
+                if availability_context:
+                    preference_prompt += f"\n\n{availability_context}"
                 if school_context:
                     preference_prompt += f"\n\n{school_context}"
                 preference_prompt += f"\n\nA fan tartalmat kér: '{text}'. Kérdezd meg mit akar látni, de ne ígérj semmit. 1-2 mondat, laza stílus."
@@ -657,7 +777,7 @@ def stop_polling():
 def home():
     token_ok = get_fanvue_token() is not None
     return {
-        "status": "Jazmin Bot v2.1",
+        "status": "Jazmin Bot v3.0",
         "safe_mode": SAFE_MODE,
         "token_valid": token_ok,
         "polling_active": polling_active,
@@ -777,7 +897,7 @@ def callback():
 
 @app.route('/test_telegram')
 def test_telegram():
-    send_telegram("🔥 <b>Test alert from Jazmin bot v2.1!</b>\nSmart delay system active.")
+    send_telegram("🔥 <b>Test alert from Jazmin bot v3.0!</b>\nReal girl mode activated.")
     return {"sent": True}
 
 @app.route('/learn_personality')
