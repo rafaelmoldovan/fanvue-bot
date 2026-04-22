@@ -204,7 +204,6 @@ def get_fanvue_token():
             pass
     return refresh_fanvue_token()[0]
 
-# ========== TELEGRAM ==========
 def send_telegram(text, parse_mode='HTML'):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return False
@@ -215,6 +214,135 @@ def send_telegram(text, parse_mode='HTML'):
     except Exception as e:
         print(f"Telegram error: {e}")
         return False
+
+def send_telegram_reply(text, reply_to_message_id=None):
+    """Send a reply to Telegram chat (optionally as reply to specific message)"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000], "parse_mode": "HTML"}
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = reply_to_message_id
+        r = requests.post(url, json=payload, timeout=10)
+        return r.status_code == 200
+    except Exception as e:
+        print(f"Telegram reply error: {e}")
+        return False
+
+# ========== TELEGRAM CONSOLE COMMANDS ==========
+
+def telegram_console_help():
+    return """🎮 <b>Jazmin Bot — Telegram Console</b>
+
+<b>Fan Control</b>
+/pause &lt;chat_id&gt; [minutes] — Pause fan (default 60min)
+/resume &lt;chat_id&gt; — Resume fan
+/block &lt;chat_id&gt; [reason] — Block fan
+/unblock &lt;chat_id&gt; — Unblock fan
+
+<b>Bot Control</b>
+/safe_mode — Toggle SAFE_MODE on/off
+/trigger — Manually trigger a poll cycle
+
+<b>Info</b>
+/status — Bot status overview
+/fans — List recent fans with stages
+/help — Show this message
+
+💡 <b>Every preview shows the chat_id.</b> Just copy it from any message!"""
+
+def process_telegram_command(text):
+    """Process a command sent via Telegram. Returns response text or None."""
+    parts = text.strip().split()
+    if not parts:
+        return None
+    cmd = parts[0].lower()
+    args = parts[1:]
+
+    if cmd == '/help':
+        return telegram_console_help()
+
+    if cmd == '/status':
+        safe = get_safe_mode()
+        token_ok = get_fanvue_token() is not None
+        return f"""📊 <b>Bot Status</b>
+SAFE_MODE: {'🔒 ON (Telegram preview)' if safe else '🔓 OFF (Live to Fanvue)'}
+Token: {'✅ Valid' if token_ok else '❌ Missing/Expired'}
+Polling: {'▶️ Active' if polling_active else '⏸️ Stopped'}
+Boot: {BOOT_TIME_UTC.strftime('%Y-%m-%d %H:%M')} UTC
+Blocked fans: {len(get_blocked_fans())}
+Paused fans: {len(get_paused_fans())}"""
+
+    if cmd == '/fans':
+        try:
+            chats, _ = get_chats()
+            if not chats:
+                return "👥 No active chats found."
+            lines = ["👥 <b>Recent Fans</b>\n"]
+            for chat in chats[:15]:
+                user = chat.get('user', {}) or {}
+                cid = user.get('uuid') or chat.get('uuid') or chat.get('id', '?')
+                if not cid or cid == '?':
+                    continue
+                name = user.get('displayName', 'unknown')
+                handle = user.get('handle', '') or 'no_handle'
+                profile = get_or_create_fan_profile(cid, name, handle, user.get('isTopSpender', False))
+                stage = get_fan_stage(profile)
+                stage_label = get_stage_label(stage)
+                paused = " ⏸️" if is_paused(cid) else ""
+                blocked = " 🚫" if is_blocked(cid) else ""
+                lines.append(f"{stage_label}{paused}{blocked}\n👤 {name} (@{handle})\n🔗 <code>{cid}</code>\n")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ Error fetching fans: {e}"
+
+    if cmd == '/safe_mode':
+        current = get_safe_mode()
+        new_val = not current
+        set_safe_mode(new_val)
+        status_text = "🔒 ON (Telegram preview mode)" if new_val else "🔓 OFF (Live to Fanvue)"
+        return f"⚙️ SAFE_MODE toggled: {status_text}"
+
+    if cmd == '/trigger':
+        return "🔫 Use the <code>/trigger</code> URL route in browser, or wait for the next scheduled poll."
+
+    # Commands that need chat_id
+    if cmd in ['/pause', '/resume', '/block', '/unblock']:
+        chat_id = args[0] if len(args) > 0 else None
+        if not chat_id:
+            usage = {
+                '/pause': '/pause <chat_id> [minutes] — default 60min',
+                '/resume': '/resume <chat_id>',
+                '/block': '/block <chat_id> [reason]',
+                '/unblock': '/unblock <chat_id>'
+            }
+            return f"❌ Missing chat_id.\nUsage: {usage.get(cmd, cmd + ' <chat_id>')}"
+
+        if cmd == '/pause':
+            minutes = int(args[1]) if len(args) > 1 and args[1].isdigit() else 60
+            pause_fan(chat_id, minutes)
+            until_str = f"for {minutes} minutes" if minutes > 0 else "PERMANENTLY"
+            return f"⏸️ Fan paused {until_str}\n🔗 <code>{chat_id}</code>"
+
+        if cmd == '/resume':
+            resume_fan(chat_id)
+            return f"▶️ Fan resumed\n🔗 <code>{chat_id}</code>"
+
+        if cmd == '/block':
+            reason = ' '.join(args[1:]) if len(args) > 1 else 'Telegram command'
+            block_fan(chat_id, 'unknown', reason)
+            return f"🚫 Fan blocked\n🔗 <code>{chat_id}</code>\n📝 {reason}"
+
+        if cmd == '/unblock':
+            unblock_fan(chat_id)
+            return f"✅ Fan unblocked\n🔗 <code>{chat_id}</code>"
+
+    return None
+
+def make_telegram_action_line(chat_id):
+    """Return a small command line for a given chat_id to append to Telegram previews."""
+    return f"\n💡 <code>/pause {chat_id}</code> | <code>/block {chat_id}</code>"
 
 # ========== FANVUE API ==========
 def get_headers():
@@ -798,7 +926,7 @@ def process_new_messages():
 👤 <b>{fan_name}</b> (@{handle})
 💬 <i>{text[:100]}</i>
 🤖 Bot javaslat: <i>{reply[:100]}</i>
-🔗 Chat ID: <code>{chat_id}</code>"""
+🔗 Chat ID: <code>{chat_id}</code>{make_telegram_action_line(chat_id)}"""
                 send_telegram(alert)
                 new_count = profile.get('content_ask_count', 0) + 1
                 db_query('UPDATE fan_profiles SET content_ask_count = ? WHERE chat_id = ?', (new_count, chat_id))
@@ -813,7 +941,7 @@ def process_new_messages():
 💰 Top Spender / $200+
 💬 <i>{text[:100]}</i>
 🤖 Bot javaslat: <i>{reply[:100]}</i>
-🔗 Chat ID: <code>{chat_id}</code>"""
+🔗 Chat ID: <code>{chat_id}</code>{make_telegram_action_line(chat_id)}"""
                 send_telegram(alert)
 
             # Schedule reply
@@ -862,8 +990,20 @@ def send_due_replies():
 👤 <b>{fan_name}</b>
 💬 <i>{fan_text[:80]}</i>
 🤖 <i>{reply_text[:100]}</i>
-🔗 <code>{chat_id}</code>"""
+🔗 <code>{chat_id}</code>{make_telegram_action_line(chat_id)}"""
                     send_telegram(preview)
+                else:
+                    # LIVE MODE — still notify owner what was sent
+                    profile = get_or_create_fan_profile(chat_id, fan_name, '', False)
+                    stage = get_fan_stage(profile)
+                    stage_label = get_stage_label(stage)
+                    fan_text = item.get('fan_text', '')
+                    log_msg = f"""📤 <b>ELKÜLDVE</b> {stage_label}
+👤 <b>{fan_name}</b>
+💬 Fan: <i>{fan_text[:80]}</i>
+🤖 Bot: <i>{reply_text[:100]}</i>
+🔗 <code>{chat_id}</code>{make_telegram_action_line(chat_id)}"""
+                    send_telegram(log_msg)
                 print(f"[{datetime.now()}] Sent reply to {fan_name}")
         except Exception as e:
             print(f"[{datetime.now()}] Send error: {e}")
@@ -908,7 +1048,7 @@ def stop_polling():
 @app.route('/')
 def home():
     return {
-        "status": "Jazmin Bot v5.1 — Real Girl v5.1",
+        "status": "Jazmin Bot v5.2 — Telegram Console",
         "safe_mode": get_safe_mode(),
         "boot_time_utc": BOOT_TIME_UTC.isoformat(),
         "token_valid": get_fanvue_token() is not None,
@@ -1039,46 +1179,58 @@ def toggle_safe_mode():
     send_telegram(f"⚙️ <b>SAFE MODE toggled</b>\nNow: {'ON' if new_val else 'OFF'}")
     return {"safe_mode": new_val, "message": f"SAFE_MODE is now {'ON' if new_val else 'OFF'}"}
 
-@app.route('/block_fan', methods=['POST'])
+@app.route('/block_fan', methods=['GET', 'POST'])
 def block_fan_route():
-    data = request.json or {}
+    if request.method == 'POST':
+        data = request.json or {}
+    else:
+        data = request.args.to_dict()
     chat_id = data.get('chat_id')
     fan_name = data.get('fan_name', 'unknown')
     reason = data.get('reason', '')
     if not chat_id:
-        return {"error": "chat_id required"}
+        return {"error": "chat_id required. Use ?chat_id=XXX in browser or POST JSON."}
     block_fan(chat_id, fan_name, reason)
     send_telegram(f"🚫 <b>Fan BLOCKED</b>\n👤 {fan_name}\n📝 {reason}")
     return {"blocked": True, "chat_id": chat_id, "fan_name": fan_name}
 
-@app.route('/unblock_fan', methods=['POST'])
+@app.route('/unblock_fan', methods=['GET', 'POST'])
 def unblock_fan_route():
-    data = request.json or {}
+    if request.method == 'POST':
+        data = request.json or {}
+    else:
+        data = request.args.to_dict()
     chat_id = data.get('chat_id')
     if not chat_id:
-        return {"error": "chat_id required"}
+        return {"error": "chat_id required. Use ?chat_id=XXX in browser or POST JSON."}
     unblock_fan(chat_id)
     send_telegram(f"✅ <b>Fan UNBLOCKED</b>\n🔗 {chat_id}")
     return {"unblocked": True, "chat_id": chat_id}
 
-@app.route('/pause_fan', methods=['POST'])
+@app.route('/pause_fan', methods=['GET', 'POST'])
 def pause_fan_route():
-    data = request.json or {}
+    if request.method == 'POST':
+        data = request.json or {}
+    else:
+        data = request.args.to_dict()
     chat_id = data.get('chat_id')
-    minutes = data.get('minutes', 0)
+    minutes = int(data.get('minutes', 0)) if data.get('minutes') else 0
     if not chat_id:
-        return {"error": "chat_id required"}
+        return {"error": "chat_id required. Use ?chat_id=XXX&minutes=60 in browser or POST JSON."}
     pause_fan(chat_id, minutes)
     until_str = f" for {minutes}min" if minutes > 0 else " PERMANENTLY"
     send_telegram(f"⏸️ <b>Fan PAUSED{until_str}</b>\n🔗 {chat_id}")
     return {"paused": True, "chat_id": chat_id, "minutes": minutes}
 
-@app.route('/resume_fan', methods=['POST'])
+@app.route('/resume_fan', methods=['GET', 'POST'])
 def resume_fan_route():
-    data = request.json or {}
+    if request.method == 'POST':
+        data = request.json or {}
+    else:
+        data = request.args.to_dict()
     chat_id = data.get('chat_id')
     if not chat_id:
-        return {"error": "chat_id required"}
+        return {"error": "chat_id required. Use ?chat_id=XXX in browser or POST JSON."}
     resume_fan(chat_id)
     send_telegram(f"▶️ <b>Fan RESUMED</b>\n🔗 {chat_id}")
     return {"resumed": True, "chat_id": chat_id}
@@ -1099,14 +1251,63 @@ def console():
         "paused_count": len(get_paused_fans()),
         "routes": [
             "/toggle_safe_mode",
-            "/block_fan (POST: chat_id, fan_name, reason)",
-            "/unblock_fan (POST: chat_id)",
-            "/pause_fan (POST: chat_id, minutes=0)",
-            "/resume_fan (POST: chat_id)",
+            "/block_fan (GET/POST: chat_id, fan_name, reason)",
+            "/unblock_fan (GET/POST: chat_id)",
+            "/pause_fan (GET/POST: chat_id, minutes=0)",
+            "/resume_fan (GET/POST: chat_id)",
             "/blocked",
-            "/paused"
+            "/paused",
+            "/telegram_webhook (POST from Telegram)",
+            "/set_telegram_webhook",
+            "/telegram (help)"
         ]
     }
+
+# ========== TELEGRAM WEBHOOK ==========
+
+@app.route('/telegram', methods=['GET'])
+def telegram_help():
+    """Show Telegram console help in browser."""
+    return telegram_console_help().replace('\n', '<br>')
+
+@app.route('/set_telegram_webhook')
+def set_telegram_webhook():
+    """Set Telegram webhook to this app's /telegram_webhook route."""
+    if not TELEGRAM_BOT_TOKEN:
+        return {"error": "TELEGRAM_BOT_TOKEN not set"}
+    base_url = request.url_root.rstrip('/')
+    webhook_url = f"{base_url}/telegram_webhook"
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook"
+        r = requests.post(url, json={"url": webhook_url, "allowed_updates": ["message"]}, timeout=10)
+        return {"telegram_response": r.json(), "webhook_url": webhook_url}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.route('/telegram_webhook', methods=['POST'])
+def telegram_webhook():
+    """Receive Telegram webhook updates and process commands."""
+    try:
+        data = request.json or {}
+        message = data.get('message', {})
+        chat = message.get('chat', {})
+        msg_chat_id = str(chat.get('id', ''))
+        text = message.get('text', '')
+        msg_id = message.get('message_id')
+
+        # Only process messages from authorized admin chat
+        if msg_chat_id != str(TELEGRAM_CHAT_ID):
+            return {"ok": True}  # Silently ignore
+
+        if text.startswith('/'):
+            response = process_telegram_command(text)
+            if response:
+                send_telegram_reply(response, reply_to_message_id=msg_id)
+
+        return {"ok": True}
+    except Exception as e:
+        print(f"Telegram webhook error: {e}")
+        return {"ok": False, "error": str(e)}
 
 # ========== INIT ==========
 init_db()
