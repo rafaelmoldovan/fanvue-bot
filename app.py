@@ -66,6 +66,19 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, fan_name TEXT,
         fan_msg_id TEXT, fan_text TEXT, scheduled_time TEXT, reply_text TEXT,
         status TEXT DEFAULT 'pending', created_at TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS bot_settings (
+        key TEXT PRIMARY KEY, value TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS blocked_fans (
+        chat_id TEXT PRIMARY KEY, fan_name TEXT, blocked_at TEXT, reason TEXT)''')
+    # Gracefully add pause columns if fan_profiles exists without them
+    try:
+        c.execute("ALTER TABLE fan_profiles ADD COLUMN is_paused INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE fan_profiles ADD COLUMN paused_until TEXT")
+    except:
+        pass
     conn.commit()
     conn.close()
 
@@ -85,6 +98,63 @@ def db_query(query, params=(), fetch_one=False):
         result = None
     conn.close()
     return result
+
+# ========== BOT SETTINGS (DB-backed toggles) ==========
+def get_safe_mode():
+    row = db_query("SELECT value FROM bot_settings WHERE key = 'safe_mode'", fetch_one=True)
+    if row and row.get('value') is not None:
+        return row['value'] == 'true'
+    return SAFE_MODE
+
+def set_safe_mode(value):
+    db_query("INSERT OR REPLACE INTO bot_settings (key, value) VALUES ('safe_mode', ?)", ('true' if value else 'false',))
+
+# ========== BLOCKLIST ==========
+def is_blocked(chat_id):
+    row = db_query("SELECT 1 FROM blocked_fans WHERE chat_id = ?", (chat_id,), fetch_one=True)
+    return bool(row)
+
+def block_fan(chat_id, fan_name, reason=""):
+    db_query("INSERT OR REPLACE INTO blocked_fans (chat_id, fan_name, blocked_at, reason) VALUES (?, ?, ?, ?)",
+             (chat_id, fan_name, datetime.now().isoformat(), reason))
+
+def unblock_fan(chat_id):
+    db_query("DELETE FROM blocked_fans WHERE chat_id = ?", (chat_id,))
+
+def get_blocked_fans():
+    return db_query("SELECT * FROM blocked_fans ORDER BY blocked_at DESC") or []
+
+# ========== PAUSE / RESUME ==========
+def is_paused(chat_id):
+    profile = db_query("SELECT is_paused, paused_until FROM fan_profiles WHERE chat_id = ?", (chat_id,), fetch_one=True)
+    if not profile:
+        return False
+    if profile.get('is_paused'):
+        return True
+    until = profile.get('paused_until')
+    if until:
+        try:
+            if datetime.now().isoformat() < until:
+                return True
+            else:
+                # Auto-resume if time expired
+                db_query("UPDATE fan_profiles SET paused_until = NULL WHERE chat_id = ?", (chat_id,))
+        except:
+            pass
+    return False
+
+def pause_fan(chat_id, minutes=0):
+    until = None
+    if minutes > 0:
+        until = (datetime.now() + timedelta(minutes=minutes)).isoformat()
+    db_query("UPDATE fan_profiles SET is_paused = ?, paused_until = ? WHERE chat_id = ?",
+             (1 if minutes == 0 else 0, until, chat_id))
+
+def resume_fan(chat_id):
+    db_query("UPDATE fan_profiles SET is_paused = 0, paused_until = NULL WHERE chat_id = ?", (chat_id,))
+
+def get_paused_fans():
+    return db_query("SELECT chat_id, fan_name, is_paused, paused_until FROM fan_profiles WHERE is_paused = 1 OR paused_until IS NOT NULL") or []
 
 # ========== TOKEN MANAGEMENT ==========
 def save_token(key, value):
@@ -180,7 +250,7 @@ def get_messages(chat_id):
         return []
 
 def send_fanvue_message(chat_id, text):
-    if SAFE_MODE:
+    if get_safe_mode():
         preview = f"🔒 <b>SAFE MODE</b>\n<b>To:</b> {chat_id}\n<b>Message:</b>\n{text}"
         send_telegram(preview)
         return True
@@ -557,6 +627,17 @@ def process_new_messages():
             messages = get_messages(chat_id)
             if not messages:
                 continue
+            
+            # === BLOCKLIST CHECK ===
+            if is_blocked(chat_id):
+                print(f"[{datetime.now()}] BLOCKED {chat_id} — skipping permanently")
+                continue
+            
+            # === PAUSE CHECK ===
+            if is_paused(chat_id):
+                print(f"[{datetime.now()}] PAUSED {chat_id} — skipping")
+                continue
+            
             fan_name = user.get('displayName', 'ismeretlen')
             handle = user.get('handle', '')
             is_top_spender = user.get('isTopSpender', False)
@@ -730,7 +811,7 @@ def send_due_replies():
                 db_query('UPDATE fan_profiles SET last_reply_time = ? WHERE chat_id = ?',
                     (datetime.now().isoformat(), chat_id))
                 sent += 1
-                if SAFE_MODE:
+                if get_safe_mode():
                     send_telegram(f"✅ <b>Válasz {fan_name}-nak (küldve)</b>\n<i>{reply_text[:100]}</i>")
                 print(f"[{datetime.now()}] Sent reply to {fan_name}")
         except Exception as e:
@@ -776,8 +857,8 @@ def stop_polling():
 @app.route('/')
 def home():
     return {
-        "status": "Jazmin Bot v4.1 — Boot Watermark",
-        "safe_mode": SAFE_MODE,
+        "status": "Jazmin Bot v5.0 — Console Controls",
+        "safe_mode": get_safe_mode(),
         "boot_time_utc": BOOT_TIME_UTC.isoformat(),
         "token_valid": get_fanvue_token() is not None,
         "polling_active": polling_active,
@@ -786,7 +867,7 @@ def home():
 @app.route('/status')
 def status():
     return {
-        "safe_mode": SAFE_MODE,
+        "safe_mode": get_safe_mode(),
         "boot_time_utc": BOOT_TIME_UTC.isoformat(),
         "token_status": "valid" if get_fanvue_token() else "missing/invalid",
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
@@ -804,7 +885,7 @@ def trigger():
         return {"error": "No valid token"}
     sent = send_due_replies()
     scheduled, status_msg = process_new_messages()
-    return {"sent": sent, "scheduled": scheduled, "status": status_msg, "safe_mode": SAFE_MODE, "boot_time_utc": BOOT_TIME_UTC.isoformat()}
+    return {"sent": sent, "scheduled": scheduled, "status": status_msg, "safe_mode": get_safe_mode(), "boot_time_utc": BOOT_TIME_UTC.isoformat()}
 
 @app.route('/start_poll')
 def start_poll():
@@ -896,6 +977,85 @@ def learn_personality():
         "chat_summaries": chat_summaries
     }
     return {"style_analysis": style, "all_my_replies": all_my_replies[:30], "all_fan_messages": all_fan_messages[:10]}
+
+# ========== CONSOLE COMMANDS ==========
+
+@app.route('/toggle_safe_mode')
+def toggle_safe_mode():
+    current = get_safe_mode()
+    new_val = not current
+    set_safe_mode(new_val)
+    send_telegram(f"⚙️ <b>SAFE MODE toggled</b>\nNow: {'ON' if new_val else 'OFF'}")
+    return {"safe_mode": new_val, "message": f"SAFE_MODE is now {'ON' if new_val else 'OFF'}"}
+
+@app.route('/block_fan', methods=['POST'])
+def block_fan_route():
+    data = request.json or {}
+    chat_id = data.get('chat_id')
+    fan_name = data.get('fan_name', 'unknown')
+    reason = data.get('reason', '')
+    if not chat_id:
+        return {"error": "chat_id required"}
+    block_fan(chat_id, fan_name, reason)
+    send_telegram(f"🚫 <b>Fan BLOCKED</b>\n👤 {fan_name}\n📝 {reason}")
+    return {"blocked": True, "chat_id": chat_id, "fan_name": fan_name}
+
+@app.route('/unblock_fan', methods=['POST'])
+def unblock_fan_route():
+    data = request.json or {}
+    chat_id = data.get('chat_id')
+    if not chat_id:
+        return {"error": "chat_id required"}
+    unblock_fan(chat_id)
+    send_telegram(f"✅ <b>Fan UNBLOCKED</b>\n🔗 {chat_id}")
+    return {"unblocked": True, "chat_id": chat_id}
+
+@app.route('/pause_fan', methods=['POST'])
+def pause_fan_route():
+    data = request.json or {}
+    chat_id = data.get('chat_id')
+    minutes = data.get('minutes', 0)
+    if not chat_id:
+        return {"error": "chat_id required"}
+    pause_fan(chat_id, minutes)
+    until_str = f" for {minutes}min" if minutes > 0 else " PERMANENTLY"
+    send_telegram(f"⏸️ <b>Fan PAUSED{until_str}</b>\n🔗 {chat_id}")
+    return {"paused": True, "chat_id": chat_id, "minutes": minutes}
+
+@app.route('/resume_fan', methods=['POST'])
+def resume_fan_route():
+    data = request.json or {}
+    chat_id = data.get('chat_id')
+    if not chat_id:
+        return {"error": "chat_id required"}
+    resume_fan(chat_id)
+    send_telegram(f"▶️ <b>Fan RESUMED</b>\n🔗 {chat_id}")
+    return {"resumed": True, "chat_id": chat_id}
+
+@app.route('/blocked')
+def blocked():
+    return {"blocked_fans": get_blocked_fans()}
+
+@app.route('/paused')
+def paused():
+    return {"paused_fans": get_paused_fans()}
+
+@app.route('/console')
+def console():
+    return {
+        "safe_mode": get_safe_mode(),
+        "blocked_count": len(get_blocked_fans()),
+        "paused_count": len(get_paused_fans()),
+        "routes": [
+            "/toggle_safe_mode",
+            "/block_fan (POST: chat_id, fan_name, reason)",
+            "/unblock_fan (POST: chat_id)",
+            "/pause_fan (POST: chat_id, minutes=0)",
+            "/resume_fan (POST: chat_id)",
+            "/blocked",
+            "/paused"
+        ]
+    }
 
 # ========== INIT ==========
 init_db()
