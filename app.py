@@ -6,6 +6,7 @@ import base64
 import sqlite3
 import threading
 import time
+import telebot
 import random
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -40,7 +41,122 @@ MY_UUID = os.environ.get('MY_UUID', '38a392fc-a751-49b3-9d74-01ac6447c490')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
+# ========== TELEGRAM BOT SETUP ==========
+bot = None
+if TELEGRAM_BOT_TOKEN:
+    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+
+def send_telegram_message(text):
+    if not bot or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        bot.send_message(TELEGRAM_CHAT_ID, text[:4000])
+    except Exception as e:
+        print(f"[WARN] Telegram send failed: {e}")
+
+# ========== TELEGRAM COMMANDS ==========
+
+def is_admin(message):
+    return str(message.chat.id) == str(TELEGRAM_CHAT_ID)
+
+@bot.message_handler(commands=['start'])
+def cmd_start(message):
+    bot.reply_to(message, "🤖 Jazmin Bot Console\n\n/status — Active fans\n/pause <uuid> — Pause fan\n/resume <uuid> — Resume fan\n/safe_on — Global safe mode ON\n/safe_off — Global safe mode OFF\n/toggle_safe_mode <uuid> — Toggle per-fan safe mode")
+
+@bot.message_handler(commands=['status'])
+def cmd_status(message):
+    if not is_admin(message):
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT chat_id, fan_name, is_paused, fan_type FROM fan_profiles ORDER BY last_interaction DESC LIMIT 10")
+        rows = c.fetchall()
+        conn.close()
+        lines = ["📊 Recent Fans:"]
+        for r in rows:
+            status = "⏸️ PAUSED" if r[2] else "✅ Active"
+            lines.append(f"`{r[0][:8]}...` | {r[1] or '?'} | {status} | {r[3]}")
+        bot.reply_to(message, "\n".join(lines), parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+@bot.message_handler(commands=['pause'])
+def cmd_pause(message):
+    if not is_admin(message):
+        return
+    try:
+        uuid = message.text.split()[1].strip()
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE fan_profiles SET is_paused=1, paused_until=? WHERE chat_id=?", (None, uuid))
+        conn.commit()
+        conn.close()
+        bot.reply_to(message, f"⏸️ Paused replies for `{uuid[:12]}...`", parse_mode='Markdown')
+    except IndexError:
+        bot.reply_to(message, "Usage: /pause <fan_uuid>")
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+@bot.message_handler(commands=['resume'])
+def cmd_resume(message):
+    if not is_admin(message):
+        return
+    try:
+        uuid = message.text.split()[1].strip()
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE fan_profiles SET is_paused=0, paused_until=NULL WHERE chat_id=?", (uuid,))
+        conn.commit()
+        conn.close()
+        bot.reply_to(message, f"▶️ Resumed replies for `{uuid[:12]}...`", parse_mode='Markdown')
+    except IndexError:
+        bot.reply_to(message, "Usage: /resume <fan_uuid>")
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+@bot.message_handler(commands=['safe_on'])
+def cmd_safe_on(message):
+    if not is_admin(message):
+        return
+    global SAFE_MODE
+    SAFE_MODE = True
+    bot.reply_to(message, "🔒 SAFE MODE: ON\nBot will NOT auto-reply. Manual only.")
+
+@bot.message_handler(commands=['safe_off'])
+def cmd_safe_off(message):
+    if not is_admin(message):
+        return
+    global SAFE_MODE
+    SAFE_MODE = False
+    bot.reply_to(message, "🔓 SAFE MODE: OFF\nBot will auto-reply normally.")
+
+@bot.message_handler(commands=['toggle_safe_mode'])
+def cmd_toggle_safe(message):
+    if not is_admin(message):
+        return
+    try:
+        uuid = message.text.split()[1].strip()
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT is_paused FROM fan_profiles WHERE chat_id=?", (uuid,))
+        row = c.fetchone()
+        if row:
+            new_state = 0 if row[0] else 1
+            c.execute("UPDATE fan_profiles SET is_paused=? WHERE chat_id=?", (new_state, uuid))
+            conn.commit()
+            status = "PAUSED" if new_state else "ACTIVE"
+            bot.reply_to(message, f"{'⏸️' if new_state else '▶️'} Fan `{uuid[:12]}...` is now {status}", parse_mode='Markdown')
+        else:
+            bot.reply_to(message, f"Fan `{uuid[:12]}...` not found.", parse_mode='Markdown')
+        conn.close()
+    except IndexError:
+        bot.reply_to(message, "Usage: /toggle_safe_mode <fan_uuid>")
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
 SAFE_MODE = True
+
 POLL_INTERVAL = 20
 SHORT_DELAY = 30
 LONG_DELAY = 90
@@ -76,9 +192,63 @@ def init_db():
     except:
         pass
     try:
-        c.execute("ALTER TABLE fan_profiles ADD COLUMN paused_until TEXT")
-    except:
-        pass
+        try:
+ c.execute("ALTER TABLE fan_profiles ADD COLUMN paused_until TEXT")
+ except:
+ pass
+ conn.close()
+
+# ========== TELEGRAM WEBHOOK SETUP ==========
+
+def setup_telegram():
+    if not bot:
+        print("[WARN] No TELEGRAM_BOT_TOKEN — Telegram disabled")
+        return
+    
+    # Force HTTPS and strip any trailing spaces
+    domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '').strip()
+    if domain:
+        webhook_url = f"https://{domain}/telegram_webhook"
+    else:
+        raw = os.environ.get('WEBHOOK_URL', '').strip().replace('http://', 'https://')
+        webhook_url = raw if raw.endswith('/telegram_webhook') else raw.rstrip('/') + '/telegram_webhook'
+    
+    try:
+        bot.remove_webhook()
+        time.sleep(0.5)
+        result = bot.set_webhook(url=webhook_url)
+        if result:
+            print(f"[OK] Telegram webhook set: {webhook_url}")
+            send_telegram_message("🤖 Bot started. Commands: /status /pause /resume /safe_on /safe_off /toggle_safe_mode")
+        else:
+            print(f"[WARN] Webhook returned false. Starting polling fallback...")
+            start_polling()
+    except Exception as e:
+        print(f"[ERROR] Webhook failed: {e}. Starting polling...")
+        start_polling()
+
+def start_polling():
+    def poll():
+        bot.remove_webhook()
+        bot.polling(none_stop=True, interval=1, timeout=30)
+    t = threading.Thread(target=poll, daemon=True)
+    t.start()
+    print("[OK] Telegram polling started (fallback)")
+
+# ========== FLASK ROUTES ==========
+
+@app.route('/telegram_webhook', methods=['POST'])
+def telegram_webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    return 'Forbidden', 403
+
+@app.route('/telegram_webhook', methods=['GET'])
+def telegram_webhook_test():
+    return '✅ Telegram webhook endpoint active. POST only for updates.', 200
     conn.commit()
     conn.close()
 
