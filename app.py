@@ -471,17 +471,17 @@ CONTINUATION_VARIATIONS = ["jaaj...", "hmm...", "tudod...", "na...", "figyu...",
 
 
 def is_emoji_or_nonsense(text):
-    """Skip emoji-only, punctuation-only, or nonsense messages."""
+    'Skip emoji-only, punctuation-only, or nonsense messages.'
     if not text:
         return False
-    cleaned = text.strip().replace(' ', '').replace('	', '').replace('
-', '')
-    for p in '.,!?;:-_()[]{}"'':
-        cleaned = cleaned.replace(p, '')
+    cleaned = text.strip()
+    for ws in [" ", "\t", "\n", "\r"]:
+        cleaned = cleaned.replace(ws, "")
+    for p in list(".,!?;:-_()[]{}\"\'") + ["\""]:
+        cleaned = cleaned.replace(p, "")
     if len(cleaned) == 0:
         return True
     return not any(c.isalpha() for c in cleaned)
-
 def parse_timestamp(ts_str):
     if not ts_str:
         return None
