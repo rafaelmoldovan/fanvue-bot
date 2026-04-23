@@ -1,5 +1,5 @@
 """
-Jazmin Fanvue Bot — Complete v5.3
+Jazmin Fanvue Bot — Complete v5.4
 All original logic + Telegram commands. Clean indentation.
 """
 
@@ -294,7 +294,9 @@ def is_paused(chat_id):
     until = profile.get('paused_until')
     if until:
         try:
-            if datetime.now().isoformat() < until:
+            until_dt = parse_timestamp(until)
+            now = datetime.now(timezone.utc)
+            if until_dt and now < until_dt:
                 return True
             db_query("UPDATE fan_profiles SET paused_until=NULL WHERE chat_id=?", (chat_id,))
         except:
@@ -466,20 +468,37 @@ JAZMIN_PERSONALITY = """Te Jazmin vagy, egy 19 éves magyar lány. Egy valódi l
 CONTINUATION_VARIATIONS = ["jaaj...", "hmm...", "tudod...", "na...", "figyu...", "tudod mi...", ""]
 
 
+
+
+def is_emoji_or_nonsense(text):
+    """Skip emoji-only, punctuation-only, or nonsense messages."""
+    if not text:
+        return False
+    cleaned = text.strip().replace(' ', '').replace('	', '').replace('
+', '')
+    for p in '.,!?;:-_()[]{}"'':
+        cleaned = cleaned.replace(p, '')
+    if len(cleaned) == 0:
+        return True
+    return not any(c.isalpha() for c in cleaned)
+
 def parse_timestamp(ts_str):
     if not ts_str:
         return None
+    dt = None
+    for fmt in ["%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S.%f",
+                "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"]:
+        try:
+            dt = datetime.strptime(ts_str, fmt).replace(tzinfo=timezone.utc)
+            return dt
+        except:
+            continue
     try:
         fixed = ts_str.replace('Z', '+00:00')
-        return datetime.fromisoformat(fixed)
-    except:
-        pass
-    try:
-        return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
-    except:
-        pass
-    try:
-        return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(fixed)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except:
         pass
     return None
@@ -604,8 +623,8 @@ def build_system_prompt(fan_name, fan_notes, recent_messages, school_ctx, avail_
     if fan_notes:
         prompt += f"Emlékezz erre a fanról:\n{fan_notes}\n\n"
     if recent_messages:
-        prompt += "KORÁBBI BESZÉLGETÉS (utolsó 5, CSAK kontextus):\n"
-        for msg in recent_messages[-5:]:
+        prompt += "KORÁBBI BESZÉLGETÉS (utolsó üzenetek, CSAK kontextus):\n"
+        for msg in recent_messages:
             sender = "Jazmin" if msg.get('is_me') else fan_name
             prompt += f"{sender}: {msg.get('text', '')}\n"
         prompt += "\n"
@@ -697,10 +716,15 @@ def was_manual_reply_recent(chat_id, messages, minutes=30):
         if not msg_dt:
             return False
         profile = db_query('SELECT last_reply_time FROM fan_profiles WHERE chat_id = ?', (chat_id,), fetch_one=True)
-        last_bot_time = parse_timestamp(profile['last_reply_time']) if profile and profile.get('last_reply_time') else None
-        if last_bot_time and msg_dt <= last_bot_time:
-            return False
-        now = datetime.now(timezone.utc) if msg_dt.tzinfo else datetime.now()
+        last_bot_time_str = profile['last_reply_time'] if profile and profile.get('last_reply_time') else None
+        if last_bot_time_str:
+            try:
+                last_bot_time = parse_timestamp(last_bot_time_str)
+                if last_bot_time and msg_dt <= last_bot_time:
+                    return False
+            except:
+                pass
+        now = datetime.now(timezone.utc)
         if (now - msg_dt).total_seconds() < minutes * 60:
             return True
     return False
@@ -744,46 +768,92 @@ def process_new_messages():
                 continue
             if is_blocked(chat_id):
                 continue
-            if is_paused(chat_id):
-                continue
+            
             fan_name = user.get('displayName', 'ismeretlen')
             handle = user.get('handle', '')
             is_top_spender = user.get('isTopSpender', False)
             profile = get_or_create_fan_profile(chat_id, fan_name, handle, is_top_spender)
+            
+            # === SAVE ALL MESSAGES (fan + bot) to DB for full history ===
+            for msg in messages:
+                msg_id = msg.get('uuid')
+                sender_uuid = msg.get('sender', {}).get('uuid')
+                text_all = msg.get('text', '')
+                msg_time_all = msg.get('createdAt') or msg.get('sentAt') or msg.get('timestamp') or ''
+                if msg_id:
+                    db_query('INSERT OR IGNORE INTO messages (msg_id, chat_id, fan_name, sender_uuid, text, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+                             (msg_id, chat_id, fan_name, sender_uuid, text_all, msg_time_all))
+            
+            # === SILENT MODE: if paused, observe but don't reply ===
+            paused = is_paused(chat_id)
+            if paused:
+                db_query('UPDATE fan_profiles SET last_interaction = ? WHERE chat_id = ?',
+                         (datetime.now(timezone.utc).isoformat(), chat_id))
+                
+                # Capture manual conversation context for when we resume
+                manual_msgs = [m for m in messages if m.get('sender', {}).get('uuid') == MY_UUID and m.get('type') != 'AUTOMATED_NEW_FOLLOWER']
+                if manual_msgs:
+                    manual_texts = [f"Én: {m.get('text','')[:60]}" for m in manual_msgs[:2]]
+                    note = "Manual: " + " | ".join(manual_texts)
+                    update_fan_notes(chat_id, note)
+                
+                # Note last fan message too
+                fan_msgs_silent = [m for m in messages if m.get('sender', {}).get('uuid') != MY_UUID]
+                if fan_msgs_silent and fan_msgs_silent[0].get('text'):
+                    last_fan_text = fan_msgs_silent[0].get('text', '')[:80]
+                    update_fan_notes(chat_id, f"Fan (paused): {last_fan_text}")
+                
+                continue  # Skip scheduling replies
+            
+            # === NORMAL MODE: process fan messages ===
             fan_msgs = [m for m in messages if m.get('sender', {}).get('uuid') != MY_UUID]
             if not fan_msgs:
                 continue
+            
             last_msg = fan_msgs[0]
             msg_id = last_msg.get('uuid')
             text = last_msg.get('text', '')
+            
+            # === SKIP EMOJI-ONLY / NONSENSE MESSAGES ===
+            if is_emoji_or_nonsense(text):
+                print(f"[{datetime.now()}] Skipping emoji-only from {fan_name}: '{text}'")
+                continue
+            
             msg_time = last_msg.get('createdAt') or last_msg.get('created_at') or last_msg.get('timestamp') or last_msg.get('sentAt') or ''
             msg_dt = parse_timestamp(msg_time)
             if msg_dt:
-                if msg_dt.tzinfo is None:
-                    msg_dt = msg_dt.replace(tzinfo=timezone.utc)
                 if msg_dt <= BOOT_TIME_UTC:
                     continue
                 now = datetime.now(timezone.utc)
                 age_hours = (now - msg_dt).total_seconds() / 3600
                 if age_hours > 1:
                     continue
+            
             existing = db_query('SELECT 1 FROM messages WHERE msg_id = ? AND was_replied = 1', (msg_id,), fetch_one=True)
             if existing:
                 continue
-            db_query('INSERT OR IGNORE INTO messages (msg_id, chat_id, fan_name, sender_uuid, text, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-                     (msg_id, chat_id, fan_name, last_msg.get('sender', {}).get('uuid'), text, msg_time))
+            
             if was_manual_reply_recent(chat_id, messages, minutes=30):
                 continue
+            
             already = db_query("SELECT 1 FROM scheduled_replies WHERE fan_msg_id = ? AND status IN ('pending', 'sent')", (msg_id,), fetch_one=True)
             if already:
                 continue
+            
             print(f"[{datetime.now()}] Processing {fan_name}: '{text[:50]}'")
+            
+            # === DEEP CONTEXT: last 20 messages, including bot's own ===
             recent_for_prompt = []
-            for msg in messages[:5]:
+            for msg in messages[:20]:
                 sender_uuid = msg.get('sender', {}).get('uuid')
-                recent_for_prompt.append({'is_me': sender_uuid == MY_UUID, 'text': msg.get('text', ''),
-                                          'timestamp': msg.get('sentAt') or msg.get('createdAt', ''), 'type': msg.get('type', '')})
+                recent_for_prompt.append({
+                    'is_me': sender_uuid == MY_UUID,
+                    'text': msg.get('text', ''),
+                    'timestamp': msg.get('sentAt') or msg.get('createdAt', ''),
+                    'type': msg.get('type', '')
+                })
             recent_for_prompt.reverse()
+            
             fan_notes = profile.get('fan_notes', '') if profile else ''
             content_request = is_content_request(text)
             school_ctx = get_school_context()
@@ -793,6 +863,7 @@ def process_new_messages():
             time_ctx = get_time_context()
             system_prompt = build_system_prompt(fan_name, fan_notes, recent_for_prompt, school_ctx, avail_ctx, mood_ctx, life_ctx, time_ctx, fan_msg_time_str=msg_time)
             reply = ask_openai(system_prompt, text)
+            
             if content_request:
                 stage = get_fan_stage(profile)
                 stage_label = get_stage_label(stage)
@@ -806,8 +877,10 @@ def process_new_messages():
                 stage_label = get_stage_label(stage)
                 alert = f"💰 <b>WHALE</b> | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{text[:100]}</i>\n🤖 <i>{reply[:100]}</i>\n🔗 <code>{chat_id}</code>"
                 send_telegram(alert)
+            
             schedule_reply(chat_id, fan_name, msg_id, text, reply)
             scheduled += 1
+            
         except Exception as e:
             print(f"[{datetime.now()}] Process error: {e}")
             continue
@@ -830,6 +903,10 @@ def send_due_replies():
             messages = get_messages(chat_id)
             if was_manual_reply_recent(chat_id, messages, minutes=30):
                 db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (reply_id,))
+                continue
+            if is_paused(chat_id):
+                db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (reply_id,))
+                print(f"[{datetime.now()}] Cancelled scheduled reply for {fan_name} — fan is paused")
                 continue
             if send_fanvue_message(chat_id, reply_text):
                 db_query('UPDATE messages SET was_replied = 1, reply_text = ?, bot_replied_at = ? WHERE msg_id = ?',
