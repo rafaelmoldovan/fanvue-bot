@@ -185,19 +185,15 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS bot_settings (
         key TEXT PRIMARY KEY, value TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS blocked_fans (
-        chat_id TEXT PRIMARY KEY, fan_name TEXT, blocked_at TEXT, reason TEXT)''')
-    # Gracefully add pause columns if fan_profiles exists without them
-    try:
+            try:
         c.execute("ALTER TABLE fan_profiles ADD COLUMN is_paused INTEGER DEFAULT 0")
     except:
         pass
     try:
-        try:
- c.execute("ALTER TABLE fan_profiles ADD COLUMN paused_until TEXT")
- except:
- pass
- conn.close()
-
+        c.execute("ALTER TABLE fan_profiles ADD COLUMN paused_until TEXT")
+    except:
+        pass
+    conn.close()
 # ========== TELEGRAM WEBHOOK SETUP ==========
 
 def setup_telegram():
