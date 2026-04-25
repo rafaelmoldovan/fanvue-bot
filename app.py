@@ -679,7 +679,7 @@ def ask_openai(system_prompt, user_text):
     try:
         r = requests.post("https://api.openai.com/v1/chat/completions",
                           headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                          json={"model": "gpt-5.5", "messages": [
+                          json={"model": "gpt-4o", "messages": [
                               {"role": "system", "content": system_prompt},
                               {"role": "user", "content": user_text}
                           ], "max_tokens": 120, "temperature": 0.9, "presence_penalty": 0.6, "frequency_penalty": 0.4},
