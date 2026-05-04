@@ -1,6 +1,7 @@
 """
-Jazmin Fanvue Bot — v6.0
+Jazmin Fanvue Bot — v6.1
 Therapy-first, no upsell, real girl, batched replies, GPT-5.3 ready.
+Fixed: batch deadline freeze, shy deflection trigger, Telegram visibility, is_top_spender NameError.
 """
 
 from flask import Flask, request
@@ -75,7 +76,7 @@ def is_admin(message):
 
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
-    bot.reply_to(message, "🤖 Jazmin Bot v6.0\n/status — Fans\n/pause <uuid> — Pause\n/resume <uuid> — Resume\n/safe_on /safe_off — Safe mode\n/toggle_safe_mode <uuid> — Toggle\n/notes <uuid> — Fan facts\n/asked <uuid> — Questions asked")
+    bot.reply_to(message, "🤖 Jazmin Bot v6.1\n/status — Fans\n/pause <uuid> — Pause\n/resume <uuid> — Resume\n/safe_on /safe_off — Safe mode\n/toggle_safe_mode <uuid> — Toggle\n/notes <uuid> — Fan facts\n/asked <uuid> — Questions asked")
 
 
 @bot.message_handler(commands=['status'])
@@ -376,7 +377,6 @@ def should_wait_for_fan(chat_id):
                     return True
             except:
                 pass
-        # 15 min passed but still waiting for fan reply
         return True
     return False
 
@@ -431,7 +431,7 @@ def send_fanvue_message(chat_id, text):
         return False
 
 
-# ========== PERSONALITY v6.0 ==========
+# ========== PERSONALITY v6.1 ==========
 JAZMIN_PERSONALITY = """Te Jázmin vagy, egy 19 éves magyar lány. Egy valódi lány, aki nem mindig van online, nem mindig lelkes, és nem próbál túl keményen. Nem vagy chatbot, nem vagy ügyfélszolgálat.
 
 🔥 ARANYSZABÁLY — MEMÓRIA & KÉRDÉSEK:
@@ -699,7 +699,7 @@ def get_time_context():
     return TIME_CONTEXTS['night'][2]
 
 
-CONTENT_KEYWORDS = ['kép', 'képet', 'videó', 'videót', 'mutass', 'mutasd', 'új', 'tartalom', 'content', 'pic', 'video', 'show me', 'send', 'küldj', 'küldjél', 'van valami új', 'mit küldtél', 'nézhetek', 'láthatnék', 'fotó', 'csináltál', 'posztoltál', 'feltöltöttél', 'friss', 'exkluzív']
+CONTENT_KEYWORDS = ['képet', 'videót', 'mutass', 'mutasd', 'tartalom', 'content', 'pic', 'video', 'show me', 'send me', 'küldj képet', 'van valami új', 'mit küldtél', 'nézhetek', 'láthatnék', 'fotót', 'posztoltál', 'feltöltöttél', 'exkluzív', 'meztelen', 'cicis', 'segges']
 
 
 def is_content_request(text):
@@ -711,7 +711,7 @@ def is_content_request(text):
 def is_shy_request(text):
     if not text:
         return False
-    triggers = ['kép', 'képet', 'videót', 'fotót', 'mutasd', 'küldj', 'show', 'pic', 'photo', 'video', 'szexi', 'meztelen', 'cici', 'segg']
+    triggers = ['küldj', 'kép', 'fotó', 'videó', 'mutasd', 'show', 'pic', 'photo', 'video', 'szexi', 'meztelen', 'cici', 'segg']
     return any(t in text.lower() for t in triggers)
 
 
@@ -824,7 +824,6 @@ def update_conversation_summary(chat_id, fan_text, bot_reply):
     new_entry = f"Fan: {fan_text[:60]}... | Jázmin: {bot_reply[:60]}..."
     if existing and existing.get('summary_text'):
         summary = existing['summary_text'] + "\n" + new_entry
-        # Keep last 15 lines
         lines = summary.split("\n")
         if len(lines) > 15:
             summary = "\n".join(lines[-15:])
@@ -916,7 +915,6 @@ def was_manual_reply_recent(chat_id, messages, minutes=15):
                 pass
         now = datetime.now(timezone.utc)
         if (now - msg_dt).total_seconds() < minutes * 60:
-            # Activate 15-min manual pause + wait for fan reply
             pause_until = (now + timedelta(minutes=15)).isoformat()
             db_query("UPDATE fan_profiles SET manual_pause_until=?, wait_for_fan_reply=1, is_paused=1 WHERE chat_id=?",
                      (pause_until, chat_id))
@@ -926,24 +924,24 @@ def was_manual_reply_recent(chat_id, messages, minutes=15):
 
 # ========== SCHEDULED REPLIES (BATCHED) ==========
 def schedule_or_extend_batch(chat_id, fan_name, fan_msg_id, fan_text):
-    # Check for existing pending batch for this fan
     existing = db_query("SELECT * FROM scheduled_replies WHERE chat_id=? AND status='pending' ORDER BY id DESC LIMIT 1",
                         (chat_id,), fetch_one=True)
     now = datetime.now()
     
     if existing:
-        # Add to existing batch, DO NOT extend deadline
-        combined = existing['fan_text'] + "\n[új üzenet] " + fan_text
-        db_query("UPDATE scheduled_replies SET fan_text=? WHERE id=?",
-                 (combined, existing['id']))
+        # Add to batch but DO NOT extend deadline
+        combined = existing['fan_text'] + "\n[+] " + fan_text
+        db_query("UPDATE scheduled_replies SET fan_text=?, fan_msg_id=? WHERE id=?",
+                 (combined, fan_msg_id, existing['id']))
         print(f"[{datetime.now()}] Added to batch for {fan_name}")
+        send_telegram(f"📝 Batch growing for <b>{fan_name}</b>\n💬 <i>{fan_text[:60]}</i>")
     else:
-        # Create new batch with 3-minute deadline
         batch_deadline = (now + timedelta(seconds=BATCH_WINDOW)).isoformat()
         db_query('''INSERT INTO scheduled_replies (chat_id, fan_name, fan_msg_id, fan_text, scheduled_time, reply_text, created_at, batch_window_expires)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
                  (chat_id, fan_name, fan_msg_id, fan_text, batch_deadline, None, now.isoformat(), batch_deadline))
         print(f"[{datetime.now()}] New batch for {fan_name}, deadline {batch_deadline}")
+        send_telegram(f"⏳ New batch for <b>{fan_name}</b>, fires at {batch_deadline[11:16]}\n💬 <i>{fan_text[:60]}</i>")
 
 
 def get_due_batches():
@@ -993,25 +991,25 @@ def process_new_messages():
             if paused:
                 db_query('UPDATE fan_profiles SET last_interaction = ? WHERE chat_id = ?',
                          (datetime.now(timezone.utc).isoformat(), chat_id))
-                # Capture manual context
                 manual_msgs = [m for m in messages if m.get('sender', {}).get('uuid') == MY_UUID and m.get('type') != 'AUTOMATED_NEW_FOLLOWER']
                 if manual_msgs:
                     manual_texts = [f"Én: {m.get('text','')[:60]}" for m in manual_msgs[:2]]
                     note = "Manual: " + " | ".join(manual_texts)
                     update_fan_notes(chat_id, note)
+                    send_telegram(f"✍️ Manual reply by you to <b>{fan_name}</b>\n💬 <i>{manual_texts[0]}</i>")
                 fan_msgs_silent = [m for m in messages if m.get('sender', {}).get('uuid') != MY_UUID]
                 if fan_msgs_silent and fan_msgs_silent[0].get('text'):
                     last_fan_text = fan_msgs_silent[0].get('text', '')[:80]
                     update_fan_notes(chat_id, f"Fan (paused): {last_fan_text}")
+                    send_telegram(f"👁️ <b>{fan_name}</b> sent while paused: <i>{last_fan_text}</i>")
                 continue
 
-            # === CHECK IF MANUAL PAUSE WAITING FOR FAN ===
+            # === CHECK MANUAL PAUSE ===
             if should_wait_for_fan(chat_id):
-                # Check if fan sent new message
                 fan_msgs_after_manual = [m for m in messages if m.get('sender', {}).get('uuid') != MY_UUID]
                 if fan_msgs_after_manual:
-                    # Fan replied, lift pause
                     fan_replied_after_manual(chat_id)
+                    send_telegram(f"▶️ <b>{fan_name}</b> replied after your manual message. Bot RESUMING.")
                 else:
                     continue
 
@@ -1026,6 +1024,7 @@ def process_new_messages():
 
             if is_emoji_or_nonsense(text):
                 print(f"[{datetime.now()}] Skipping emoji-only from {fan_name}: '{text}'")
+                send_telegram(f"😑 Skipping emoji-only from <b>{fan_name}</b>: '{text}'")
                 continue
 
             msg_time = last_msg.get('createdAt') or last_msg.get('created_at') or last_msg.get('timestamp') or last_msg.get('sentAt') or ''
@@ -1044,15 +1043,16 @@ def process_new_messages():
 
             # === MANUAL REPLY DETECTION (15 MIN) ===
             if was_manual_reply_recent(chat_id, messages, minutes=15):
-                send_telegram(f"🛑 Manual reply detected for {fan_name}. Bot paused 15min + waiting for fan reply.")
+                send_telegram(f"🛑 Manual reply detected for <b>{fan_name}</b>. Bot paused 15min + waiting for fan reply.")
                 continue
 
-            # === BATCHING: Schedule or extend ===
+            # === BATCHING ===
             schedule_or_extend_batch(chat_id, fan_name, msg_id, text)
             scheduled += 1
 
         except Exception as e:
             print(f"[{datetime.now()}] Process error: {e}")
+            send_telegram(f"❌ Process error: {str(e)[:200]}")
             continue
     return scheduled, "OK"
 
@@ -1071,19 +1071,15 @@ def send_due_batches():
             combined_text = item['fan_text']
             batch_id = item['id']
 
-            # Double-check manual pause
             if is_paused(chat_id) or should_wait_for_fan(chat_id):
                 db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (batch_id,))
+                send_telegram(f"⏸️ Batch cancelled for <b>{fan_name}</b> — paused/ghosted")
                 continue
 
             messages = get_messages(chat_id)
             if was_manual_reply_recent(chat_id, messages, minutes=15):
                 db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (batch_id,))
-                continue
-
-            if is_paused(chat_id):
-                db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (batch_id,))
-                print(f"[{datetime.now()}] Cancelled batch for {fan_name} — paused")
+                send_telegram(f"🛑 Batch cancelled for <b>{fan_name}</b> — manual reply detected")
                 continue
 
             # Build context
@@ -1106,14 +1102,10 @@ def send_due_batches():
             life_ctx = get_life_context()
             time_ctx = get_time_context()
 
-            # Check if "how was your day" already asked today
             last_day = get_last_day_asked(chat_id)
             today_str = datetime.now().strftime('%Y-%m-%d')
             day_already_asked = (last_day == today_str)
 
-            # Check gap for greeting
-            msg_time = item.get('fan_msg_id')
-            # Get time of this batch's first message
             fan_msg_time_str = None
             for m in messages:
                 if m.get('uuid') == fan_msg_id:
@@ -1124,10 +1116,12 @@ def send_due_batches():
                                                 school_ctx, avail_ctx, mood_ctx, life_ctx, time_ctx,
                                                 fan_msg_time_str, day_already_asked, summary)
 
-            # Check content request
-            if is_content_request(combined_text):
+            # Check ONLY the last actual message, not combined text
+            last_msg_text = combined_text.split("[+] ")[-1] if "[+] " in combined_text else combined_text
+            if is_content_request(last_msg_text) or is_shy_request(last_msg_text):
                 reply = random.choice(SHY_DEFLECTIONS)
-                # Still update DB as if we replied
+                print(f"[{datetime.now()}] Shy deflection for {fan_name}: {reply}")
+                send_telegram(f"🙈 Shy deflection for <b>{fan_name}</b>\n💬 Fan: <i>{last_msg_text[:80]}</i>\n🤖 Bot: <i>{reply}</i>")
             else:
                 reply = ask_openai(system_prompt, combined_text)
 
@@ -1145,6 +1139,7 @@ def send_due_batches():
             time.sleep(send_delay)
 
             if send_fanvue_message(chat_id, reply):
+                # Mark ALL messages in batch as replied
                 db_query('UPDATE messages SET was_replied = 1, reply_text = ?, bot_replied_at = ? WHERE msg_id = ?',
                          (reply, datetime.now().isoformat(), fan_msg_id))
                 mark_batch_sent(batch_id)
@@ -1158,26 +1153,27 @@ def send_due_batches():
                 if 'milyen volt a napod' in reply.lower() or 'hogy telt a napod' in reply.lower():
                     update_last_day_asked(chat_id)
 
-                # Whale alert
+                # FIXED: Use profile instead of undefined is_top_spender
                 profile = get_or_create_fan_profile(chat_id, fan_name, '', False)
                 stage = get_fan_stage(profile)
-                if is_top_spender or stage >= 3:
-                    stage_label = get_stage_label(stage)
+                stage_label = get_stage_label(stage)
+                
+                is_whale = profile.get('lifetime_spend', 0) >= 200 or stage >= 3
+                if is_whale:
                     alert = f"💰 <b>WHALE</b> | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{combined_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>\n🔗 <code>{chat_id}</code>"
                     send_telegram(alert)
                 elif get_safe_mode():
-                    stage_label = get_stage_label(stage)
-                    preview = f"📩 {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{combined_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>\n🔗 <code>{chat_id}</code>"
+                    preview = f"🔒 SAFE | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{combined_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>\n🔗 <code>{chat_id}</code>"
                     send_telegram(preview)
                 else:
-                    stage_label = get_stage_label(stage)
-                    log_msg = f"📤 <b>ELKÜLDVE</b> {stage_label}\n👤 <b>{fan_name}</b>\n💬 Fan: <i>{combined_text[:80]}</i>\n🤖 Bot: <i>{reply[:100]}</i>\n🔗 <code>{chat_id}</code>"
+                    log_msg = f"📤 <b>SENT</b> {stage_label}\n👤 <b>{fan_name}</b>\n💬 Fan: <i>{combined_text[:80]}</i>\n🤖 Bot: <i>{reply[:100]}</i>\n🔗 <code>{chat_id}</code>"
                     send_telegram(log_msg)
 
                 sent += 1
                 print(f"[{datetime.now()}] Sent batch reply to {fan_name}")
         except Exception as e:
             print(f"[{datetime.now()}] Send error: {e}")
+            send_telegram(f"❌ Error sending to <b>{fan_name}</b>: {str(e)[:200]}")
     return sent
 
 
@@ -1223,7 +1219,7 @@ def stop_polling():
 # ========== ROUTES ==========
 @app.route('/')
 def home():
-    return "Jazmin Bot v6.0 is running!", 200
+    return "Jazmin Bot v6.1 is running!", 200
 
 
 @app.route('/callback')
@@ -1339,7 +1335,7 @@ if bot:
             webhook_url = f"https://{domain}/telegram_webhook"
             bot.set_webhook(url=webhook_url)
             print(f"[OK] Webhook: {webhook_url}")
-            send_telegram("🤖 Jazmin Bot v6.0 started")
+            send_telegram("🤖 Jazmin Bot v6.1 started")
     except Exception as e:
         print(f"[WARN] Webhook failed: {e}")
 
