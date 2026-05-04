@@ -930,16 +930,16 @@ def schedule_or_extend_batch(chat_id, fan_name, fan_msg_id, fan_text):
     existing = db_query("SELECT * FROM scheduled_replies WHERE chat_id=? AND status='pending' ORDER BY id DESC LIMIT 1",
                         (chat_id,), fetch_one=True)
     now = datetime.now()
-    batch_deadline = (now + timedelta(seconds=BATCH_WINDOW)).isoformat()
     
     if existing:
-        # Extend batch with new message
+        # Add to existing batch, DO NOT extend deadline
         combined = existing['fan_text'] + "\n[új üzenet] " + fan_text
-        db_query("UPDATE scheduled_replies SET fan_text=?, scheduled_time=?, batch_window_expires=?, reply_text=NULL WHERE id=?",
-                 (combined, batch_deadline, batch_deadline, existing['id']))
-        print(f"[{datetime.now()}] Extended batch for {fan_name}")
+        db_query("UPDATE scheduled_replies SET fan_text=? WHERE id=?",
+                 (combined, existing['id']))
+        print(f"[{datetime.now()}] Added to batch for {fan_name}")
     else:
-        # Create new batch
+        # Create new batch with 3-minute deadline
+        batch_deadline = (now + timedelta(seconds=BATCH_WINDOW)).isoformat()
         db_query('''INSERT INTO scheduled_replies (chat_id, fan_name, fan_msg_id, fan_text, scheduled_time, reply_text, created_at, batch_window_expires)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
                  (chat_id, fan_name, fan_msg_id, fan_text, batch_deadline, None, now.isoformat(), batch_deadline))
