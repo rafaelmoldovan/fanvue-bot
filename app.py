@@ -1,8 +1,9 @@
 """
-Jazmin Fanvue Bot — v6.2
+Jazmin Fanvue Bot — v6.3
 Therapy-first, no upsell, real girl, batched replies, GPT-5.3 ready.
 Fixed: batch deadline freeze, shy deflection trigger, Telegram visibility, is_top_spender NameError,
-       name handling (no username calling), 5-min manual pause, automatic fact extraction.
+       name handling (no username calling), 5-min manual pause, automatic fact extraction,
+       inline Telegram buttons (pause/resume/notes/asked).
 """
 
 from flask import Flask, request
@@ -14,6 +15,7 @@ import sqlite3
 import threading
 import time
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import random
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -71,13 +73,113 @@ def send_telegram(text, parse_mode='HTML'):
         return False
 
 
+def send_telegram_with_id(text, chat_id, parse_mode='HTML'):
+    """Always append chat_id to Telegram messages so admin can copy/paste for /pause"""
+    if chat_id:
+        text += f"\n🔗 <code>{chat_id}</code>"
+    return send_telegram(text, parse_mode)
+
+
+def make_inline_buttons(chat_id):
+    """Inline keyboard with Pause, Resume, Notes, Asked shortcuts"""
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("⏸️ Pause", callback_data=f"pause:{chat_id}"),
+        InlineKeyboardButton("▶️ Resume", callback_data=f"resume:{chat_id}"),
+        InlineKeyboardButton("📝 Notes", callback_data=f"notes:{chat_id}"),
+        InlineKeyboardButton("❓ Asked", callback_data=f"asked:{chat_id}")
+    )
+    return markup
+
+
+def send_telegram_with_buttons(text, chat_id, parse_mode='HTML'):
+    """Send Telegram message with inline action buttons and chat ID"""
+    if not bot or not TELEGRAM_CHAT_ID:
+        return False
+    try:
+        markup = make_inline_buttons(chat_id)
+        full_text = text + f"\n🔗 <code>{chat_id}</code>"
+        bot.send_message(TELEGRAM_CHAT_ID, full_text[:4000], parse_mode=parse_mode, reply_markup=markup)
+        return True
+    except Exception as e:
+        print(f"[WARN] Telegram buttons failed: {e}")
+        # Fallback to plain text
+        return send_telegram_with_id(text, chat_id, parse_mode)
+
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    """Handle inline button clicks"""
+    if not is_admin(call.message):
+        bot.answer_callback_query(call.id, "Not authorized")
+        return
+    data = call.data or ""
+    if ":" not in data:
+        bot.answer_callback_query(call.id, "Invalid")
+        return
+    action, chat_id = data.split(":", 1)
+    try:
+        if action == "pause":
+            db_query("UPDATE fan_profiles SET is_paused=1, paused_until=NULL, manual_pause_until=NULL WHERE chat_id=?", (chat_id,))
+            bot.answer_callback_query(call.id, "⏸️ Paused")
+            send_telegram_with_id(f"⏸️ Manually paused <code>{chat_id}</code>", chat_id)
+        elif action == "resume":
+            db_query("UPDATE fan_profiles SET is_paused=0, paused_until=NULL, manual_pause_until=NULL, wait_for_fan_reply=0 WHERE chat_id=?", (chat_id,))
+            bot.answer_callback_query(call.id, "▶️ Resumed")
+            send_telegram_with_id(f"▶️ Manually resumed <code>{chat_id}</code>", chat_id)
+        elif action == "notes":
+            facts = db_query("SELECT fact_type, fact_value, discovered_at FROM fan_facts WHERE chat_id=? ORDER BY discovered_at DESC", (chat_id,))
+            if not facts:
+                bot.answer_callback_query(call.id, "No notes")
+                return
+            lines = [f"📝 Facts for <code>{chat_id}</code>:"]
+            for f in facts:
+                lines.append(f"• <b>{f['fact_type']}</b>: {f['fact_value']}")
+            send_telegram("\n".join(lines))
+            bot.answer_callback_query(call.id, "Notes sent")
+        elif action == "asked":
+            qa = db_query("SELECT question, answered, asked_at FROM questions_asked WHERE chat_id=? ORDER BY asked_at DESC", (chat_id,))
+            if not qa:
+                bot.answer_callback_query(call.id, "No questions")
+                return
+            lines = [f"❓ Questions for <code>{chat_id}</code>:"]
+            for q in qa:
+                status = "✅" if q['answered'] else "⏳"
+                lines.append(f"{status} <b>{q['question']}</b> ({q['asked_at'][:10]})")
+            send_telegram("\n".join(lines))
+            bot.answer_callback_query(call.id, "Asked sent")
+        else:
+            bot.answer_callback_query(call.id, "Unknown action")
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Error: {str(e)[:100]}")
+
+
 def is_admin(message):
     return str(message.chat.id) == str(TELEGRAM_CHAT_ID)
 
 
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
-    bot.reply_to(message, "🤖 Jazmin Bot v6.1\n/status — Fans\n/pause <uuid> — Pause\n/resume <uuid> — Resume\n/safe_on /safe_off — Safe mode\n/toggle_safe_mode <uuid> — Toggle\n/notes <uuid> — Fan facts\n/asked <uuid> — Questions asked")
+    bot.reply_to(message, "🤖 Jazmin Bot v6.3\n/status — Fans overview\n/fans — All fans with IDs\n/pause <uuid> — Pause\n/resume <uuid> — Resume\n/safe_on /safe_off — Safe mode\n/notes <uuid> — Fan facts\n/asked <uuid> — Questions asked\n\n💡 Tip: Every fan message now has buttons below it! Tap ⏸️ to pause instantly.")
+
+
+@bot.message_handler(commands=['fans'])
+def cmd_fans(message):
+    if not is_admin(message):
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT chat_id, fan_name, is_paused, fan_type, total_messages FROM fan_profiles ORDER BY last_interaction DESC")
+        rows = c.fetchall()
+        conn.close()
+        lines = ["📋 All Fans (copy the ID for /pause):"]
+        for r in rows:
+            status = "⏸️" if r[2] else "✅"
+            lines.append(f"{status} \u003cb\u003e{r[1] or '?'}</b> ({r[4]} msgs) | \u003ccode\u003e{r[0]}</code\u003e")
+        bot.reply_to(message, "\n".join(lines), parse_mode='HTML')
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
 
 
 @bot.message_handler(commands=['status'])
@@ -1031,14 +1133,14 @@ def schedule_or_extend_batch(chat_id, fan_name, fan_msg_id, fan_text):
         db_query("UPDATE scheduled_replies SET fan_text=?, fan_msg_id=? WHERE id=?",
                  (combined, fan_msg_id, existing['id']))
         print(f"[{datetime.now()}] Added to batch for {fan_name}")
-        send_telegram(f"📝 Batch growing for <b>{fan_name}</b>\n💬 <i>{fan_text[:60]}</i>")
+        send_telegram_with_id(f"📝 Batch growing for <b>{fan_name}</b>\n💬 <i>{fan_text[:60]}</i>", chat_id)
     else:
         batch_deadline = (now + timedelta(seconds=BATCH_WINDOW)).isoformat()
         db_query('''INSERT INTO scheduled_replies (chat_id, fan_name, fan_msg_id, fan_text, scheduled_time, reply_text, created_at, batch_window_expires)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
                  (chat_id, fan_name, fan_msg_id, fan_text, batch_deadline, None, now.isoformat(), batch_deadline))
         print(f"[{datetime.now()}] New batch for {fan_name}, deadline {batch_deadline}")
-        send_telegram(f"⏳ New batch for <b>{fan_name}</b>, fires at {batch_deadline[11:16]}\n💬 <i>{fan_text[:60]}</i>")
+        send_telegram_with_buttons(f"⏳ New batch for <b>{fan_name}</b>, fires at {batch_deadline[11:16]}\n💬 <i>{fan_text[:60]}</i>", chat_id)
 
 
 def get_due_batches():
@@ -1096,12 +1198,12 @@ def process_new_messages():
                     manual_texts = [f"Én: {m.get('text','')[:60]}" for m in manual_msgs[:2]]
                     note = "Manual: " + " | ".join(manual_texts)
                     update_fan_notes(chat_id, note)
-                    send_telegram(f"✍️ Manual reply by you to <b>{fan_name}</b>\n💬 <i>{manual_texts[0]}</i>")
+                    send_telegram_with_buttons(f"✍️ Manual reply by you to <b>{fan_name}</b>\n💬 <i>{manual_texts[0]}</i>", chat_id)
                 fan_msgs_silent = [m for m in messages if m.get('sender', {}).get('uuid') != MY_UUID]
                 if fan_msgs_silent and fan_msgs_silent[0].get('text'):
                     last_fan_text = fan_msgs_silent[0].get('text', '')[:80]
                     update_fan_notes(chat_id, f"Fan (paused): {last_fan_text}")
-                    send_telegram(f"👁️ <b>{fan_name}</b> sent while paused: <i>{last_fan_text}</i>")
+                    send_telegram_with_buttons(f"👁️ <b>{fan_name}</b> sent while paused: <i>{last_fan_text}</i>", chat_id)
                 continue
 
             # === CHECK MANUAL PAUSE ===
@@ -1109,7 +1211,7 @@ def process_new_messages():
                 fan_msgs_after_manual = [m for m in messages if m.get('sender', {}).get('uuid') != MY_UUID]
                 if fan_msgs_after_manual:
                     fan_replied_after_manual(chat_id)
-                    send_telegram(f"▶️ <b>{fan_name}</b> replied after your manual message. Bot RESUMING.")
+                    send_telegram_with_buttons(f"▶️ <b>{fan_name}</b> replied after your manual message. Bot RESUMING.", chat_id)
                 else:
                     continue
 
@@ -1124,7 +1226,7 @@ def process_new_messages():
 
             if is_emoji_or_nonsense(text):
                 print(f"[{datetime.now()}] Skipping emoji-only from {fan_name}: '{text}'")
-                send_telegram(f"😑 Skipping emoji-only from <b>{fan_name}</b>: '{text}'")
+                send_telegram_with_buttons(f"😑 Skipping emoji-only from <b>{fan_name}</b>: '{text}'", chat_id)
                 continue
 
             msg_time = last_msg.get('createdAt') or last_msg.get('created_at') or last_msg.get('timestamp') or last_msg.get('sentAt') or ''
@@ -1141,9 +1243,9 @@ def process_new_messages():
             if existing:
                 continue
 
-            # === MANUAL REPLY DETECTION (15 MIN) ===
-            if was_manual_reply_recent(chat_id, messages, minutes=15):
-                send_telegram(f"🛑 Manual reply detected for <b>{fan_name}</b>. Bot paused 15min + waiting for fan reply.")
+            # === MANUAL REPLY DETECTION (5 MIN) ===
+            if was_manual_reply_recent(chat_id, messages, minutes=5):
+                send_telegram_with_buttons(f"🛑 Manual reply detected for <b>{fan_name}</b>. Bot paused 5min, auto-resumes.", chat_id)
                 continue
 
             # === BATCHING ===
@@ -1152,7 +1254,7 @@ def process_new_messages():
 
         except Exception as e:
             print(f"[{datetime.now()}] Process error: {e}")
-            send_telegram(f"❌ Process error: {str(e)[:200]}")
+            send_telegram_with_buttons(f"❌ Process error: {str(e)[:200]}", chat_id)
             continue
     return scheduled, "OK"
 
@@ -1173,13 +1275,13 @@ def send_due_batches():
 
             if is_paused(chat_id) or should_wait_for_fan(chat_id):
                 db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (batch_id,))
-                send_telegram(f"⏸️ Batch cancelled for <b>{fan_name}</b> — paused/ghosted")
+                send_telegram_with_buttons(f"⏸️ Batch cancelled for <b>{fan_name}</b> — paused/ghosted", chat_id)
                 continue
 
             messages = get_messages(chat_id)
             if was_manual_reply_recent(chat_id, messages, minutes=5):
                 db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (batch_id,))
-                send_telegram(f"🛑 Batch cancelled for <b>{fan_name}</b> — manual reply detected")
+                send_telegram_with_buttons(f"🛑 Batch cancelled for <b>{fan_name}</b> — manual reply detected", chat_id)
                 continue
 
             # Build context
@@ -1222,7 +1324,7 @@ def send_due_batches():
             if is_content_request(last_msg_text) or is_shy_request(last_msg_text):
                 reply = random.choice(SHY_DEFLECTIONS)
                 print(f"[{datetime.now()}] Shy deflection for {fan_name}: {reply}")
-                send_telegram(f"🙈 Shy deflection for <b>{fan_name}</b>\n💬 Fan: <i>{last_msg_text[:80]}</i>\n🤖 Bot: <i>{reply}</i>")
+                send_telegram_with_buttons(f"🙈 Shy deflection for <b>{fan_name}</b>\n💬 Fan: <i>{last_msg_text[:80]}</i>\n🤖 Bot: <i>{reply}</i>", chat_id)
             else:
                 reply = ask_openai(system_prompt, combined_text)
 
@@ -1261,20 +1363,20 @@ def send_due_batches():
                 
                 is_whale = profile.get('lifetime_spend', 0) >= 200 or stage >= 3
                 if is_whale:
-                    alert = f"💰 <b>WHALE</b> | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{combined_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>\n🔗 <code>{chat_id}</code>"
-                    send_telegram(alert)
+                    alert = f"💰 <b>WHALE</b> | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{combined_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>"
+                    send_telegram_with_buttons(alert, chat_id)
                 elif get_safe_mode():
-                    preview = f"🔒 SAFE | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{combined_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>\n🔗 <code>{chat_id}</code>"
-                    send_telegram(preview)
+                    preview = f"🔒 SAFE | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{combined_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>"
+                    send_telegram_with_buttons(preview, chat_id)
                 else:
-                    log_msg = f"📤 <b>SENT</b> {stage_label}\n👤 <b>{fan_name}</b>\n💬 Fan: <i>{combined_text[:80]}</i>\n🤖 Bot: <i>{reply[:100]}</i>\n🔗 <code>{chat_id}</code>"
-                    send_telegram(log_msg)
+                    log_msg = f"📤 <b>SENT</b> {stage_label}\n👤 <b>{fan_name}</b>\n💬 Fan: <i>{combined_text[:80]}</i>\n🤖 Bot: <i>{reply[:100]}</i>"
+                    send_telegram_with_buttons(log_msg, chat_id)
 
                 sent += 1
                 print(f"[{datetime.now()}] Sent batch reply to {fan_name}")
         except Exception as e:
             print(f"[{datetime.now()}] Send error: {e}")
-            send_telegram(f"❌ Error sending to <b>{fan_name}</b>: {str(e)[:200]}")
+            send_telegram_with_id(f"❌ Error sending to <b>{fan_name}</b>: {str(e)[:200]}", chat_id)
     return sent
 
 
@@ -1436,7 +1538,7 @@ if bot:
             webhook_url = f"https://{domain}/telegram_webhook"
             bot.set_webhook(url=webhook_url)
             print(f"[OK] Webhook: {webhook_url}")
-            send_telegram("🤖 Jazmin Bot v6.1 started")
+            send_telegram("🤖 Jazmin Bot v6.3 started")
     except Exception as e:
         print(f"[WARN] Webhook failed: {e}")
 
