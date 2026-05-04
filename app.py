@@ -1,7 +1,8 @@
 """
-Jazmin Fanvue Bot — v6.1
+Jazmin Fanvue Bot — v6.2
 Therapy-first, no upsell, real girl, batched replies, GPT-5.3 ready.
-Fixed: batch deadline freeze, shy deflection trigger, Telegram visibility, is_top_spender NameError.
+Fixed: batch deadline freeze, shy deflection trigger, Telegram visibility, is_top_spender NameError,
+       name handling (no username calling), 5-min manual pause, automatic fact extraction.
 """
 
 from flask import Flask, request
@@ -715,7 +716,10 @@ def is_shy_request(text):
     return any(t in text.lower() for t in triggers)
 
 
-def build_system_prompt(fan_name, fan_facts_list, recent_messages, school_ctx, avail_ctx, mood_ctx, life_ctx, time_ctx, fan_msg_time_str=None, day_already_asked=False, summary=""):
+def build_system_prompt(fan_name, real_name, fan_facts_list, recent_messages, school_ctx, avail_ctx, mood_ctx, life_ctx, time_ctx, fan_msg_time_str=None, day_already_asked=False, summary=""):
+    # Use real name if known, otherwise do NOT use the display name in the prompt
+    display_name = real_name if real_name else "a fan"
+    
     prompt = JAZMIN_PERSONALITY + "\n\n"
     prompt += f"KÖSZÖNÉSI SZABÁLY:\n{get_greeting_instruction(recent_messages, fan_msg_time_str)}\n\n"
     
@@ -745,14 +749,16 @@ def build_system_prompt(fan_name, fan_facts_list, recent_messages, school_ctx, a
     if recent_messages:
         prompt += "UTOLSÓ ÜZENETEK (max 6, CSAK kontextus):\n"
         for msg in recent_messages[-6:]:
-            sender = "Jázmin" if msg.get('is_me') else fan_name
+            sender = "Jázmin" if msg.get('is_me') else display_name
             prompt += f"{sender}: {msg.get('text', '')}\n"
         prompt += "\n"
     
-    prompt += f"A fan neve: {fan_name}\n"
+    prompt += f"A fan neve: {display_name}\n"
+    if not real_name:
+        prompt += "NEM TUDOD A FAN VALÓDI NEVÉT — NE szólítsd meg névvel! Használj 'te'-t vagy szólítsd meg név nélkül. SOHA NE használd a Fanvue usernévet!\n"
     if day_already_asked:
         prompt += "MA MÁR MEGKÉRDEZTED: 'milyen volt a napod?' — NE KÉRDDE ÚJRA!\n"
-    prompt += "FONTOS:\n- CSAK az utolsó üzenetekre válaszolj EGYETLEN üzenetben!\n- 1-2 mondat, laza.\n- Emlékezz a memóriára!\n- Terápiás, figyelmes, de nem segédai."
+    prompt += "FONTOS:\n- CSAK az utolsó üzenetekre válaszolj EGYETLEN üzenetben!\n- 1-2 mondat, laza.\n- Emlékezz a memóriára! HA tudod a nevét, használd. HA nem, NE használd a usernévet!\n- Terápiás, figyelmes, de nem segédai.\n- NE ISMÉTELD a kérdéseket! HA már megkérdezted valamit → SOHA újra!"
     return prompt
 
 
@@ -799,6 +805,97 @@ def save_fan_fact(chat_id, fact_type, fact_value):
 def get_fan_facts(chat_id):
     return db_query("SELECT fact_type, fact_value, discovered_at FROM fan_facts WHERE chat_id=? ORDER BY discovered_at DESC",
                     (chat_id,))
+
+
+def get_real_name(chat_id, fallback_name):
+    """Return the fan's real name from facts if known, else empty string (never use display name in replies)."""
+    facts = db_query("SELECT fact_value FROM fan_facts WHERE chat_id=? AND fact_type='name' ORDER BY discovered_at DESC LIMIT 1", (chat_id,), fetch_one=True)
+    if facts and facts.get('fact_value'):
+        return facts['fact_value'].strip()
+    return ""
+
+
+def extract_facts_from_message(chat_id, text):
+    """Lightweight fact extraction from fan messages."""
+    if not text:
+        return
+    t = text.lower().strip()
+    import re
+
+    # Name patterns
+    name_patterns = [
+        r'\b[a-záéíóöőúüű]+ vagyok\b',
+        r'\bhívj[a-záéíóöőúüű\s]*\b([A-ZÁÉÍÓÖŐÚÜŰ][a-záéíóöőúüű]+)\b',
+        r'\bnevem\b\s+([a-záéíóöőúüű]+)',
+        r'\ba nevem\b\s+([a-záéíóöőúüű]+)',
+    ]
+    for pat in name_patterns:
+        m = re.search(pat, t, re.IGNORECASE)
+        if m:
+            # Try to extract the actual name from context
+            words = t.split()
+            for i, w in enumerate(words):
+                if w in ['vagyok', 'hívnak', 'nevem'] and i > 0:
+                    candidate = words[i-1].capitalize()
+                    if len(candidate) > 2 and candidate.lower() not in ['én', 'az', 'egy']:
+                        save_fan_fact(chat_id, 'name', candidate)
+                        break
+
+    # Job patterns
+    job_indicators = ['dolgozom', 'munkám', 'foglalkozásom', 'szakmám', 'munkahelyem', 'ként dolgozom', 'ként vagyok']
+    for ind in job_indicators:
+        if ind in t:
+            # Extract surrounding words
+            words = t.split()
+            for i, w in enumerate(words):
+                if ind in w and i > 0:
+                    job_phrase = ' '.join(words[max(0,i-2):i+3])
+                    save_fan_fact(chat_id, 'job', job_phrase[:60])
+                    break
+            break
+
+    # Location patterns
+    loc_indicators = ['lakom', 'élek', 'város', 'ország']
+    if any(l in t for l in loc_indicators):
+        words = t.split()
+        for i, w in enumerate(words):
+            if w in loc_indicators and i > 0:
+                loc = ' '.join(words[max(0,i-1):i+2])
+                save_fan_fact(chat_id, 'location', loc[:50])
+                break
+
+    # Relationship patterns
+    rel_words = ['barátnőm', 'barátom', 'feleségem', 'férjem', 'szeretőm', 'exem', 'elváltam', 'svingli', 'svingli vagyok', 'egyedül vagyok']
+    for rw in rel_words:
+        if rw in t:
+            save_fan_fact(chat_id, 'relationship', rw)
+            break
+
+    # Hobby / likes
+    hobby_indicators = ['szeretek', 'hobbim', 'imádok', 'kedvenc', 'rajongok']
+    for hi in hobby_indicators:
+        if hi in t:
+            words = t.split()
+            for i, w in enumerate(words):
+                if w == hi and i+1 < len(words):
+                    hobby = ' '.join(words[i:i+4])
+                    save_fan_fact(chat_id, 'hobby', hobby[:60])
+                    break
+            break
+
+    # Stress / trauma (for empathy context)
+    trauma_indicators = ['meghalt', 'elhunyt', 'beteg', 'kórház', 'szakítottam', 'kidobtak', 'munkanélküli', 'nincs pénzem', 'depressziós', 'szorongok']
+    for ti in trauma_indicators:
+        if ti in t:
+            save_fan_fact(chat_id, 'stress', f"Mentioned: {ti}")
+            break
+
+    # Family / kids
+    family_indicators = ['gyerekem', 'fiam', 'lányom', 'testvérem', 'szüleim', 'apám', 'anyám']
+    for fi in family_indicators:
+        if fi in t:
+            save_fan_fact(chat_id, 'family', fi)
+            break
 
 
 def track_question(chat_id, question):
@@ -915,8 +1012,8 @@ def was_manual_reply_recent(chat_id, messages, minutes=15):
                 pass
         now = datetime.now(timezone.utc)
         if (now - msg_dt).total_seconds() < minutes * 60:
-            pause_until = (now + timedelta(minutes=15)).isoformat()
-            db_query("UPDATE fan_profiles SET manual_pause_until=?, wait_for_fan_reply=1, is_paused=1 WHERE chat_id=?",
+            pause_until = (now + timedelta(minutes=minutes)).isoformat()
+            db_query("UPDATE fan_profiles SET manual_pause_until=?, wait_for_fan_reply=1 WHERE chat_id=?",
                      (pause_until, chat_id))
             return True
     return False
@@ -976,7 +1073,7 @@ def process_new_messages():
             is_top_spender = user.get('isTopSpender', False)
             profile = get_or_create_fan_profile(chat_id, fan_name, handle, is_top_spender)
 
-            # Save ALL messages
+            # Save ALL messages + extract facts from fan messages
             for msg in messages:
                 msg_id = msg.get('uuid')
                 sender_uuid = msg.get('sender', {}).get('uuid')
@@ -985,6 +1082,9 @@ def process_new_messages():
                 if msg_id:
                     db_query('INSERT OR IGNORE INTO messages (msg_id, chat_id, fan_name, sender_uuid, text, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
                              (msg_id, chat_id, fan_name, sender_uuid, text_all, msg_time_all))
+                # Extract facts from fan messages
+                if sender_uuid != MY_UUID and text_all:
+                    extract_facts_from_message(chat_id, text_all)
 
             # === SILENT MODE ===
             paused = is_paused(chat_id)
@@ -1077,7 +1177,7 @@ def send_due_batches():
                 continue
 
             messages = get_messages(chat_id)
-            if was_manual_reply_recent(chat_id, messages, minutes=15):
+            if was_manual_reply_recent(chat_id, messages, minutes=5):
                 db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (batch_id,))
                 send_telegram(f"🛑 Batch cancelled for <b>{fan_name}</b> — manual reply detected")
                 continue
@@ -1112,7 +1212,8 @@ def send_due_batches():
                     fan_msg_time_str = m.get('createdAt') or m.get('sentAt') or ''
                     break
 
-            system_prompt = build_system_prompt(fan_name, fan_facts_list, recent_for_prompt,
+            real_name = get_real_name(chat_id, fan_name)
+            system_prompt = build_system_prompt(fan_name, real_name, fan_facts_list, recent_for_prompt,
                                                 school_ctx, avail_ctx, mood_ctx, life_ctx, time_ctx,
                                                 fan_msg_time_str, day_already_asked, summary)
 
