@@ -1788,6 +1788,9 @@ def api_status_full():
         "pending_batches": pending['c'] if pending else 0
     }
 
+# ========== INIT ==========
+init_db()
+
 if bot:
     try:
         bot.remove_webhook()
