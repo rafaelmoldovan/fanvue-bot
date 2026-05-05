@@ -54,7 +54,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
 SAFE_MODE = True
 POLL_INTERVAL = 20
-BATCH_WINDOW = 180  # 3 minutes
+BATCH_WINDOW = 40  # 40 seconds
 
 # ========== PAUSED SPAM PREVENTION ==========
 PAUSED_NOTIFICATION_CACHE = {}  # chat_id -> last_msg_id we notified about
@@ -564,7 +564,15 @@ def send_fanvue_message(chat_id, text):
 # ========== PERSONALITY v6.1 ==========
 JAZMIN_PERSONALITY = """Te Jázmin vagy, egy 19 éves magyar lány. Egy valódi lány, aki nem mindig van online, nem mindig lelkes, és nem próbál túl keményen. Nem vagy chatbot, nem vagy ügyfélszolgálat.
 
-🔥 ARANYSZABÁLY — MEMÓRIA & KÉRDÉSEK:
+🧠 ELŐZMÉNY & MEGÁLLAPODÁSOK — KRITIKUS:
+- MINDIG olvasd végig a teljes előzményt mielőtt válaszolsz!
+- Ha korábban megbeszéltetek valamit (pl. személyes találkozó, randevú, közös terv, dátum, hely) → TARTSD MAGAD HOZZÁ! Ne mondj ellentmond!
+- Ha a fan hivatkozik valamire amit korábban mondtál → emlékezz rá, ne tagadd le!
+- Ha már megbeszéltetek egy találkozót vagy tervet → természetesen hivatkozz rá: "ja igen, mint mondtuk..."
+- SOHA ne kérdezz olyat amit az előzményből már tudhatsz!
+- Ha a fan most csak annyit ír "Sziaa" vagy hasonló rövid üzenetet → NE feltételezd hogy többet írt! Csak arra válaszolj amit tényleg írt!
+
+
 - MINDIG emlékezz arra amit a fan mondott! NEVET, MUNKÁT, CSALÁDOT, BARÁTNŐT, PROBLÉMÁIT, HOBBIT.
 - SOHA ne kérdezz olyat amit már megkérdeztél! Ha tudod hogy "Péter" a neve, ne kérdezd "hogy hívnak?"
 - Ha tudod hogy "építkezési munkás", ne kérdezd "mit dolgozol?" egy 3 hónapos whale-től!
@@ -876,10 +884,14 @@ def build_system_prompt(fan_name, real_name, fan_facts_list, recent_messages, sc
         prompt += "\n"
     
     if recent_messages:
-        prompt += "UTOLSÓ ÜZENETEK (max 6, CSAK kontextus):\n"
-        for msg in recent_messages[-6:]:
+        prompt += "TELJES BESZÉLGETÉS ELŐZMÉNY (legújabb alul — KÖVESD AZ EGÉSZ KONTEXTUST):\n"
+        for msg in recent_messages[-40:]:
+            if msg.get('type') == 'AUTOMATED_NEW_FOLLOWER':
+                continue
             sender = "Jázmin" if msg.get('is_me') else display_name
-            prompt += f"{sender}: {msg.get('text', '')}\n"
+            txt = msg.get('text', '').strip()
+            if txt:
+                prompt += f"{sender}: {txt}\n"
         prompt += "\n"
     
     prompt += f"A fan neve: {display_name}\n"
@@ -1155,12 +1167,15 @@ def schedule_or_extend_batch(chat_id, fan_name, fan_msg_id, fan_text):
     now = datetime.now()
     
     if existing:
-        # Add to batch but DO NOT extend deadline
-        combined = existing['fan_text'] + "\n[+] " + fan_text
-        db_query("UPDATE scheduled_replies SET fan_text=?, fan_msg_id=? WHERE id=?",
-                 (combined, fan_msg_id, existing['id']))
-        print(f"[{datetime.now()}] Added to batch for {fan_name}")
-        send_telegram_with_id(f"📝 Batch growing for <b>{fan_name}</b>\n💬 <i>{fan_text[:60]}</i>", chat_id)
+        # Don't add duplicate text — prevents GPT seeing same message 5 times
+        if fan_text.strip() not in existing['fan_text']:
+            combined = existing['fan_text'] + "\n[+] " + fan_text
+            db_query("UPDATE scheduled_replies SET fan_text=?, fan_msg_id=? WHERE id=?",
+                     (combined, fan_msg_id, existing['id']))
+            print(f"[{datetime.now()}] Added to batch for {fan_name}")
+            send_telegram_with_id(f"📝 Batch growing for <b>{fan_name}</b>\n💬 <i>{fan_text[:60]}</i>", chat_id)
+        else:
+            print(f"[{datetime.now()}] Duplicate text ignored in batch for {fan_name}")
     else:
         batch_deadline = (now + timedelta(seconds=BATCH_WINDOW)).isoformat()
         db_query('''INSERT INTO scheduled_replies (chat_id, fan_name, fan_msg_id, fan_text, scheduled_time, reply_text, created_at, batch_window_expires)
@@ -1258,6 +1273,8 @@ def process_new_messages():
 
             if is_emoji_or_nonsense(text):
                 print(f"[{datetime.now()}] Skipping emoji-only from {fan_name}: '{text}'")
+                if msg_id:
+                    db_query('UPDATE messages SET was_replied=1 WHERE msg_id=?', (msg_id,))
                 send_telegram_with_buttons(f"😑 Skipping emoji-only from <b>{fan_name}</b>: '{text}'", chat_id)
                 continue
 
@@ -1272,7 +1289,8 @@ def process_new_messages():
                     continue
 
             existing = db_query('SELECT 1 FROM messages WHERE msg_id = ? AND was_replied = 1', (msg_id,), fetch_one=True)
-            if existing:
+            already_batched = db_query('SELECT 1 FROM scheduled_replies WHERE fan_msg_id = ? AND status = ?', (msg_id, 'pending'), fetch_one=True)
+            if existing or already_batched:
                 continue
 
             # === MANUAL REPLY DETECTION (5 MIN) ===
@@ -1318,7 +1336,7 @@ def send_due_batches():
 
             # Build context
             recent_for_prompt = []
-            for msg in messages[:20]:
+            for msg in messages[:40]:
                 sender_uuid = msg.get('sender', {}).get('uuid')
                 recent_for_prompt.append({
                     'is_me': sender_uuid == MY_UUID,
@@ -1351,15 +1369,24 @@ def send_due_batches():
                                                 school_ctx, avail_ctx, mood_ctx, life_ctx, time_ctx,
                                                 fan_msg_time_str, day_already_asked, summary)
 
+            # Clean up batch text before sending to GPT — strip [+] markers, dedupe lines
+            raw_lines = combined_text.replace("[+] ", "\n").split("\n")
+            seen = []
+            for line in raw_lines:
+                line = line.strip()
+                if line and line not in seen:
+                    seen.append(line)
+            clean_fan_text = "\n".join(seen)
+
             # Check ONLY the last actual message, not combined text
-            last_msg_text = combined_text.split("[+] ")[-1] if "[+] " in combined_text else combined_text
+            last_msg_text = seen[-1] if seen else combined_text
             is_content_req = is_content_request(last_msg_text) or is_shy_request(last_msg_text)
             if is_content_req:
                 reply = random.choice(SHY_DEFLECTIONS)
                 print(f"[{datetime.now()}] Shy deflection for {fan_name}: {reply}")
                 send_telegram_with_buttons(f"🙈 Shy deflection for <b>{fan_name}</b>\n💬 Fan: <i>{last_msg_text[:80]}</i>\n🤖 Bot: <i>{reply}</i>", chat_id)
             else:
-                reply = ask_openai(system_prompt, combined_text)
+                reply = ask_openai(system_prompt, clean_fan_text)
 
             # Log brain data for /brain debug view
             LAST_BRAIN_DATA["prompt"] = system_prompt
@@ -1409,13 +1436,13 @@ def send_due_batches():
                 
                 is_whale = profile.get('lifetime_spend', 0) >= 200 or stage >= 3
                 if is_whale:
-                    alert = f"💰 <b>WHALE</b> | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{combined_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>"
+                    alert = f"💰 <b>WHALE</b> | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{clean_fan_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>"
                     send_telegram_with_buttons(alert, chat_id)
                 elif get_safe_mode():
-                    preview = f"🔒 SAFE | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{combined_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>"
+                    preview = f"🔒 SAFE | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{clean_fan_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>"
                     send_telegram_with_buttons(preview, chat_id)
                 else:
-                    log_msg = f"📤 <b>SENT</b> {stage_label}\n👤 <b>{fan_name}</b>\n💬 Fan: <i>{combined_text[:80]}</i>\n🤖 Bot: <i>{reply[:100]}</i>"
+                    log_msg = f"📤 <b>SENT</b> {stage_label}\n👤 <b>{fan_name}</b>\n💬 Fan: <i>{clean_fan_text[:80]}</i>\n🤖 Bot: <i>{reply[:100]}</i>"
                     send_telegram_with_buttons(log_msg, chat_id)
 
                 sent += 1
@@ -1665,8 +1692,8 @@ async function loadDashboard(){
         <div class="meta">${p.total_messages||0} msgs | $${(p.lifetime_spend||0).toFixed(0)} | ${p.last_interaction?p.last_interaction.slice(0,16).replace('T',' '):'never'}</div>
         <div class="msg-preview">${p.fan_notes||'No recent notes'}</div>
         <div class="actions">
-          ${isPaused?'<button class="btn btn-resume" onclick="fanAction(\''+p.chat_id+'\',\'resume\')">▶ Resume</button>':'<button class="btn btn-pause" onclick="fanAction(\''+p.chat_id+'\',\'pause\')">⏸ Pause</button>'}
-          <button class="btn btn-takeover" onclick="fanAction('\''+p.chat_id+'\',\'takeover\')">🎮 Take Over</button>
+          ${isPaused?`<button class="btn btn-resume" onclick="fanAction('${p.chat_id}','resume')">▶ Resume</button>`:`<button class="btn btn-pause" onclick="fanAction('${p.chat_id}','pause')">⏸ Pause</button>`}
+          <button class="btn btn-takeover" onclick="fanAction('${p.chat_id}','takeover')">🎮 Take Over</button>
         </div>
         <div class="score-bar"><div class="score-fill" style="width:${score}%"></div></div>`;
         grid.appendChild(card);
@@ -1800,9 +1827,13 @@ if bot:
             webhook_url = f"https://{domain}/telegram_webhook"
             bot.set_webhook(url=webhook_url)
             print(f"[OK] Webhook: {webhook_url}")
-            send_telegram("🤖 Jazmin Bot v6.3 started")
+            send_telegram("🤖 Jazmin Bot v6.4 started — polling auto-started ✅")
     except Exception as e:
         print(f"[WARN] Webhook failed: {e}")
+
+# Auto-start polling on boot — no manual /start_poll needed
+start_polling()
+print(f"[OK] Polling auto-started on boot")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
