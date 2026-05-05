@@ -6,7 +6,7 @@ Fixed: batch deadline freeze, shy deflection trigger, Telegram visibility, is_to
        inline Telegram buttons (pause/resume/notes/asked).
 """
 
-from flask import Flask, request
+from flask import Flask, request, render_template_string
 import requests
 import os
 import json
@@ -55,6 +55,15 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 SAFE_MODE = True
 POLL_INTERVAL = 20
 BATCH_WINDOW = 180  # 3 minutes
+
+# ========== PAUSED SPAM PREVENTION ==========
+PAUSED_NOTIFICATION_CACHE = {}  # chat_id -> last_msg_id we notified about
+
+# ========== BRAIN VIEW PASSWORD ==========
+BRAIN_PASSWORD = os.environ.get('BRAIN_PASSWORD', 'jazmin123')
+
+# Global in-memory store for last brain debug data
+LAST_BRAIN_DATA = {"prompt":"","facts":[],"suppressed":[],"trace":[]}
 
 # ========== TELEGRAM BOT ==========
 bot = None
@@ -346,6 +355,24 @@ def init_db():
         answered INTEGER DEFAULT 0, asked_at TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS conversation_summaries (
         chat_id TEXT PRIMARY KEY, summary_text TEXT, updated_at TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS fan_moods (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, mood_score INTEGER,
+        detected_mood TEXT, timestamp TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS content_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, fan_name TEXT,
+        request_text TEXT, requested_at TEXT, fulfilled INTEGER DEFAULT 0, fulfilled_at TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS inside_jokes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, joke_text TEXT,
+        created_at TEXT, last_used TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS fan_scores (
+        chat_id TEXT PRIMARY KEY, score INTEGER DEFAULT 0, last_updated TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS api_costs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, call_time TEXT, tokens_prompt INTEGER,
+        tokens_completion INTEGER, cost_usd REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS daily_context (
+        date TEXT PRIMARY KEY, context_text TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS last_topics (
+        chat_id TEXT PRIMARY KEY, topic TEXT, timestamp TEXT)''')
     conn.commit()
     conn.close()
 
@@ -1200,10 +1227,15 @@ def process_new_messages():
                     update_fan_notes(chat_id, note)
                     send_telegram_with_buttons(f"✍️ Manual reply by you to <b>{fan_name}</b>\n💬 <i>{manual_texts[0]}</i>", chat_id)
                 fan_msgs_silent = [m for m in messages if m.get('sender', {}).get('uuid') != MY_UUID]
-                if fan_msgs_silent and fan_msgs_silent[0].get('text'):
-                    last_fan_text = fan_msgs_silent[0].get('text', '')[:80]
-                    update_fan_notes(chat_id, f"Fan (paused): {last_fan_text}")
-                    send_telegram_with_buttons(f"👁️ <b>{fan_name}</b> sent while paused: <i>{last_fan_text}</i>", chat_id)
+                if fan_msgs_silent:
+                    latest_msg = fan_msgs_silent[0]
+                    latest_msg_id = latest_msg.get('uuid')
+                    latest_text = latest_msg.get('text', '')[:80]
+                    # Only notify once per new message while paused
+                    if latest_msg_id and PAUSED_NOTIFICATION_CACHE.get(chat_id) != latest_msg_id:
+                        PAUSED_NOTIFICATION_CACHE[chat_id] = latest_msg_id
+                        update_fan_notes(chat_id, f"Fan (paused): {latest_text}")
+                        send_telegram_with_buttons(f"👁️ <b>{fan_name}</b> sent while paused: <i>{latest_text}</i>", chat_id)
                 continue
 
             # === CHECK MANUAL PAUSE ===
@@ -1321,12 +1353,26 @@ def send_due_batches():
 
             # Check ONLY the last actual message, not combined text
             last_msg_text = combined_text.split("[+] ")[-1] if "[+] " in combined_text else combined_text
-            if is_content_request(last_msg_text) or is_shy_request(last_msg_text):
+            is_content_req = is_content_request(last_msg_text) or is_shy_request(last_msg_text)
+            if is_content_req:
                 reply = random.choice(SHY_DEFLECTIONS)
                 print(f"[{datetime.now()}] Shy deflection for {fan_name}: {reply}")
                 send_telegram_with_buttons(f"🙈 Shy deflection for <b>{fan_name}</b>\n💬 Fan: <i>{last_msg_text[:80]}</i>\n🤖 Bot: <i>{reply}</i>", chat_id)
             else:
                 reply = ask_openai(system_prompt, combined_text)
+
+            # Log brain data for /brain debug view
+            LAST_BRAIN_DATA["prompt"] = system_prompt
+            LAST_BRAIN_DATA["facts"] = [{"type": f["fact_type"], "value": f["fact_value"]} for f in fan_facts_list[:12]]
+            LAST_BRAIN_DATA["suppressed"] = []
+            if day_already_asked:
+                LAST_BRAIN_DATA["suppressed"].append("milyen volt a napod (already asked today)")
+            trace = []
+            trace.append(f"1. Fan: {fan_name}, day_asked: {day_already_asked}, content_req: {is_content_req}")
+            trace.append(f"2. Prompt tokens est: ~{len(system_prompt)//4}")
+            trace.append(f"3. Safe mode: {get_safe_mode()}")
+            trace.append(f"4. Reply length: {len(reply.split())} words")
+            LAST_BRAIN_DATA["trace"] = trace
 
             # Dynamic send delay
             words = len(reply.split())
@@ -1456,7 +1502,9 @@ def trigger():
 
 @app.route('/status')
 def status():
-    return {"safe_mode": get_safe_mode(), "token_valid": get_fanvue_token() is not None, "polling_active": polling_active}, 200
+    paused = db_query("SELECT COUNT(*) as c FROM fan_profiles WHERE is_paused=1 OR paused_until IS NOT NULL OR manual_pause_until IS NOT NULL", fetch_one=True)
+    pending = db_query("SELECT COUNT(*) as c FROM scheduled_replies WHERE status='pending'", fetch_one=True)
+    return {"safe_mode": get_safe_mode(), "token_valid": get_fanvue_token() is not None, "polling_active": polling_active, "paused_count": paused['c'] if paused else 0, "pending_batches": pending['c'] if pending else 0}, 200
 
 
 @app.route('/start_poll')
@@ -1505,9 +1553,9 @@ def console():
         "safe_mode": get_safe_mode(),
         "blocked_count": len(db_query("SELECT * FROM blocked_fans") or []),
         "paused_count": len(db_query("SELECT * FROM fan_profiles WHERE is_paused = 1 OR paused_until IS NOT NULL OR manual_pause_until IS NOT NULL") or []),
-        "routes": ["/", "/set_token", "/trigger", "/status", "/start_poll", "/stop_poll", "/toggle_safe_mode",
+        "routes": ["/", "/dashboard", "/brain", "/set_token", "/trigger", "/status", "/start_poll", "/stop_poll", "/toggle_safe_mode",
                    "/fan_profiles", "/scheduled", "/blocked", "/paused", "/console",
-                   "/telegram_webhook", "/callback"]
+                   "/telegram_webhook", "/callback", "/api/brain", "/api/costs", "/api/pause/<id>", "/api/resume/<id>", "/api/takeover/<id>"]
     }
 
 
@@ -1526,8 +1574,219 @@ def telegram_webhook_test():
     return '✅ Telegram webhook active. POST only.', 200
 
 
-# ========== INIT ==========
-init_db()
+# ========== DASHBOARD & BRAIN HTML TEMPLATES ==========
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jázmin Bot — Live Dashboard</title>
+<style>
+:root{--bg:#0b0b14;--card:rgba(255,255,255,0.06);--accent1:#ff4ecd;--accent2:#8b5cf6;--text:#e8e8f0;--muted:#8888a0;--success:#22c55e;--warn:#f59e0b;--danger:#ef4444}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
+.header{background:linear-gradient(135deg,var(--accent1),var(--accent2));padding:24px 32px;display:flex;justify-content:space-between;align-items:center}
+.header h1{font-size:28px;font-weight:700;letter-spacing:-0.5px}
+.header .badge{background:rgba(0,0,0,0.25);padding:6px 14px;border-radius:20px;font-size:12px;font-weight:600;text-transform:uppercase}
+.container{padding:24px 32px;display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:20px}
+.card{background:var(--card);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:20px;transition:transform .15s}
+.card:hover{transform:translateY(-2px);border-color:rgba(255,255,255,0.15)}
+.card h3{font-size:14px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:14px}
+.stat-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)}
+.stat-row:last-child{border-bottom:none}
+.stat-label{font-size:13px;color:var(--muted)}
+.stat-value{font-size:15px;font-weight:600}
+.status-dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px}
+.online{background:var(--success)}.offline{background:var(--danger)}.warn{background:var(--warn)}
+.fan-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;grid-column:1/-1}
+.fan-card{background:linear-gradient(145deg,rgba(255,255,255,0.07),rgba(255,255,255,0.03));border-radius:16px;padding:18px;border:1px solid rgba(255,255,255,0.06);position:relative}
+.fan-card .top{display:flex;justify-content:space-between;align-items:start;margin-bottom:12px}
+.fan-card .name{font-size:16px;font-weight:700}
+.fan-card .type{font-size:11px;padding:4px 10px;border-radius:12px;background:rgba(139,92,246,0.2);color:#c4b5fd;text-transform:uppercase}
+.fan-card .type.whale{background:rgba(255,78,205,0.2);color:#fda4e4}
+.fan-card .meta{font-size:12px;color:var(--muted);margin-bottom:10px}
+.fan-card .msg-preview{font-size:13px;color:var(--text);line-height:1.5;background:rgba(0,0,0,0.15);padding:10px;border-radius:10px;margin-bottom:12px;max-height:80px;overflow:hidden}
+.actions{display:flex;gap:8px}
+.btn{flex:1;padding:8px 0;border:none;border-radius:10px;font-size:12px;font-weight:600;cursor:pointer;transition:opacity .15s}
+.btn:hover{opacity:.85}
+.btn-pause{background:var(--danger);color:#fff}
+.btn-resume{background:var(--success);color:#fff}
+.btn-takeover{background:var(--accent1);color:#fff}
+.score-bar{height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:8px;overflow:hidden}
+.score-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--accent1),var(--accent2));transition:width .5s}
+.refresh{position:fixed;bottom:24px;right:24px;background:linear-gradient(135deg,var(--accent1),var(--accent2));color:#fff;border:none;width:56px;height:56px;border-radius:50%;font-size:22px;cursor:pointer;box-shadow:0 8px 24px rgba(139,92,246,0.35);display:flex;align-items:center;justify-content:center}
+@media(max-width:768px){.container{padding:16px}.header{flex-direction:column;gap:12px;text-align:center}}
+</style>
+</head>
+<body>
+<div class="header">
+  <div><h1>💜 Jázmin Bot Dashboard</h1><div style="font-size:13px;opacity:.7;margin-top:4px">Live fan activity & bot control</div></div>
+  <div class="badge" id="connBadge">Loading...</div>
+</div>
+<div class="container" id="mainContainer">
+  <div class="card" style="grid-column:1/-1">
+    <h3>🤖 Bot Status</h3>
+    <div class="stat-row"><span class="stat-label">Safe Mode</span><span class="stat-value" id="safeMode">—</span></div>
+    <div class="stat-row"><span class="stat-label">Token Health</span><span class="stat-value" id="tokenHealth">—</span></div>
+    <div class="stat-row"><span class="stat-label">Polling</span><span class="stat-value" id="polling">—</span></div>
+    <div class="stat-row"><span class="stat-label">API Cost Today</span><span class="stat-value" id="apiCost">—</span></div>
+    <div class="stat-row"><span class="stat-label">Paused Fans</span><span class="stat-value" id="pausedCount">—</span></div>
+    <div class="stat-row"><span class="stat-label">Pending Batches</span><span class="stat-value" id="pendingBatches">—</span></div>
+  </div>
+  <div class="fan-grid" id="fanGrid"></div>
+</div>
+<button class="refresh" onclick="loadDashboard()" title="Refresh">↻</button>
+<script>
+async function loadDashboard(){
+  document.getElementById('connBadge').textContent='Syncing...';
+  try{
+    const [status,fans,scheduled,costs]=await Promise.all([
+      fetch('/status').then(r=>r.json()),
+      fetch('/fan_profiles').then(r=>r.json()),
+      fetch('/scheduled').then(r=>r.json()),
+      fetch('/api/costs').then(r=>r.json())
+    ]);
+    document.getElementById('safeMode').innerHTML=status.safe_mode?'<span class="status-dot offline"></span>ON':'<span class="status-dot online"></span>OFF';
+    document.getElementById('tokenHealth').innerHTML=status.token_valid?'<span class="status-dot online"></span>Healthy':'<span class="status-dot offline"></span>Expired';
+    document.getElementById('polling').innerHTML=status.polling_active?'<span class="status-dot online"></span>Running':'<span class="status-dot warn"></span>Stopped';
+    document.getElementById('apiCost').textContent=(costs.today||'$0.00');
+    document.getElementById('pausedCount').textContent=(status.paused_count||0);
+    document.getElementById('pendingBatches').textContent=(scheduled.count||0);
+    const grid=document.getElementById('fanGrid');
+    grid.innerHTML='';
+    if(fans.profiles){
+      fans.profiles.forEach(p=>{
+        const isPaused=p.is_paused||p.paused_until||p.manual_pause_until;
+        const stage=p.lifetime_spend>=200?'whale':p.lifetime_spend>=100?'hot':p.total_messages>10?'warm':'new';
+        const score=Math.min(100,Math.floor((p.total_messages||0)*3+(p.lifetime_spend||0)/2));
+        const card=document.createElement('div');
+        card.className='fan-card';
+        card.innerHTML=`<div class="top"><div class="name">${p.fan_name||'?'}</div><div class="type ${stage}">${stage}</div></div>
+        <div class="meta">${p.total_messages||0} msgs | $${(p.lifetime_spend||0).toFixed(0)} | ${p.last_interaction?p.last_interaction.slice(0,16).replace('T',' '):'never'}</div>
+        <div class="msg-preview">${p.fan_notes||'No recent notes'}</div>
+        <div class="actions">
+          ${isPaused?'<button class="btn btn-resume" onclick="fanAction(\''+p.chat_id+'\',\'resume\')">▶ Resume</button>':'<button class="btn btn-pause" onclick="fanAction(\''+p.chat_id+'\',\'pause\')">⏸ Pause</button>'}
+          <button class="btn btn-takeover" onclick="fanAction('\''+p.chat_id+'\',\'takeover\')">🎮 Take Over</button>
+        </div>
+        <div class="score-bar"><div class="score-fill" style="width:${score}%"></div></div>`;
+        grid.appendChild(card);
+      });
+    }
+    document.getElementById('connBadge').textContent='Live';
+  }catch(e){document.getElementById('connBadge').textContent='Error';console.error(e)}
+}
+async function fanAction(chatId,action){
+  let url=action==='pause'?`/api/pause/${chatId}`:action==='resume'?`/api/resume/${chatId}`:`/api/takeover/${chatId}`;
+  await fetch(url,{method:'POST'});
+  loadDashboard();
+}
+loadDashboard();
+setInterval(loadDashboard,15000);
+</script>
+</body>
+</html>"""
+
+BRAIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Jázmin Brain — Debug View</title>
+<style>
+:root{--bg:#0b0b14;--card:rgba(255,255,255,0.06);--accent:#8b5cf6;--text:#e8e8f0;--muted:#8888a0;--code:#1a1a2e}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;padding:32px}
+h1{font-size:24px;margin-bottom:24px;background:linear-gradient(90deg,#ff4ecd,#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.panel{background:var(--card);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:20px;margin-bottom:20px}
+.panel h3{font-size:13px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:14px}
+pre{background:var(--code);padding:16px;border-radius:12px;overflow-x:auto;font-size:13px;line-height:1.6;color:#c4b5fd;border:1px solid rgba(139,92,246,0.15)}
+.fact-tag{display:inline-block;background:rgba(139,92,246,0.15);color:#c4b5fd;padding:4px 12px;border-radius:20px;font-size:12px;margin:4px 4px 0 0}
+.label{font-size:12px;color:var(--muted);margin-top:12px;margin-bottom:4px}
+</style>
+</head>
+<body>
+<h1>🧠 Jázmin Brain — Last Reply Debug</h1>
+<div class="panel"><h3>System Prompt (what GPT saw)</h3><pre id="prompt">Loading...</pre></div>
+<div class="panel"><h3>Facts Loaded from Memory</h3><div id="facts">Loading...</div></div>
+<div class="panel"><h3>Suppressed Questions (already asked today)</h3><div id="suppressed">Loading...</div></div>
+<div class="panel"><h3>Decision Trace</h3><pre id="trace">Loading...</pre></div>
+<script>
+async function loadBrain(){
+  try{
+    const data=await fetch('/api/brain').then(r=>r.json());
+    document.getElementById('prompt').textContent=data.prompt||'No recent prompt logged.';
+    const factsEl=document.getElementById('facts');
+    factsEl.innerHTML=(data.facts||[]).map(f=>`<span class="fact-tag">${f.type}: ${f.value}</span>`).join('')||'None';
+    const supEl=document.getElementById('suppressed');
+    supEl.innerHTML=(data.suppressed||[]).map(q=>`<span class="fact-tag" style="background:rgba(239,68,68,0.15);color:#fda4af">${q}</span>`).join('')||'None';
+    document.getElementById('trace').textContent=(data.trace||[]).join('\n')||'No trace available.';
+  }catch(e){console.error(e)}
+}
+loadBrain();
+setInterval(loadBrain,10000);
+</script>
+</body>
+</html>"""
+
+# ========== DASHBOARD & BRAIN ROUTES ==========
+
+@app.route('/dashboard')
+def dashboard():
+    return render_template_string(DASHBOARD_HTML)
+
+
+@app.route('/brain')
+def brain_view():
+    pwd = request.args.get('pw','')
+    if pwd != BRAIN_PASSWORD:
+        return '<!DOCTYPE html><html><body style="background:#0b0b14;color:#e8e8f0;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><form method="get" style="text-align:center"><h2>🔒 Brain Access</h2><input type="password" name="pw" placeholder="password" style="padding:12px 16px;border-radius:10px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.06);color:#fff;margin-top:12px;width:220px"><br><button type="submit" style="margin-top:12px;padding:10px 24px;border-radius:10px;border:none;background:linear-gradient(135deg,#ff4ecd,#8b5cf6);color:#fff;font-weight:600;cursor:pointer">Unlock</button></form></body></html>', 401
+    return render_template_string(BRAIN_HTML)
+
+
+# Global in-memory store for last brain debug data
+
+@app.route('/api/brain')
+def api_brain():
+    return LAST_BRAIN_DATA
+
+
+@app.route('/api/costs')
+def api_costs():
+    today = datetime.now().strftime('%Y-%m-%d')
+    rows = db_query("SELECT SUM(cost_usd) as total FROM api_costs WHERE call_time LIKE ?", (f"{today}%",), fetch_one=True)
+    total = rows['total'] if rows and rows.get('total') else 0.0
+    return {"today": f"${total:.2f}"}
+
+
+@app.route('/api/pause/<chat_id>', methods=['POST'])
+def api_pause(chat_id):
+    db_query("UPDATE fan_profiles SET is_paused=1, paused_until=NULL, manual_pause_until=NULL WHERE chat_id=?", (chat_id,))
+    return {"paused": True}
+
+
+@app.route('/api/resume/<chat_id>', methods=['POST'])
+def api_resume(chat_id):
+    db_query("UPDATE fan_profiles SET is_paused=0, paused_until=NULL, manual_pause_until=NULL, wait_for_fan_reply=0 WHERE chat_id=?", (chat_id,))
+    return {"resumed": True}
+
+
+@app.route('/api/takeover/<chat_id>', methods=['POST'])
+def api_takeover(chat_id):
+    db_query("UPDATE fan_profiles SET is_paused=1, paused_until=NULL, manual_pause_until=NULL WHERE chat_id=?", (chat_id,))
+    send_telegram(f"🎮 MANUAL TAKEOVER triggered for {chat_id}. Bot paused. You have the wheel.")
+    return {"takeover": True}
+
+
+@app.route('/api/status')
+def api_status_full():
+    paused = db_query("SELECT COUNT(*) as c FROM fan_profiles WHERE is_paused=1 OR paused_until IS NOT NULL OR manual_pause_until IS NOT NULL", fetch_one=True)
+    pending = db_query("SELECT COUNT(*) as c FROM scheduled_replies WHERE status='pending'", fetch_one=True)
+    return {
+        "safe_mode": get_safe_mode(),
+        "token_valid": get_fanvue_token() is not None,
+        "polling_active": polling_active,
+        "paused_count": paused['c'] if paused else 0,
+        "pending_batches": pending['c'] if pending else 0
+    }
 
 if bot:
     try:
