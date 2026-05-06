@@ -2020,13 +2020,11 @@ box-shadow:0 0 0 0 rgba(217,70,168,0.4);transition:box-shadow 0.3s}}
 </div>
 <div class='timer' id='timer'></div>
 
-<script>
+<script type="module">
+import {{ Conversation }} from 'https://cdn.jsdelivr.net/npm/@11labs/client@0.0.12/+esm';
+
 const PIN = '{pin}';
-const CHAT_ID = '{chat_id}';
-let ws = null;
-let audioContext = null;
-let mediaStream = null;
-let processor = null;
+let conv = null;
 let timerInterval = null;
 let seconds = 0;
 
@@ -2039,20 +2037,18 @@ function fmt(s){{
 function playRing(){{
   const ctx = new AudioContext();
   function beep(t){{
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
+    const o = ctx.createOscillator(), g = ctx.createGain();
     o.connect(g); g.connect(ctx.destination);
-    o.frequency.value = 440; o.type = 'sine';
-    g.gain.setValueAtTime(0.3, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t+0.4);
+    o.frequency.value=440; o.type='sine';
+    g.gain.setValueAtTime(0.3,t);
+    g.gain.exponentialRampToValueAtTime(0.001,t+0.4);
     o.start(t); o.stop(t+0.5);
   }}
   let t = ctx.currentTime;
   for(let i=0;i<3;i++){{ beep(t); beep(t+0.5); t+=2.5; }}
-  return ctx;
 }}
 
-async function startCall(){{
+window.startCall = async function(){{
   document.getElementById('btnAnswer').style.display='none';
   document.getElementById('status').textContent='Csörög...';
   document.getElementById('avatar').className='avatar ringing';
@@ -2062,69 +2058,36 @@ async function startCall(){{
   try{{
     const res = await fetch('/voice/signed_url?pin='+PIN);
     const data = await res.json();
-    if(!data.signed_url){{ throw new Error(data.error||'No signed URL'); }}
+    if(!data.signed_url) throw new Error(data.error||'No signed URL');
 
-    mediaStream = await navigator.mediaDevices.getUserMedia({{audio:true}});
-    audioContext = new AudioContext({{sampleRate:16000}});
-    
-    ws = new WebSocket(data.signed_url);
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = ()=>{{
-      document.getElementById('avatar').className='avatar active';
-      document.getElementById('status').textContent='Kapcsolódva';
-      document.getElementById('btnEnd').style.display='flex';
-      seconds=0;
-      timerInterval=setInterval(()=>{{seconds++;document.getElementById('timer').textContent=fmt(seconds);}},1000);
-
-      const source = audioContext.createMediaStreamSource(mediaStream);
-      processor = audioContext.createScriptProcessor(4096,1,1);
-      source.connect(processor);
-      processor.connect(audioContext.destination);
-      processor.onaudioprocess = (e)=>{{
-        if(ws.readyState!==1) return;
-        const input = e.inputBuffer.getChannelData(0);
-        const pcm = new Int16Array(input.length);
-        for(let i=0;i<input.length;i++) pcm[i]=Math.max(-32768,Math.min(32767,input[i]*32768));
-        ws.send(JSON.stringify({{user_audio_chunk:btoa(String.fromCharCode(...new Uint8Array(pcm.buffer)))}}));
-      }};
-    }};
-
-    ws.onmessage = async (e)=>{{
-      try{{
-        if(e.data instanceof ArrayBuffer){{
-          const ab = await audioContext.decodeAudioData(e.data.slice(0));
-          const src = audioContext.createBufferSource();
-          src.buffer=ab; src.connect(audioContext.destination); src.start();
-          return;
-        }}
-        const msg = JSON.parse(e.data);
-        if(msg.type==='audio' && msg.audio_event?.audio_base_64){{
-          const raw = atob(msg.audio_event.audio_base_64);
-          const buf = new Uint8Array(raw.length);
-          for(let i=0;i<raw.length;i++) buf[i]=raw.charCodeAt(i);
-          const ab = await audioContext.decodeAudioData(buf.buffer);
-          const src = audioContext.createBufferSource();
-          src.buffer=ab; src.connect(audioContext.destination); src.start();
-        }}
-      }}catch(err){{console.warn('Audio decode:',err);}}
-    }};
-
-    ws.onerror = (e)=>{{ document.getElementById('status').textContent='Kapcsolat hiba'; endCall(); }};
-    ws.onclose = ()=>endCall();
-
+    conv = await Conversation.startSession({{
+      signedUrl: data.signed_url,
+      onConnect: ()=>{{
+        document.getElementById('avatar').className='avatar active';
+        document.getElementById('status').textContent='Kapcsolódva';
+        document.getElementById('btnEnd').style.display='flex';
+        seconds=0;
+        timerInterval=setInterval(()=>{{seconds++;document.getElementById('timer').textContent=fmt(seconds);}},1000);
+      }},
+      onDisconnect: ()=>window.endCall(),
+      onError: (e)=>{{
+        console.error('Conv error:',e);
+        document.getElementById('status').textContent='Hiba: '+JSON.stringify(e);
+      }},
+      onModeChange: (m)=>{{
+        document.getElementById('status').textContent = m.mode==='speaking' ? 'Jázmin beszél...' : 'Hallgat...';
+      }}
+    }});
   }}catch(e){{
+    console.error(e);
     document.getElementById('status').textContent='Hiba: '+e.message;
     document.getElementById('btnAnswer').style.display='flex';
     document.getElementById('avatar').className='avatar';
   }}
-}}
+}};
 
-async function endCall(){{
-  if(ws) ws.close();
-  if(processor) processor.disconnect();
-  if(mediaStream) mediaStream.getTracks().forEach(t=>t.stop());
-  if(audioContext) audioContext.close();
+window.endCall = async function(){{
+  if(conv) {{ await conv.endSession(); conv=null; }}
   clearInterval(timerInterval);
   document.getElementById('avatar').className='avatar';
   document.getElementById('status').textContent='Hívás befejezve — '+fmt(seconds);
@@ -2132,7 +2095,7 @@ async function endCall(){{
   document.getElementById('timer').textContent='';
   fetch('/voice/log_call',{{method:'POST',headers:{{'Content-Type':'application/json'}},
     body:JSON.stringify({{pin:PIN,duration:seconds}})}});
-}}
+}};
 </script>
 
 
