@@ -2020,7 +2020,7 @@ box-shadow:0 0 0 0 rgba(217,70,168,0.4);transition:box-shadow 0.3s}}
 </div>
 <div class='timer' id='timer'></div>
 
-<script src='https://cdn.jsdelivr.net/npm/@11labs/client@latest/dist/index.umd.js'></script>
+<script src='https://cdn.jsdelivr.net/npm/@11labs/client@0.0.12/dist/index.umd.js'></script>
 <script>
 const PIN = '{pin}';
 const CHAT_ID = '{chat_id}';
@@ -2077,7 +2077,12 @@ async function startCall(){{
     document.getElementById('status').textContent='Kapcsolódva';
     document.getElementById('btnEnd').style.display='flex';
 
-    conv = await ElevenLabsClient.Conversation.startSession({{
+    // Debug: check what SDK loaded
+    console.log('SDK check:', typeof window.ElevenLabs, typeof window.ElevenLabsClient, Object.keys(window).filter(k=>k.toLowerCase().includes('eleven')));
+
+    const SDK = window.ElevenLabs || window.ElevenLabsClient;
+    if(!SDK) {{ throw new Error('ElevenLabs SDK not loaded'); }}
+    conv = await SDK.Conversation.startSession({{
       signedUrl: data.signed_url,
       onConnect: () => {{
         seconds = 0;
@@ -2087,7 +2092,7 @@ async function startCall(){{
         }}, 1000);
       }},
       onDisconnect: () => endCall(),
-      onError: (e) => {{ console.error(e); document.getElementById('status').textContent='Kapcsolat megszakadt'; }}
+      onError: (e) => {{ console.error(e); document.getElementById('status').textContent='Kapcsolat megszakadt: '+JSON.stringify(e); }}
     }});
   }} catch(e){{
     document.getElementById('status').textContent='Hiba: '+e.message;
