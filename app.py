@@ -2020,15 +2020,15 @@ box-shadow:0 0 0 0 rgba(217,70,168,0.4);transition:box-shadow 0.3s}}
 </div>
 <div class='timer' id='timer'></div>
 
-<script src='https://unpkg.com/@11labs/client@0.0.12/dist/index.umd.js'></script>
 <script>
 const PIN = '{pin}';
 const CHAT_ID = '{chat_id}';
-const AGENT_ID = '{agent_id}';
-let conv = null;
+let ws = null;
+let audioContext = null;
+let mediaStream = null;
+let processor = null;
 let timerInterval = null;
 let seconds = 0;
-let ringSfx = null;
 
 function fmt(s){{
   const m = Math.floor(s/60).toString().padStart(2,'0');
@@ -2036,14 +2036,13 @@ function fmt(s){{
   return m+':'+sec;
 }}
 
-function startRing(){{
+function playRing(){{
   const ctx = new AudioContext();
   function beep(t){{
     const o = ctx.createOscillator();
     const g = ctx.createGain();
     o.connect(g); g.connect(ctx.destination);
-    o.frequency.value = 440;
-    o.type = 'sine';
+    o.frequency.value = 440; o.type = 'sine';
     g.gain.setValueAtTime(0.3, t);
     g.gain.exponentialRampToValueAtTime(0.001, t+0.4);
     o.start(t); o.stop(t+0.5);
@@ -2055,68 +2054,88 @@ function startRing(){{
 
 async function startCall(){{
   document.getElementById('btnAnswer').style.display='none';
-  document.getElementById('status').textContent='Hívás folyamatban...';
+  document.getElementById('status').textContent='Csörög...';
   document.getElementById('avatar').className='avatar ringing';
-  ringSfx = startRing();
+  playRing();
+  await new Promise(r=>setTimeout(r,6000));
 
-  // Get signed URL from our server with fan context injected
   try{{
     const res = await fetch('/voice/signed_url?pin='+PIN);
     const data = await res.json();
-    if(!data.signed_url){{ 
-      const err = data.error || 'Unknown error';
-      document.getElementById('status').textContent='Hiba: '+err;
-      document.getElementById('btnAnswer').style.display='flex';
-      console.error('Voice error:', data);
-      return; 
-    }}
+    if(!data.signed_url){{ throw new Error(data.error||'No signed URL'); }}
 
-    // Wait 6 seconds (realistic ring time) then connect
-    await new Promise(r => setTimeout(r, 6000));
-    document.getElementById('avatar').className='avatar active';
-    document.getElementById('status').textContent='Kapcsolódva';
-    document.getElementById('btnEnd').style.display='flex';
+    mediaStream = await navigator.mediaDevices.getUserMedia({{audio:true}});
+    audioContext = new AudioContext({{sampleRate:16000}});
+    
+    ws = new WebSocket(data.signed_url);
+    ws.binaryType = 'arraybuffer';
 
-    // Debug: check what SDK loaded
-    console.log('SDK check:', typeof window.ElevenLabs, typeof window.ElevenLabsClient, Object.keys(window).filter(k=>k.toLowerCase().includes('eleven')));
+    ws.onopen = ()=>{{
+      document.getElementById('avatar').className='avatar active';
+      document.getElementById('status').textContent='Kapcsolódva';
+      document.getElementById('btnEnd').style.display='flex';
+      seconds=0;
+      timerInterval=setInterval(()=>{{seconds++;document.getElementById('timer').textContent=fmt(seconds);}},1000);
 
-    const SDK = window.ElevenLabs || window.ElevenLabsClient || window.ElevenLabsSDK;
-    if(!SDK) {{
-      await new Promise((res, rej) => {{
-        const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/@11labs/client/dist/index.umd.js';
-        s.onload = res; s.onerror = rej;
-        document.head.appendChild(s);
-      }});
-    }}
-    const FinalSDK = window.ElevenLabs || window.ElevenLabsClient || window.ElevenLabsSDK;
-    if(!FinalSDK) {{ throw new Error('ElevenLabs SDK not loaded'); }}
-    conv = await FinalSDK.Conversation.startSession({{
-      signedUrl: data.signed_url,
-      onConnect: () => {{
-        seconds = 0;
-        timerInterval = setInterval(()=>{{ seconds++; document.getElementById('timer').textContent = fmt(seconds); }}, 1000);
-      }},
-      onDisconnect: () => endCall(),
-      onError: (e) => {{ console.error(e); document.getElementById('status').textContent='Hiba: '+JSON.stringify(e); }}
-    }});
-  }} catch(e){{
+      const source = audioContext.createMediaStreamSource(mediaStream);
+      processor = audioContext.createScriptProcessor(4096,1,1);
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+      processor.onaudioprocess = (e)=>{{
+        if(ws.readyState!==1) return;
+        const input = e.inputBuffer.getChannelData(0);
+        const pcm = new Int16Array(input.length);
+        for(let i=0;i<input.length;i++) pcm[i]=Math.max(-32768,Math.min(32767,input[i]*32768));
+        ws.send(JSON.stringify({{user_audio_chunk:btoa(String.fromCharCode(...new Uint8Array(pcm.buffer)))}}));
+      }};
+    }};
+
+    ws.onmessage = async (e)=>{{
+      try{{
+        if(e.data instanceof ArrayBuffer){{
+          const ab = await audioContext.decodeAudioData(e.data.slice(0));
+          const src = audioContext.createBufferSource();
+          src.buffer=ab; src.connect(audioContext.destination); src.start();
+          return;
+        }}
+        const msg = JSON.parse(e.data);
+        if(msg.type==='audio' && msg.audio_event?.audio_base_64){{
+          const raw = atob(msg.audio_event.audio_base_64);
+          const buf = new Uint8Array(raw.length);
+          for(let i=0;i<raw.length;i++) buf[i]=raw.charCodeAt(i);
+          const ab = await audioContext.decodeAudioData(buf.buffer);
+          const src = audioContext.createBufferSource();
+          src.buffer=ab; src.connect(audioContext.destination); src.start();
+        }}
+      }}catch(err){{console.warn('Audio decode:',err);}}
+    }};
+
+    ws.onerror = (e)=>{{ document.getElementById('status').textContent='Kapcsolat hiba'; endCall(); }};
+    ws.onclose = ()=>endCall();
+
+  }}catch(e){{
     document.getElementById('status').textContent='Hiba: '+e.message;
     document.getElementById('btnAnswer').style.display='flex';
+    document.getElementById('avatar').className='avatar';
   }}
 }}
 
 async function endCall(){{
-  if(conv) await conv.endSession();
+  if(ws) ws.close();
+  if(processor) processor.disconnect();
+  if(mediaStream) mediaStream.getTracks().forEach(t=>t.stop());
+  if(audioContext) audioContext.close();
   clearInterval(timerInterval);
   document.getElementById('avatar').className='avatar';
   document.getElementById('status').textContent='Hívás befejezve — '+fmt(seconds);
   document.getElementById('btnEnd').style.display='none';
   document.getElementById('timer').textContent='';
-  fetch('/voice/log_call', {{method:'POST', headers:{{'Content-Type':'application/json'}},
-    body: JSON.stringify({{pin: PIN, duration: seconds}})}});
+  fetch('/voice/log_call',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{pin:PIN,duration:seconds}})}});
 }}
 </script>
+
+
 </body></html>"""
 
 @app.route('/voice/signed_url')
