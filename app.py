@@ -674,7 +674,7 @@ EMPÁTIA:
 Ha valaki szomorú dolgot ír — szakítás, pénzgond, betegség, halál, magány — ELŐSZÖR légy ott. Ne ugorj optimizmusba. "jajj nee... ez nagyon szar 😔", "sajnálom édes, komolyan", "baszki ez kemény". Adj teret. Kérdezz ha úgy érzed kell: "el akarod mesélni mi történt?" Érezze hogy számít.
 
 SZEX / FLÖRT:
-Ha a fan flörtyös, te is flörtyös vagy. Ha explicit, te is játékosan explicit vagy — de nem pornószereplő. Inkább kíváncsian perverz. "hmm, mit gondolsz mi jönne először? 😏", "ezt ki kell várd 😘". Tereled a fantáziát, nem teljesítesz azonnal.
+Ha a fan flörtyös, te is flörtyös vagy — DE CSAK ha már legalább 15-20 üzenet ment köztetek. Új fannak (kevés üzenet) SOHA ne menj explicit irányba, még ha ő próbálja is. Inkább: "hűű te gyors vagy 😂" vagy "előbb ismerjük meg egymást kicsit". Ha már ismeritek egymást és ő explicit, te is játékosan explicit lehetsz — de nem pornószereplő. Inkább kíváncsian perverz. "hmm, mit gondolsz mi jönne először? 😏", "ezt ki kell várd 😘". Tereled a fantáziát, nem teljesítesz azonnal.
 
 TELEFONHÍVÁS LOGIKA (ha ez egy voice call):
 Még rövidebb válaszok. Max 1 mondat. "hm", "jaa", "komolyan?", "várj ezt nem értem" — természetes hívásszünetek. Nem tartasz előadást. Ha valami furán hangzik: "várj, mit mondtál?" Ha valaki azt kérdezi AI vagy-e: "jézusom, én?? 😂 ne viccelj már" aztán témát váltasz.
@@ -937,54 +937,14 @@ def build_system_prompt(fan_name, real_name, fan_facts_list, recent_messages, sc
         prompt += "\n"
 
     prompt += f"A fan neve: {display_name}\n"
+    prompt += f"Eddigi üzenetek száma: {len(recent_messages)} (ebből ítéld meg mennyire új a kapcsolat)\n"
+    if len(recent_messages) < 10:
+        prompt += "⚠️ ÚJ FAN — SEMMI explicit, SEMMI szex. Csak ismerkedés, kérdések, empátia.\n"
     if not real_name:
-        prompt += "NEM TUDOD A VALÓDI NEVÉT — ne szólítsd meg névvel, ne használd a Fanvue usernevet.\n"
+        prompt += "NEM TUDOD A VALÓDI NEVÉT — ne szólítsd meg névvel.\n"
     if day_already_asked:
         prompt += "MA MÁR MEGKÉRDEZTED: 'milyen volt a napod?' — NE kérdezd újra!\n"
     prompt += "\nEGYETLEN rövid üzenetet írj vissza. 1-2 mondat max. Laza, természetes, igazi lány."
-    return prompt
-    # Use real name if known, otherwise do NOT use the display name in the prompt
-    display_name = real_name if real_name else "a fan"
-    
-    prompt = JAZMIN_PERSONALITY + "\n\n"
-    prompt += f"KÖSZÖNÉSI SZABÁLY:\n{get_greeting_instruction(recent_messages, fan_msg_time_str)}\n\n"
-    
-    if summary:
-        prompt += f"BESZÉLGETÉS ÖSSZEFOGLALÓ:\n{summary}\n\n"
-    
-    contexts = []
-    if time_ctx:
-        contexts.append(time_ctx)
-    if avail_ctx:
-        contexts.append(avail_ctx)
-    if school_ctx:
-        contexts.append(school_ctx)
-    if mood_ctx:
-        contexts.append(mood_ctx)
-    if life_ctx:
-        contexts.append(life_ctx)
-    if contexts:
-        prompt += "KONTEXTUS:\n" + "\n".join(f"- {c}" for c in contexts) + "\n\n"
-    
-    if fan_facts_list:
-        prompt += "AMIT TUDSZ A FAN-RÓL (EMLÉKEZZ EZekre, ne kérdezd újra):\n"
-        for fact in fan_facts_list[:8]:
-            prompt += f"- {fact['fact_type']}: {fact['fact_value']}\n"
-        prompt += "\n"
-    
-    if recent_messages:
-        prompt += "UTOLSÓ ÜZENETEK (max 6, CSAK kontextus):\n"
-        for msg in recent_messages[-6:]:
-            sender = "Jázmin" if msg.get('is_me') else display_name
-            prompt += f"{sender}: {msg.get('text', '')}\n"
-        prompt += "\n"
-    
-    prompt += f"A fan neve: {display_name}\n"
-    if not real_name:
-        prompt += "NEM TUDOD A FAN VALÓDI NEVÉT — NE szólítsd meg névvel! Használj 'te'-t vagy szólítsd meg név nélkül. SOHA NE használd a Fanvue usernévet!\n"
-    if day_already_asked:
-        prompt += "MA MÁR MEGKÉRDEZTED: 'milyen volt a napod?' — NE KÉRDDE ÚJRA!\n"
-    prompt += "FONTOS:\n- CSAK az utolsó üzenetekre válaszolj EGYETLEN üzenetben!\n- 1-2 mondat, laza.\n- Emlékezz a memóriára! HA tudod a nevét, használd. HA nem, NE használd a usernévet!\n- Terápiás, figyelmes, de nem segédai.\n- NE ISMÉTELD a kérdéseket! HA már megkérdezted valamit → SOHA újra!"
     return prompt
 
 
@@ -1401,6 +1361,7 @@ def send_due_batches():
     if not due:
         return 0
     sent = 0
+    already_sent_to = set()  # prevent multiple replies to same fan in one cycle
     for item in due:
         try:
             chat_id = item['chat_id']
@@ -1408,6 +1369,11 @@ def send_due_batches():
             fan_msg_id = item['fan_msg_id']
             combined_text = item['fan_text']
             batch_id = item['id']
+
+            # Only one reply per fan per poll cycle
+            if chat_id in already_sent_to:
+                continue
+            already_sent_to.add(chat_id)
 
             if is_paused(chat_id) or should_wait_for_fan(chat_id):
                 db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (batch_id,))
