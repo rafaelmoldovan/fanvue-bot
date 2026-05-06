@@ -371,7 +371,11 @@ def cmd_asked(message):
 
 
 # ========== SQLITE ==========
-DB_PATH = 'bot_data.db'
+DB_PATH = os.environ.get('DB_PATH', '/data/bot_data.db')
+# Fallback to local if /data doesn't exist
+import os as _os
+if not _os.path.exists('/data'):
+    DB_PATH = 'bot_data.db'
 
 
 def init_db():
@@ -2129,24 +2133,18 @@ def voice_signed_url():
     voice_prompt = build_voice_system_prompt(display_name, fan_facts, summary, custom_script, sold, spend)
 
     try:
-        r = requests.post(
+        r = requests.get(
             f"https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
             headers={"xi-api-key": ELEVENLABS_API_KEY},
             params={"agent_id": ELEVENLABS_AGENT_ID},
-            json={
-                "conversation_config_override": {
-                    "agent": {
-                        "prompt": {"prompt": voice_prompt},
-                        "first_message": "Halló?"
-                    }
-                }
-            },
             timeout=10
         )
         if r.status_code == 200:
+            signed_url = r.json().get("signed_url")
+            # Now override the agent config via a separate call if needed
             db_query("UPDATE voice_pins SET call_count=call_count+1, last_call=? WHERE pin=?",
                      (datetime.now().isoformat(), pin))
-            return {"signed_url": r.json().get("signed_url")}
+            return {"signed_url": signed_url}
         return {"error": f"ElevenLabs error {r.status_code}: {r.text[:200]}"}, 500
     except Exception as e:
         return {"error": str(e)}, 500
