@@ -2020,7 +2020,7 @@ box-shadow:0 0 0 0 rgba(217,70,168,0.4);transition:box-shadow 0.3s}}
 </div>
 <div class='timer' id='timer'></div>
 
-<script src='https://cdn.jsdelivr.net/npm/@11labs/client@0.0.12/dist/index.umd.js'></script>
+<script src='https://unpkg.com/@11labs/client@0.0.12/dist/index.umd.js'></script>
 <script>
 const PIN = '{pin}';
 const CHAT_ID = '{chat_id}';
@@ -2080,19 +2080,25 @@ async function startCall(){{
     // Debug: check what SDK loaded
     console.log('SDK check:', typeof window.ElevenLabs, typeof window.ElevenLabsClient, Object.keys(window).filter(k=>k.toLowerCase().includes('eleven')));
 
-    const SDK = window.ElevenLabs || window.ElevenLabsClient;
-    if(!SDK) {{ throw new Error('ElevenLabs SDK not loaded'); }}
-    conv = await SDK.Conversation.startSession({{
+    const SDK = window.ElevenLabs || window.ElevenLabsClient || window.ElevenLabsSDK;
+    if(!SDK) {{
+      await new Promise((res, rej) => {{
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/@11labs/client/dist/index.umd.js';
+        s.onload = res; s.onerror = rej;
+        document.head.appendChild(s);
+      }});
+    }}
+    const FinalSDK = window.ElevenLabs || window.ElevenLabsClient || window.ElevenLabsSDK;
+    if(!FinalSDK) {{ throw new Error('ElevenLabs SDK not loaded'); }}
+    conv = await FinalSDK.Conversation.startSession({{
       signedUrl: data.signed_url,
       onConnect: () => {{
         seconds = 0;
-        timerInterval = setInterval(()=>{{
-          seconds++;
-          document.getElementById('timer').textContent = fmt(seconds);
-        }}, 1000);
+        timerInterval = setInterval(()=>{{ seconds++; document.getElementById('timer').textContent = fmt(seconds); }}, 1000);
       }},
       onDisconnect: () => endCall(),
-      onError: (e) => {{ console.error(e); document.getElementById('status').textContent='Kapcsolat megszakadt: '+JSON.stringify(e); }}
+      onError: (e) => {{ console.error(e); document.getElementById('status').textContent='Hiba: '+JSON.stringify(e); }}
     }});
   }} catch(e){{
     document.getElementById('status').textContent='Hiba: '+e.message;
@@ -2107,7 +2113,6 @@ async function endCall(){{
   document.getElementById('status').textContent='Hívás befejezve — '+fmt(seconds);
   document.getElementById('btnEnd').style.display='none';
   document.getElementById('timer').textContent='';
-  // Log call
   fetch('/voice/log_call', {{method:'POST', headers:{{'Content-Type':'application/json'}},
     body: JSON.stringify({{pin: PIN, duration: seconds}})}});
 }}
