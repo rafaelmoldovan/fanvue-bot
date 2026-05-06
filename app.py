@@ -2059,7 +2059,13 @@ async function startCall(){{
   try{{
     const res = await fetch('/voice/signed_url?pin='+PIN);
     const data = await res.json();
-    if(!data.signed_url){{ document.getElementById('status').textContent='Hiba. Próbáld újra.'; return; }}
+    if(!data.signed_url){{ 
+      const err = data.error || 'Unknown error';
+      document.getElementById('status').textContent='Hiba: '+err;
+      document.getElementById('btnAnswer').style.display='flex';
+      console.error('Voice error:', data);
+      return; 
+    }}
 
     // Wait 6 seconds (realistic ring time) then connect
     await new Promise(r => setTimeout(r, 6000));
@@ -2125,9 +2131,9 @@ def voice_signed_url():
     try:
         r = requests.post(
             f"https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
-            headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
+            headers={"xi-api-key": ELEVENLABS_API_KEY},
+            params={"agent_id": ELEVENLABS_AGENT_ID},
             json={
-                "agent_id": ELEVENLABS_AGENT_ID,
                 "conversation_config_override": {
                     "agent": {
                         "prompt": {"prompt": voice_prompt},
@@ -2187,6 +2193,16 @@ A hívó neve: {display_name}
 
 
 init_db()
+
+# Auto-load refresh token from env — no more manual curl after every deploy
+_env_refresh = os.environ.get('FANVUE_REFRESH_TOKEN', '').strip()
+if _env_refresh:
+    existing = load_token('refresh_token')
+    if not existing or existing != _env_refresh:
+        save_token('refresh_token', _env_refresh)
+        refresh_fanvue_token()
+        print("[OK] Auto-loaded refresh token from env")
+
 if bot:
     try:
         bot.remove_webhook()
@@ -2196,7 +2212,7 @@ if bot:
             webhook_url = f"https://{domain}/telegram_webhook"
             bot.set_webhook(url=webhook_url)
             print(f"[OK] Webhook: {webhook_url}")
-            send_telegram("🤖 Jazmin Bot v7.0 started ✅\n📞 Voice call system active\n🔄 Polling auto-started\n\nNew commands:\n/sold <chat_id> — mark manual sale\n/script <chat_id> <text> — set custom voice script\n/clearscript <chat_id> — remove script")
+            send_telegram("🤖 Jazmin Bot v7.0 started ✅\n📞 Voice call system active\n🔄 Polling auto-started\n\nNew commands:\n/sold [chat_id] — mark manual sale\n/script [chat_id] [text] — set custom script\n/clearscript [chat_id] — remove script")
     except Exception as e:
         print(f"[WARN] Webhook failed: {e}")
 
