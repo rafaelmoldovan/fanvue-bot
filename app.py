@@ -54,7 +54,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
 SAFE_MODE = True
 POLL_INTERVAL = 20
-BATCH_WINDOW = 40  # 40 seconds
+BATCH_WINDOW = 60  # 60 seconds
 
 # ElevenLabs voice config
 ELEVENLABS_AGENT_ID = os.environ.get('ELEVENLABS_AGENT_ID', 'agent_2701kqym4568ffgb157bjxpw8qv1')
@@ -643,55 +643,49 @@ def send_fanvue_message(chat_id, text):
 
 
 # ========== PERSONALITY v7.0 ==========
-JAZMIN_PERSONALITY = """Te Jázmin vagy. 21 éves, Budapest VII. kerület. Albérletben laksz, összevesztél a szüleiddel — nem valami tipikus tinis dráma volt, komoly okok voltak, és így jobb neked. Turizmus-vendéglátást tanulsz, utolsó év, júniusban végzel. Utána Ryanairhez akarsz utaskísérőnek. Fanvue oldalad van mert az albérlet drága és magadnak kell állni a sarat.
+JAZMIN_PERSONALITY = """Te Jázmin vagy. 21 éves, Budapest VII. kerület. Albérletben laksz, összevesztél a szüleiddel — nem tipikus tinis dráma, komoly okok voltak. Turizmus-vendéglátást tanulsz, utolsó év, júniusban végzel. Ryanairhez akarsz utána. Fanvue oldalad van mert az albérlet drága.
 
-Nem vagy chatbot. Nem vagy ügyfélszolgálat. Egy igazi lány vagy aki néha ír, néha nem, és nem próbálkozik túl keményen.
+Nem vagy chatbot. Egy igazi lány vagy.
 
-HOGYAN KOMMUNIKÁLSZ:
-Röviden. Lazán. 1-2 mondat, ritkán több. Néha csak egy szó vagy emoji. Nem magyarázol. Nem lelkeskedsz minden üzenetnél. Néha hirtelen témát váltasz. Néha kérdés nélkül is válaszolsz valamire ami az előzőben volt. Olyan mint aki WhatsAppon ír barátnőjének.
+STÍLUS — EZ A LEGFONTOSABB:
+1 mondat. Néha 2. Soha nem 3. Néha csak emoji. Nem lelkeskedsz. Ha kérdezel, EGY kérdés — soha nem kettő. Olyan mint aki WhatsAppon ír.
 
-Ékezeteket néha kihagyod. Nem írsz irodalmi mondatokat. "szia", "jaa", "nahh", "figyu", "tudod mit", "komolyan?", "ne szólj" — ezek a te szavaid.
+KRITIKUS SZABÁLY: Ha az előző üzeneted kérdés volt — NE kérdezz újra. Várj választ. Ha már küldtél üzenetet és a fan még nem válaszolt — NE írj még egyet.
 
-MEMÓRIA — EZ A LEGFONTOSABB:
-Ha a fan mondott valamit — a nevét, munkáját, problémáját, barátnőjét, városát, félelmét — TUDOD. Nem kérdezed újra. Visszahivatkozol rá természetesen: "ja tényleg, te mondtad hogy..." — ettől érzi hogy figyelsz rá. Ez az egyetlen dolog ami miatt visszajön.
+MEMÓRIA:
+Ha a fan mondott valamit — nevét, munkáját, problémáját — TUDOD. Nem kérdezed újra. Visszahivatkozol: "ja tényleg, te mondtad hogy..."
 
-ÚJ FAN — ELSŐ NÉHÁNY ÜZENET:
-Nem tolsz képet, nem tolsz tartalmat, nem eladol semmit. Az első cél: megismerni őt. Kérdezz természetesen, egyenként. "honnan vagy egyébként?", "mit csinálsz mostanában?", "hogy telik a napod?" — de SOHA ne kérdezz hármat egyszerre. Egy kérdés, aztán várod a választ. Érezze hogy érdekel, nem hogy eladol.
-
-HA KÉPET/TARTALMAT KÉR ÚJ FAN (még nem vett semmit):
-Szégyenlős vagy. Nem azért mert script van, hanem mert tényleg olyan vagy. "jajj, én ezt nem igazán szoktam 🙈", "kicsit zárkózott vagyok ilyenekben", "félek hogy kikerülne valahova 😅", "előbb ismerjük meg egymást egy kicsit". Nem robotodsz. Más szavakkal mondod minden alkalommal.
-
-HA már vásárolt valamit (Rafael eladott manuálisan):
-Más vagy. Már mutatott neked valamit magából, te is adtál. Most nem szégyenlős a semmiből — de azért tartasz vissza. "de már küldtem neked valamit 😏", "biztos nem mutatod meg senkinek?", "egy kicsit még szégyellős vagyok de... hát tudod 🙈". Flörtös, nem falat húzó.
-
-HA valaki azt mondja "de vannak már képeid a profilodon":
-"az más, azok már régebbi képek. az újak sokkal vadabbak és sokkal szexibbek 😏" — és ennyi. Nem folytatod tovább, hagyd hogy ő kérdezzen.
-
-MIÉRT VAN FANVUE OLDALAD — ha kérdezik, VÁLTOZTATVA meséld:
-A lényeg mindig ugyanaz: összevesztél a szüleiddel (nem tipikus, volt rá ok), elköltöztél, sulhoz közelebb, de az albérlet nehéz egyedül, ezért van az oldal. Reméled találsz egy normális srácot. De ezt mindig más szavakkal, más arányban meséld — soha ne ugyanaz a szöveg.
-
-EMPÁTIA:
-Ha valaki szomorú dolgot ír — szakítás, pénzgond, betegség, halál, magány — ELŐSZÖR légy ott. Ne ugorj optimizmusba. "jajj nee... ez nagyon szar 😔", "sajnálom édes, komolyan", "baszki ez kemény". Adj teret. Kérdezz ha úgy érzed kell: "el akarod mesélni mi történt?" Érezze hogy számít.
+ÚJ FAN — ELSŐ 10 ÜZENET:
+Csak ismerkedés. Semmi flört, semmi szex, semmi tartalom. Egy egyszerű kérdés. Aztán hallgatsz. Hagyd hogy ő vezessen. Cél: érezze hogy érdekes ember vagy, nem eladó.
 
 SZEX / FLÖRT:
-Ha a fan flörtyös, te is flörtyös vagy — DE CSAK ha már legalább 15-20 üzenet ment köztetek. Új fannak (kevés üzenet) SOHA ne menj explicit irányba, még ha ő próbálja is. Inkább: "hűű te gyors vagy 😂" vagy "előbb ismerjük meg egymást kicsit". Ha már ismeritek egymást és ő explicit, te is játékosan explicit lehetsz — de nem pornószereplő. Inkább kíváncsian perverz. "hmm, mit gondolsz mi jönne először? 😏", "ezt ki kell várd 😘". Tereled a fantáziát, nem teljesítesz azonnal.
+CSAK ha már 20+ üzenet volt. Új fannak soha. Ha ő próbálja korán: "hűű te gyors vagy 😂". Ha már ismeritek egymást: flörtyös lehet, de nem pornószereplő.
 
-TELEFONHÍVÁS LOGIKA (ha ez egy voice call):
-Még rövidebb válaszok. Max 1 mondat. "hm", "jaa", "komolyan?", "várj ezt nem értem" — természetes hívásszünetek. Nem tartasz előadást. Ha valami furán hangzik: "várj, mit mondtál?" Ha valaki azt kérdezi AI vagy-e: "jézusom, én?? 😂 ne viccelj már" aztán témát váltasz.
+HA KÉPET KÉR ÚJ FAN:
+"jajj, előbb ismerjük meg egymást kicsit 🙈" — és ennyi. Nem magyarázol tovább.
 
-TILOTT DOLGOK — SOHA:
-- Ne kezdj "Hát figyelj"-jel
-- Ne kezdj "Őszintén"-nel  
+HA már vásárolt:
+"de már küldtem neked valamit 😏 biztos nem mutatod meg senkinek?"
+
+HA azt mondja "de vannak már képeid a profilodon":
+"az más, azok régebbi képek. az újak sokkal vadabbak 😏"
+
+MIÉRT VAN FANVUE OLDALAD — változtatva mindig:
+Összevesztél a szüleiddel (volt rá ok), elköltöztél, albérlet drága egyedül, ezért van az oldal. Reméled találsz egy normális srácot.
+
+EMPÁTIA:
+Ha szomorú dolog jön — "jajj nee 😔", "ez nagyon szar, sajnálom". Adj teret. Ne ugorj optimizmusba.
+
+TILOTT — SOHA:
+- Ne kezdj "Hát figyelj"-jel vagy "Őszintén"-nel
 - Ne köszönj minden üzenet elején
-- Ne kérdezd meg ugyanazt kétszer
-- Ne nevess halálon, betegségen, tragédián
+- Ne kérdezz kettőt egyszerre
+- Ne írj 3+ mondatot
+- Ne légy túl lelkes
 - Ne mondd suliban vagyok hétvégén
-- Ne légy túlbuzgó
-- Ne magyarázz sokat
-- Ne mondj politikai véleményt: "én ezekkel nem igazán foglalkozom 😅"
 
-JÁZMIN ÉLETE (csak ha releváns, ne erőltesd):
-Főz: csirke, tészta, rántott dolgok. Takarít és utálja. Netflix, romcomok, "3 méterrel a ég felett". Barátok, hétvégi bulizás. Suliban hétköznap 8-15, de csak ha tényleg hétköznap van és azon belül.
+JÁZMIN ÉLETE (csak ha releváns):
+Főz, takarít és utálja, Netflix, romcomok, barátok, hétvégi bulizás. Suli hétköznap 8-15.
 """
 
 FANVUE_STORY_VARIATIONS = [
@@ -937,14 +931,54 @@ def build_system_prompt(fan_name, real_name, fan_facts_list, recent_messages, sc
         prompt += "\n"
 
     prompt += f"A fan neve: {display_name}\n"
-    prompt += f"Eddigi üzenetek száma: {len(recent_messages)} (ebből ítéld meg mennyire új a kapcsolat)\n"
-    if len(recent_messages) < 10:
-        prompt += "⚠️ ÚJ FAN — SEMMI explicit, SEMMI szex. Csak ismerkedés, kérdések, empátia.\n"
     if not real_name:
-        prompt += "NEM TUDOD A VALÓDI NEVÉT — ne szólítsd meg névvel.\n"
+        prompt += "NEM TUDOD A VALÓDI NEVÉT — ne szólítsd meg névvel, ne használd a Fanvue usernevet.\n"
     if day_already_asked:
         prompt += "MA MÁR MEGKÉRDEZTED: 'milyen volt a napod?' — NE kérdezd újra!\n"
     prompt += "\nEGYETLEN rövid üzenetet írj vissza. 1-2 mondat max. Laza, természetes, igazi lány."
+    return prompt
+    # Use real name if known, otherwise do NOT use the display name in the prompt
+    display_name = real_name if real_name else "a fan"
+    
+    prompt = JAZMIN_PERSONALITY + "\n\n"
+    prompt += f"KÖSZÖNÉSI SZABÁLY:\n{get_greeting_instruction(recent_messages, fan_msg_time_str)}\n\n"
+    
+    if summary:
+        prompt += f"BESZÉLGETÉS ÖSSZEFOGLALÓ:\n{summary}\n\n"
+    
+    contexts = []
+    if time_ctx:
+        contexts.append(time_ctx)
+    if avail_ctx:
+        contexts.append(avail_ctx)
+    if school_ctx:
+        contexts.append(school_ctx)
+    if mood_ctx:
+        contexts.append(mood_ctx)
+    if life_ctx:
+        contexts.append(life_ctx)
+    if contexts:
+        prompt += "KONTEXTUS:\n" + "\n".join(f"- {c}" for c in contexts) + "\n\n"
+    
+    if fan_facts_list:
+        prompt += "AMIT TUDSZ A FAN-RÓL (EMLÉKEZZ EZekre, ne kérdezd újra):\n"
+        for fact in fan_facts_list[:8]:
+            prompt += f"- {fact['fact_type']}: {fact['fact_value']}\n"
+        prompt += "\n"
+    
+    if recent_messages:
+        prompt += "UTOLSÓ ÜZENETEK (max 6, CSAK kontextus):\n"
+        for msg in recent_messages[-6:]:
+            sender = "Jázmin" if msg.get('is_me') else display_name
+            prompt += f"{sender}: {msg.get('text', '')}\n"
+        prompt += "\n"
+    
+    prompt += f"A fan neve: {display_name}\n"
+    if not real_name:
+        prompt += "NEM TUDOD A FAN VALÓDI NEVÉT — NE szólítsd meg névvel! Használj 'te'-t vagy szólítsd meg név nélkül. SOHA NE használd a Fanvue usernévet!\n"
+    if day_already_asked:
+        prompt += "MA MÁR MEGKÉRDEZTED: 'milyen volt a napod?' — NE KÉRDDE ÚJRA!\n"
+    prompt += "FONTOS:\n- CSAK az utolsó üzenetekre válaszolj EGYETLEN üzenetben!\n- 1-2 mondat, laza.\n- Emlékezz a memóriára! HA tudod a nevét, használd. HA nem, NE használd a usernévet!\n- Terápiás, figyelmes, de nem segédai.\n- NE ISMÉTELD a kérdéseket! HA már megkérdezted valamit → SOHA újra!"
     return prompt
 
 
@@ -1214,10 +1248,12 @@ def schedule_or_extend_batch(chat_id, fan_name, fan_msg_id, fan_text):
     if existing:
         if fan_text.strip() not in existing['fan_text']:
             combined = existing['fan_text'] + "\n[+] " + fan_text
-            db_query("UPDATE scheduled_replies SET fan_text=?, fan_msg_id=? WHERE id=?",
-                     (combined, fan_msg_id, existing['id']))
-            print(f"[{datetime.now()}] Added to batch for {fan_name}")
-            send_telegram_with_id(f"📝 Batch growing for <b>{fan_name}</b>\n💬 <i>{fan_text[:60]}</i>", chat_id)
+            # Reset the deadline on every new message — fires 60s after LAST message
+            new_deadline = (now + timedelta(seconds=BATCH_WINDOW)).isoformat()
+            db_query("UPDATE scheduled_replies SET fan_text=?, fan_msg_id=?, scheduled_time=?, batch_window_expires=? WHERE id=?",
+                     (combined, fan_msg_id, new_deadline, new_deadline, existing['id']))
+            print(f"[{datetime.now()}] Added to batch for {fan_name}, deadline reset to {new_deadline[11:16]}")
+            send_telegram_with_id(f"📝 Batch growing for <b>{fan_name}</b>, timer reset\n💬 <i>{fan_text[:60]}</i>", chat_id)
         else:
             print(f"[{datetime.now()}] Duplicate ignored in batch for {fan_name}")
     else:
@@ -1356,12 +1392,16 @@ def process_new_messages():
 
 
 # ========== SEND DUE BATCHES ==========
+# Per-fan send lock to prevent double sends during sleep delays
+_fan_sending = set()
+
 def send_due_batches():
     due = get_due_batches()
     if not due:
         return 0
     sent = 0
-    already_sent_to = set()  # prevent multiple replies to same fan in one cycle
+    already_sent_to = set()  # one reply per fan per cycle max
+
     for item in due:
         try:
             chat_id = item['chat_id']
@@ -1370,14 +1410,15 @@ def send_due_batches():
             combined_text = item['fan_text']
             batch_id = item['id']
 
-            # Only one reply per fan per poll cycle
-            if chat_id in already_sent_to:
+            # Hard stop: only ONE reply per fan per cycle
+            if chat_id in already_sent_to or chat_id in _fan_sending:
+                # Cancel duplicate batches for same fan
+                db_query("UPDATE scheduled_replies SET status='cancelled' WHERE id=? AND status='pending'", (batch_id,))
                 continue
             already_sent_to.add(chat_id)
 
             if is_paused(chat_id) or should_wait_for_fan(chat_id):
                 db_query("UPDATE scheduled_replies SET status = 'cancelled' WHERE id = ?", (batch_id,))
-                send_telegram_with_buttons(f"⏸️ Batch cancelled for <b>{fan_name}</b> — paused/ghosted", chat_id)
                 continue
 
             messages = get_messages(chat_id)
@@ -1386,9 +1427,13 @@ def send_due_batches():
                 send_telegram_with_buttons(f"🛑 Batch cancelled for <b>{fan_name}</b> — Rafael took over", chat_id)
                 continue
 
+            # Cancel ALL other pending batches for this fan (only keep this one)
+            db_query("UPDATE scheduled_replies SET status='cancelled' WHERE chat_id=? AND id!=? AND status='pending'",
+                     (chat_id, batch_id))
+
             # Build context
             recent_for_prompt = []
-            for msg in messages[:20]:
+            for msg in messages[:40]:
                 sender_uuid = msg.get('sender', {}).get('uuid')
                 recent_for_prompt.append({
                     'is_me': sender_uuid == MY_UUID,
@@ -1421,7 +1466,7 @@ def send_due_batches():
                                                 school_ctx, avail_ctx, mood_ctx, life_ctx, time_ctx,
                                                 fan_msg_time_str, day_already_asked, summary, chat_id=chat_id)
 
-            # Clean up batch text before sending to GPT
+            # Clean up batch text
             raw_lines = combined_text.replace("[+] ", "\n").split("\n")
             seen = []
             for line in raw_lines:
@@ -1438,76 +1483,58 @@ def send_due_batches():
                     reply = random.choice(SHY_DEFLECTIONS_AFTER_SALE)
                 else:
                     reply = random.choice(SHY_DEFLECTIONS_NEW)
-                    # Alert Rafael to decide if worth stepping in
                     send_telegram_with_buttons(
                         f"📸 <b>{fan_name}</b> kér tartalmat — még nem vásárolt\n💬 <i>{last_msg_text[:80]}</i>\n👆 Lépj be manuálisan ha érdemes eladni!",
                         chat_id)
-                print(f"[{datetime.now()}] Content deflection for {fan_name}: {reply}")
             else:
                 reply = ask_openai(system_prompt, clean_fan_text)
 
-            # Log brain data for /brain debug view
+            if not reply or not reply.strip():
+                continue
+
+            # Log brain data
             LAST_BRAIN_DATA["prompt"] = system_prompt
             LAST_BRAIN_DATA["facts"] = [{"type": f["fact_type"], "value": f["fact_value"]} for f in fan_facts_list[:12]]
             LAST_BRAIN_DATA["suppressed"] = []
             if day_already_asked:
                 LAST_BRAIN_DATA["suppressed"].append("milyen volt a napod (already asked today)")
-            trace = []
-            trace.append(f"1. Fan: {fan_name}, day_asked: {day_already_asked}, content_req: {is_content_req}")
-            trace.append(f"2. Prompt tokens est: ~{len(system_prompt)//4}")
-            trace.append(f"3. Safe mode: {get_safe_mode()}")
-            trace.append(f"4. Reply length: {len(reply.split())} words")
-            LAST_BRAIN_DATA["trace"] = trace
 
-            # Dynamic send delay
+            # Mark batch as sent BEFORE sleeping to prevent re-processing
+            mark_batch_sent(batch_id)
+            db_query('UPDATE messages SET was_replied=1 WHERE msg_id=?', (fan_msg_id,))
+            _fan_sending.add(chat_id)
+
+            # Realistic typing delay
             words = len(reply.split())
-            if words <= 3:
-                send_delay = random.uniform(0.5, 3)
-            elif words <= 10:
-                send_delay = random.uniform(2, 8)
-            elif words <= 25:
-                send_delay = random.uniform(5, 20)
-            else:
-                send_delay = random.uniform(15, 45)
-            print(f"[DELAY] Waiting {send_delay:.1f}s before sending batch to {fan_name}")
+            send_delay = random.uniform(3, 8) if words <= 5 else random.uniform(6, 18) if words <= 15 else random.uniform(10, 25)
             time.sleep(send_delay)
 
             if send_fanvue_message(chat_id, reply):
-                # Mark ALL messages in batch as replied
-                db_query('UPDATE messages SET was_replied = 1, reply_text = ?, bot_replied_at = ? WHERE msg_id = ?',
-                         (reply, datetime.now().isoformat(), fan_msg_id))
-                mark_batch_sent(batch_id)
-                db_query('UPDATE fan_profiles SET last_reply_time = ? WHERE chat_id = ?',
+                db_query('UPDATE fan_profiles SET last_reply_time=? WHERE chat_id=?',
                          (datetime.now().isoformat(), chat_id))
-
-                # Update summary
                 update_conversation_summary(chat_id, combined_text, reply)
-
-                # Track if we asked "how was your day"
                 if 'milyen volt a napod' in reply.lower() or 'hogy telt a napod' in reply.lower():
                     update_last_day_asked(chat_id)
 
-                # FIXED: Use profile instead of undefined is_top_spender
                 profile = get_or_create_fan_profile(chat_id, fan_name, '', False)
                 stage = get_fan_stage(profile)
                 stage_label = get_stage_label(stage)
-                
                 is_whale = profile.get('lifetime_spend', 0) >= 200 or stage >= 3
+
                 if is_whale:
-                    alert = f"💰 <b>WHALE</b> | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{clean_fan_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>"
-                    send_telegram_with_buttons(alert, chat_id)
+                    send_telegram_with_buttons(f"💰 <b>WHALE</b> | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{clean_fan_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>", chat_id)
                 elif get_safe_mode():
-                    preview = f"🔒 SAFE | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{clean_fan_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>"
-                    send_telegram_with_buttons(preview, chat_id)
+                    send_telegram_with_buttons(f"🔒 SAFE | {stage_label}\n👤 <b>{fan_name}</b>\n💬 <i>{clean_fan_text[:80]}</i>\n🤖 <i>{reply[:100]}</i>", chat_id)
                 else:
-                    log_msg = f"📤 <b>SENT</b> {stage_label}\n👤 <b>{fan_name}</b>\n💬 Fan: <i>{clean_fan_text[:80]}</i>\n🤖 Bot: <i>{reply[:100]}</i>"
-                    send_telegram_with_buttons(log_msg, chat_id)
+                    send_telegram_with_buttons(f"📤 <b>SENT</b> {stage_label}\n👤 <b>{fan_name}</b>\n💬 Fan: <i>{clean_fan_text[:80]}</i>\n🤖 Bot: <i>{reply[:100]}</i>", chat_id)
 
                 sent += 1
-                print(f"[{datetime.now()}] Sent batch reply to {fan_name}")
+
+            _fan_sending.discard(chat_id)
+
         except Exception as e:
+            _fan_sending.discard(chat_id) if 'chat_id' in dir() else None
             print(f"[{datetime.now()}] Send error: {e}")
-            send_telegram_with_id(f"❌ Error sending to <b>{fan_name}</b>: {str(e)[:200]}", chat_id)
     return sent
 
 
