@@ -931,57 +931,15 @@ def build_system_prompt(fan_name, real_name, fan_facts_list, recent_messages, sc
         prompt += "\n"
 
     prompt += f"A fan neve: {display_name}\n"
+    prompt += f"Eddigi üzenetek száma: {len(recent_messages)}\n"
+    if len(recent_messages) < 10:
+        prompt += "⚠️ ÚJ FAN — SEMMI explicit, SEMMI szex. Csak ismerkedés.\n"
     if not real_name:
         prompt += "NEM TUDOD A VALÓDI NEVÉT — ne szólítsd meg névvel, ne használd a Fanvue usernevet.\n"
     if day_already_asked:
         prompt += "MA MÁR MEGKÉRDEZTED: 'milyen volt a napod?' — NE kérdezd újra!\n"
-    prompt += "\nEGYETLEN rövid üzenetet írj vissza. 1-2 mondat max. Laza, természetes, igazi lány."
+    prompt += "\nEGYETLEN rövid üzenetet írj vissza. 1-2 mondat max. Laza, természetes, igazi lány. Ha szomorú/nehéz dolgot ír a fan — ELŐSZÖR reagálj arra, ne kerüld meg."
     return prompt
-    # Use real name if known, otherwise do NOT use the display name in the prompt
-    display_name = real_name if real_name else "a fan"
-    
-    prompt = JAZMIN_PERSONALITY + "\n\n"
-    prompt += f"KÖSZÖNÉSI SZABÁLY:\n{get_greeting_instruction(recent_messages, fan_msg_time_str)}\n\n"
-    
-    if summary:
-        prompt += f"BESZÉLGETÉS ÖSSZEFOGLALÓ:\n{summary}\n\n"
-    
-    contexts = []
-    if time_ctx:
-        contexts.append(time_ctx)
-    if avail_ctx:
-        contexts.append(avail_ctx)
-    if school_ctx:
-        contexts.append(school_ctx)
-    if mood_ctx:
-        contexts.append(mood_ctx)
-    if life_ctx:
-        contexts.append(life_ctx)
-    if contexts:
-        prompt += "KONTEXTUS:\n" + "\n".join(f"- {c}" for c in contexts) + "\n\n"
-    
-    if fan_facts_list:
-        prompt += "AMIT TUDSZ A FAN-RÓL (EMLÉKEZZ EZekre, ne kérdezd újra):\n"
-        for fact in fan_facts_list[:8]:
-            prompt += f"- {fact['fact_type']}: {fact['fact_value']}\n"
-        prompt += "\n"
-    
-    if recent_messages:
-        prompt += "UTOLSÓ ÜZENETEK (max 6, CSAK kontextus):\n"
-        for msg in recent_messages[-6:]:
-            sender = "Jázmin" if msg.get('is_me') else display_name
-            prompt += f"{sender}: {msg.get('text', '')}\n"
-        prompt += "\n"
-    
-    prompt += f"A fan neve: {display_name}\n"
-    if not real_name:
-        prompt += "NEM TUDOD A FAN VALÓDI NEVÉT — NE szólítsd meg névvel! Használj 'te'-t vagy szólítsd meg név nélkül. SOHA NE használd a Fanvue usernévet!\n"
-    if day_already_asked:
-        prompt += "MA MÁR MEGKÉRDEZTED: 'milyen volt a napod?' — NE KÉRDDE ÚJRA!\n"
-    prompt += "FONTOS:\n- CSAK az utolsó üzenetekre válaszolj EGYETLEN üzenetben!\n- 1-2 mondat, laza.\n- Emlékezz a memóriára! HA tudod a nevét, használd. HA nem, NE használd a usernévet!\n- Terápiás, figyelmes, de nem segédai.\n- NE ISMÉTELD a kérdéseket! HA már megkérdezted valamit → SOHA újra!"
-    return prompt
-
-
 def ask_openai(system_prompt, user_text):
     try:
         r = requests.post("https://api.openai.com/v1/chat/completions",
@@ -1466,7 +1424,7 @@ def send_due_batches():
                                                 school_ctx, avail_ctx, mood_ctx, life_ctx, time_ctx,
                                                 fan_msg_time_str, day_already_asked, summary, chat_id=chat_id)
 
-            # Clean up batch text
+            # Build what GPT sees as the "user message" — ALL fan messages clearly
             raw_lines = combined_text.replace("[+] ", "\n").split("\n")
             seen = []
             for line in raw_lines:
@@ -1475,6 +1433,12 @@ def send_due_batches():
                     seen.append(line)
             clean_fan_text = "\n".join(seen)
             last_msg_text = seen[-1] if seen else combined_text
+
+            # If multiple messages, make it very clear to GPT
+            if len(seen) > 1:
+                gpt_user_msg = f"A fan {len(seen)} üzenetet küldött egymás után. Mindegyikre reagálj egyetlen válaszban:\n\n" + "\n".join(f"- {s}" for s in seen)
+            else:
+                gpt_user_msg = clean_fan_text
 
             is_content_req = is_content_request(last_msg_text) or is_shy_request(last_msg_text)
             if is_content_req:
@@ -1487,7 +1451,7 @@ def send_due_batches():
                         f"📸 <b>{fan_name}</b> kér tartalmat — még nem vásárolt\n💬 <i>{last_msg_text[:80]}</i>\n👆 Lépj be manuálisan ha érdemes eladni!",
                         chat_id)
             else:
-                reply = ask_openai(system_prompt, clean_fan_text)
+                reply = ask_openai(system_prompt, gpt_user_msg)
 
             if not reply or not reply.strip():
                 continue
