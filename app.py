@@ -940,32 +940,47 @@ def build_system_prompt(fan_name, real_name, fan_facts_list, recent_messages, sc
         prompt += "MA MÁR MEGKÉRDEZTED: 'milyen volt a napod?' — NE kérdezd újra!\n"
     prompt += "\nEGYETLEN rövid üzenetet írj vissza. 1-2 mondat max. Laza, természetes, igazi lány. Ha szomorú/nehéz dolgot ír a fan — ELŐSZÖR reagálj arra, ne kerüld meg."
     return prompt
+
+
 def ask_openai(system_prompt, user_text):
     try:
         r = requests.post("https://api.openai.com/v1/chat/completions",
                           headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-                          json={"model": "gpt-4.1", "messages": [
+                          json={"model": "gpt-4o", "messages": [
                               {"role": "system", "content": system_prompt},
                               {"role": "user", "content": user_text}
-                          ], "max_tokens": 150, "temperature": 0.92, "presence_penalty": 0.6, "frequency_penalty": 0.5},
+                          ], "max_tokens": 120, "temperature": 0.75, "presence_penalty": 0.3, "frequency_penalty": 0.3},
                           timeout=20)
         if r.status_code == 200:
             reply = r.json()['choices'][0]['message']['content'].strip()
-            # Block banned starters
-            banned_starters = ["hát figyelj", "hát figyelj...", "őszintén", "őszintén...", "na, mi a helyzet?",
-                              "na mi a helyzet", "sziuus, miujság", "szius, miujsag", "na, mi újság",
-                              "na mi újság", "hogy vagy?", "hogy telt a napod?", "mit csinálsz most?",
-                              "mi újság veled?", "hmm, értem", "hmm értem"]
+            # Remove quotes if GPT wrapped the reply
+            if reply.startswith('"') and reply.endswith('"'):
+                reply = reply[1:-1].strip()
+            # Block banned openers — retry once with stricter instruction
+            banned_starters = ["hát figyelj", "őszintén", "na, mi a helyzet", "na mi a helyzet",
+                                "na mi újság", "hogy vagy?", "hogy telt", "mi újság veled",
+                                "hmm, értem", "hmm értem", "persze, ", "természetesen"]
             lower_reply = reply.lower()
-            if len(reply) < 50:
-                for pattern in banned_starters:
-                    if lower_reply.startswith(pattern):
-                        return random.choice(CONTINUATION_VARIATIONS) + " mesélj te inkább 😄"
+            for pattern in banned_starters:
+                if lower_reply.startswith(pattern):
+                    # Retry once with explicit instruction
+                    r2 = requests.post("https://api.openai.com/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                        json={"model": "gpt-4o", "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_text},
+                            {"role": "assistant", "content": reply},
+                            {"role": "user", "content": "Ne így kezdd. Írj egy teljesen más, természetesebb választ. Rövidebb."}
+                        ], "max_tokens": 80, "temperature": 0.7},
+                        timeout=15)
+                    if r2.status_code == 200:
+                        return r2.json()['choices'][0]['message']['content'].strip()
+                    break
             return reply
-        print(f"OpenAI error: {r.status_code}")
+        print(f"OpenAI error: {r.status_code} {r.text[:100]}")
     except Exception as e:
         print(f"OpenAI error: {e}")
-    return "hmm most nem tudok sokat írni, mesélj te inkább"
+    return ""
 
 
 # ========== FAN FACTS & MEMORY ==========
