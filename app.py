@@ -1,18 +1,10 @@
 """
-Jazmin Fanvue Bot — v8.0
-Rewrites vs v6.3:
-- ElevenLabs / voice system: REMOVED completely
-- Shy deflections: REMOVED completely
-- Memory: Full SQLite history, prompt reads from DB not API
-- Manual takeover: Hard pause on detection, Telegram button to unpause, bot reads your message before resuming
-- Telegram inline buttons: FIXED (is_admin check corrected)
-- GPT fact extraction: replaces regex, runs after every fan message
-- Max tokens: 80
-- Blacklist table + /blacklist and /unblacklist commands
-- /fetchblacklist command: fetches all current subs and blacklists them (excluding whitelist)
-- Safe mode: starts ON, stored in DB, persists across restarts
-- Error spam fix: safe chat_id handling in exception blocks
-- None-text crash fixes throughout
+Jazmin Fanvue Bot — v8.1
+Changes vs v8.0:
+- DB migration: auto-adds is_mine column to existing messages table on boot
+- /fetchblacklist: now reads from local fan_profiles DB (not Fanvue API) so it gets ALL fans, not just 15
+- Whitelist matching: checks both handle AND fan_name (lowercase) so no one gets missed
+- Whitelist updated: includes eszter, unlikely-condor-278, moaning-wasp-252, molecular-scorpion-79, legitimate-tiglon-855
 """
 
 from flask import Flask, request, render_template_string
@@ -63,10 +55,13 @@ TELEGRAM_CHAT_ID     = os.environ.get('TELEGRAM_CHAT_ID', '')
 POLL_INTERVAL  = 20
 BATCH_WINDOW   = 60   # seconds to wait before firing a reply batch
 
-# Names/displayNames excluded from auto-blacklist when /fetchblacklist runs
+# Excluded from auto-blacklist. Checked against BOTH handle AND fan_name (lowercased).
 BLACKLIST_WHITELIST = {
     'eszter',
-    # Add more lowercase names here before running /fetchblacklist
+    'unlikely-condor-278', 'unlikely condor',
+    'moaning-wasp-252',    'moaning wasp',
+    'molecular-scorpion-79','molecular scorpion',
+    'legitimate-tiglon-855','legitimate tiglon',
 }
 
 # ========== BOOT SAFE MODE ==========
@@ -384,42 +379,46 @@ if bot:
     @bot.message_handler(commands=['fetchblacklist'])
     def cmd_fetchblacklist(message):
         """
-        Fetches all current subscribers from Fanvue and blacklists them,
-        EXCEPT anyone whose displayName (lowercased) is in BLACKLIST_WHITELIST.
+        Reads ALL fans from local fan_profiles DB and blacklists them,
+        EXCEPT anyone whose handle OR fan_name (lowercased) is in BLACKLIST_WHITELIST.
+        This is reliable because the DB has every fan we've ever seen — no API pagination issues.
         """
         if str(message.from_user.id) != str(TELEGRAM_CHAT_ID):
             return
-        bot.reply_to(message, "⏳ Fetching all subscribers from Fanvue... this may take a moment.")
+        bot.reply_to(message, "⏳ Reading all fans from local database...")
         try:
-            chats, status = get_chats()
-            if not chats:
-                bot.reply_to(message, f"❌ Could not fetch chats: {status}")
+            all_fans = db_query("SELECT chat_id, fan_name, handle FROM fan_profiles") or []
+            if not all_fans:
+                bot.reply_to(message, "❌ No fans in local DB yet. Make sure the bot has polled at least once.")
                 return
 
             added   = []
             skipped = []
-            for chat in chats:
+            for fan in all_fans:
                 try:
-                    user      = chat.get('user', {}) or {}
-                    chat_id   = user.get('uuid') or chat.get('uuid') or chat.get('id')
-                    fan_name  = user.get('displayName', '') or user.get('handle', '') or 'unknown'
+                    chat_id  = fan.get('chat_id', '')
+                    fan_name = (fan.get('fan_name') or '').strip()
+                    handle   = (fan.get('handle') or '').strip()
                     if not chat_id:
                         continue
-                    if fan_name.lower().strip() in BLACKLIST_WHITELIST:
-                        skipped.append(fan_name)
+                    # Check whitelist against both handle and display name
+                    name_lower   = fan_name.lower()
+                    handle_lower = handle.lower()
+                    if name_lower in BLACKLIST_WHITELIST or handle_lower in BLACKLIST_WHITELIST:
+                        skipped.append(fan_name or handle)
                         continue
                     db_query(
                         "INSERT OR IGNORE INTO blacklisted_fans (chat_id, fan_name, blacklisted_at, reason) VALUES (?, ?, ?, ?)",
                         (chat_id, fan_name, datetime.now().isoformat(), 'auto_existing_sub')
                     )
-                    added.append(fan_name)
+                    added.append(fan_name or handle)
                 except Exception:
                     continue
 
             msg = (f"✅ Done.\n"
                    f"🚫 Blacklisted: {len(added)} fans\n"
-                   f"✅ Kept (whitelist): {len(skipped)} — {', '.join(skipped)}\n\n"
-                   f"New subscribers from now on will NOT be blacklisted automatically.")
+                   f"✅ Kept (whitelist): {len(skipped)} — {', '.join(skipped) or 'none'}\n\n"
+                   f"New subscribers will NOT be blacklisted automatically.")
             bot.reply_to(message, msg)
 
         except Exception as e:
@@ -482,6 +481,15 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, sold_at TEXT, note TEXT)''')
     conn.commit()
     conn.close()
+    # === MIGRATION: add is_mine column if upgrading from old DB ===
+    try:
+        conn2 = sqlite3.connect(DB_PATH)
+        conn2.execute("ALTER TABLE messages ADD COLUMN is_mine INTEGER DEFAULT 0")
+        conn2.commit()
+        conn2.close()
+        print("[OK] Migration: added is_mine column to messages table")
+    except Exception:
+        pass  # Column already exists — safe to ignore
     # Ensure safe_mode starts ON in DB if not already set
     existing = db_query("SELECT value FROM bot_settings WHERE key='safe_mode'", fetch_one=True)
     if not existing:
