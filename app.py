@@ -557,13 +557,27 @@ def get_headers():
 
 def get_chats():
     try:
-        r = requests.get("https://api.fanvue.com/chats", headers=get_headers(), timeout=10)
-        if r.status_code == 401:
-            refresh_fanvue_token()
-            r = requests.get("https://api.fanvue.com/chats", headers=get_headers(), timeout=10)
-        if r.status_code != 200:
-            return [], f"Error {r.status_code}"
-        return r.json().get('data', []), "OK"
+        all_chats = []
+        page = 1
+        while True:
+            r = requests.get(f"https://api.fanvue.com/chats?page={page}&limit=50",
+                             headers=get_headers(), timeout=10)
+            if r.status_code == 401:
+                refresh_fanvue_token()
+                r = requests.get(f"https://api.fanvue.com/chats?page={page}&limit=50",
+                                 headers=get_headers(), timeout=10)
+            if r.status_code != 200:
+                break
+            data  = r.json()
+            chats = data.get('data', [])
+            all_chats.extend(chats)
+            # Stop if we got fewer than 50 — means last page
+            if len(chats) < 50:
+                break
+            page += 1
+            if page > 20:  # Safety cap
+                break
+        return all_chats, "OK"
     except Exception as e:
         return [], f"Error: {e}"
 
@@ -1220,9 +1234,11 @@ def process_new_messages():
             msg_time = (last_msg.get('createdAt') or last_msg.get('sentAt') or
                         last_msg.get('timestamp') or last_msg.get('created_at') or '')
             msg_dt   = parse_timestamp(msg_time)
+            # Skip messages older than 24 hours — truly stale
             if msg_dt:
-                # Only skip messages that arrived BEFORE this boot
-                if msg_dt <= BOOT_TIME_UTC:
+                now       = datetime.now(timezone.utc)
+                age_hours = (now - msg_dt).total_seconds() / 3600
+                if age_hours > 24:
                     continue
 
             existing       = db_query('SELECT 1 FROM messages WHERE msg_id=? AND was_replied=1', (msg_id,), fetch_one=True)
