@@ -1511,6 +1511,34 @@ def api_resume(chat_id):
     return {"resumed": True}
 
 
+@app.route('/debug_chats')
+def debug_chats():
+    chats, status = get_chats()
+    result = []
+    for chat in (chats or []):
+        user    = chat.get('user', {}) or {}
+        chat_id = user.get('uuid') or chat.get('uuid') or chat.get('id')
+        fan_name = user.get('displayName', '?')
+        msgs = get_messages(chat_id) if chat_id else []
+        latest = msgs[0] if msgs else {}
+        latest_time = latest.get('createdAt') or latest.get('sentAt') or ''
+        latest_text = (latest.get('text') or '')[:40]
+        latest_sender = (latest.get('sender') or {}).get('uuid', '')[:8]
+        is_after_boot = False
+        if latest_time:
+            dt = parse_timestamp(latest_time)
+            is_after_boot = bool(dt and dt > BOOT_TIME_UTC)
+        result.append({
+            'fan': fan_name,
+            'chat_id': chat_id,
+            'latest_msg': latest_text,
+            'latest_time': latest_time,
+            'after_boot': is_after_boot,
+            'sender_is_me': latest_sender == MY_UUID[:8],
+        })
+    return {"boot_time": BOOT_TIME_UTC.isoformat(), "chats_returned": len(chats or []), "detail": result}, 200
+
+
 @app.route('/resumeall')
 def resumeall():
     db_query("UPDATE fan_profiles SET is_paused=0, paused_until=NULL, manual_pause_until=NULL, wait_for_fan_reply=0")
