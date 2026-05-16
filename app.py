@@ -195,6 +195,7 @@ if bot:
             "/fans — All fans with IDs\n"
             "/pause <uuid> — Pause fan\n"
             "/resume <uuid> — Resume fan\n"
+            "/resumeall — Unpause everyone\n"
             "/safe_on / /safe_off — Safe mode\n"
             "/notes <uuid> — Fan facts\n"
             "/asked <uuid> — Questions asked\n"
@@ -291,6 +292,14 @@ if bot:
         uuid = parts[1].strip()
         db_query("UPDATE fan_profiles SET is_paused=0, paused_until=NULL, manual_pause_until=NULL, wait_for_fan_reply=0 WHERE chat_id=?", (uuid,))
         bot.reply_to(message, f"▶️ Resumed `{uuid[:12]}...`", parse_mode='Markdown')
+
+    @bot.message_handler(commands=['resumeall'])
+    def cmd_resumeall(message):
+        if str(message.from_user.id) != str(TELEGRAM_CHAT_ID):
+            return
+        db_query("UPDATE fan_profiles SET is_paused=0, paused_until=NULL, manual_pause_until=NULL, wait_for_fan_reply=0")
+        count = db_query("SELECT COUNT(*) as c FROM fan_profiles", fetch_one=True)
+        bot.reply_to(message, f"▶️ Done — {count['c'] if count else 0} fans all unpaused. Bot talks to everyone now.")
 
     @bot.message_handler(commands=['safe_on'])
     def cmd_safe_on(message):
@@ -1212,11 +1221,8 @@ def process_new_messages():
                         last_msg.get('timestamp') or last_msg.get('created_at') or '')
             msg_dt   = parse_timestamp(msg_time)
             if msg_dt:
+                # Only skip messages that arrived BEFORE this boot
                 if msg_dt <= BOOT_TIME_UTC:
-                    continue
-                now       = datetime.now(timezone.utc)
-                age_hours = (now - msg_dt).total_seconds() / 3600
-                if age_hours > 1:
                     continue
 
             existing       = db_query('SELECT 1 FROM messages WHERE msg_id=? AND was_replied=1', (msg_id,), fetch_one=True)
@@ -1503,6 +1509,14 @@ def api_pause(chat_id):
 def api_resume(chat_id):
     resume_fan(chat_id)
     return {"resumed": True}
+
+
+@app.route('/resumeall')
+def resumeall():
+    db_query("UPDATE fan_profiles SET is_paused=0, paused_until=NULL, manual_pause_until=NULL, wait_for_fan_reply=0")
+    count = db_query("SELECT COUNT(*) as c FROM fan_profiles", fetch_one=True)
+    send_telegram("▶️ <b>Minden pause törölve</b> — bot most mindenkivel beszél.")
+    return {"resumed_all": True, "total_fans": count['c'] if count else 0}, 200
 
 
 @app.route('/api/takeover/<chat_id>', methods=['POST'])
