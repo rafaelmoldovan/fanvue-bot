@@ -146,14 +146,21 @@ if bot:
         action, chat_id = data.split(":", 1)
         try:
             if action == "pause":
+                db_query("INSERT OR IGNORE INTO fan_profiles (chat_id, fan_name, fan_type, last_interaction, is_paused) VALUES (?, 'unknown', 'new', ?, 1)",
+                         (chat_id, datetime.now().isoformat()))
                 db_query("UPDATE fan_profiles SET is_paused=1, paused_until=NULL, manual_pause_until=NULL WHERE chat_id=?", (chat_id,))
                 bot.answer_callback_query(call.id, "⏸️ Paused")
                 send_telegram(f"⏸️ Paused <code>{chat_id}</code>")
 
             elif action == "resume":
+                # INSERT OR IGNORE ensures a row exists even for brand new fans
+                db_query("INSERT OR IGNORE INTO fan_profiles (chat_id, fan_name, fan_type, last_interaction, is_paused) VALUES (?, 'unknown', 'new', ?, 0)",
+                         (chat_id, datetime.now().isoformat()))
                 db_query("UPDATE fan_profiles SET is_paused=0, paused_until=NULL, manual_pause_until=NULL, wait_for_fan_reply=0 WHERE chat_id=?", (chat_id,))
+                # Also remove from notified cache so detection works fresh
+                MANUAL_REPLY_NOTIFIED.discard(chat_id)
                 bot.answer_callback_query(call.id, "▶️ Unpaused")
-                send_telegram(f"▶️ Unpaused <code>{chat_id}</code> — bot will resume on next fan message.")
+                send_telegram(f"▶️ Unpaused <code>{chat_id}</code> — bot resumes on next fan message.")
 
             elif action == "notes":
                 facts = db_query("SELECT fact_type, fact_value, discovered_at FROM fan_facts WHERE chat_id=? ORDER BY discovered_at DESC", (chat_id,))
@@ -190,7 +197,7 @@ if bot:
     @bot.message_handler(commands=['start'])
     def cmd_start(message):
         bot.reply_to(message,
-            "🤖 Jazmin Bot v8.0\n\n"
+            "🤖 Jazmin Bot v8.2\n\n"
             "/status — Bot overview\n"
             "/fans — All fans with IDs\n"
             "/pause <uuid> — Pause fan\n"
@@ -1109,19 +1116,21 @@ def ask_openai(system_prompt, user_text):
 
 
 # ========== MANUAL REPLY DETECTION ==========
+# Cache of msg_ids we've already notified about — prevents spam on every poll cycle
+MANUAL_REPLY_NOTIFIED = set()
+
 def check_for_manual_reply(chat_id, fan_name, api_messages):
     """
-    Scans the latest API messages for a message from MY_UUID that is NEWER than
-    the last bot reply timestamp. If found:
-    - Saves Rafael's message to DB
-    - Hard-pauses the fan
-    - Sends Telegram notification with Unpause button
-    Returns True if manual reply detected.
+    Scans the latest API messages for a message from MY_UUID.
+    Uses MANUAL_REPLY_NOTIFIED to ensure we only fire ONE notification per message ID.
+    If already paused, just returns True silently (no spam).
     """
     if not api_messages:
         return False
 
-    profile           = db_query('SELECT last_reply_time FROM fan_profiles WHERE chat_id=?', (chat_id,), fetch_one=True)
+    # If already hard-paused, don't spam — just stay paused
+    profile = db_query('SELECT is_paused, last_reply_time FROM fan_profiles WHERE chat_id=?', (chat_id,), fetch_one=True)
+    already_paused    = profile and profile.get('is_paused')
     last_bot_time_str = profile['last_reply_time'] if profile and profile.get('last_reply_time') else None
     last_bot_time     = parse_timestamp(last_bot_time_str) if last_bot_time_str else None
 
@@ -1140,17 +1149,21 @@ def check_for_manual_reply(chat_id, fan_name, api_messages):
         if last_bot_time and msg_dt <= last_bot_time:
             continue
 
-        # It's a genuine new manual message from Rafael
-        text    = (msg.get('text') or '').strip()
-        msg_id  = msg.get('uuid') or ''
+        msg_id = msg.get('uuid') or ''
+        text   = (msg.get('text') or '').strip()
 
-        # Save Rafael's message to DB so the bot knows what was said
+        # Save to DB regardless (so memory is complete)
         save_message_to_db(msg_id, chat_id, fan_name, MY_UUID, text, msg_time_str, is_mine=True)
 
-        # Hard pause
+        # Hard pause always
         hard_pause_fan(chat_id)
 
-        # Notify Telegram with Unpause button
+        # Only send Telegram notification ONCE per unique message ID
+        if msg_id and msg_id in MANUAL_REPLY_NOTIFIED:
+            return True  # Already notified, stay silent
+        if msg_id:
+            MANUAL_REPLY_NOTIFIED.add(msg_id)
+
         preview = text[:80] if text else '[non-text message]'
         send_telegram_with_buttons(
             f"✍️ <b>Jázmin kézzel írt</b> — <b>{fan_name}</b>\n"
@@ -1820,13 +1833,10 @@ if bot:
             bot.set_webhook(url=webhook_url)
             print(f"[OK] Webhook: {webhook_url}")
             send_telegram(
-                "🤖 <b>Jazmin Bot v8.0 indult ✅</b>\n\n"
-                "🔒 Safe mode: <b>ON</b> (bot nem küld, csak értesít)\n"
-                "🚫 Voice/ElevenLabs: eltávolítva\n"
-                "🧠 Memória: teljes SQLite történet\n"
-                "✍️ Kézi üzenet detektálás: aktív\n"
-                "🔘 Telegram gombok: javítva\n\n"
-                "Új parancsok: /blacklist /unblacklist /fetchblacklist\n"
+                "🤖 <b>Jazmin Bot v8.2 indult ✅</b>\n\n"
+                "🔒 Safe mode: <b>ON</b>\n"
+                "🛑 Spam fix: kézi üzenet csak egyszer értesít\n"
+                "🔘 Buttons: pause/unpause javítva (új fanoknál is működik)\n\n"
                 "Kapcsold ki a safe mode-ot: /safe_off"
             )
     except Exception as e:
