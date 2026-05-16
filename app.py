@@ -1046,23 +1046,19 @@ def ask_openai(system_prompt, user_text):
 
 
 # ========== MANUAL REPLY DETECTION ==========
-# Cache of msg_ids we've already notified about — prevents spam on every poll cycle
+# Cache of msg_ids already notified — prevents spam
 MANUAL_REPLY_NOTIFIED = set()
 
 def check_for_manual_reply(chat_id, fan_name, api_messages):
     """
-    Scans the latest API messages for a message from MY_UUID.
-    Uses MANUAL_REPLY_NOTIFIED to ensure we only fire ONE notification per message ID.
-    If already paused, just returns True silently (no spam).
+    Detects if Rafael manually sent a message in the last 30 minutes.
+    Only fires for genuinely recent manual messages — not old history.
     """
     if not api_messages:
         return False
 
-    # If already hard-paused, don't spam — just stay paused
-    profile = db_query('SELECT is_paused, last_reply_time FROM fan_profiles WHERE chat_id=?', (chat_id,), fetch_one=True)
-    already_paused    = profile and profile.get('is_paused')
-    last_bot_time_str = profile['last_reply_time'] if profile and profile.get('last_reply_time') else None
-    last_bot_time     = parse_timestamp(last_bot_time_str) if last_bot_time_str else None
+    now = datetime.now(timezone.utc)
+    RECENT_WINDOW = timedelta(minutes=30)
 
     for msg in api_messages:
         sender_uuid = (msg.get('sender') or {}).get('uuid', '')
@@ -1072,25 +1068,30 @@ def check_for_manual_reply(chat_id, fan_name, api_messages):
         if msg_type == 'AUTOMATED_NEW_FOLLOWER':
             continue
         msg_time_str = msg.get('sentAt') or msg.get('createdAt') or msg.get('timestamp') or ''
-        msg_dt       = parse_timestamp(msg_time_str)
+        msg_dt = parse_timestamp(msg_time_str)
         if not msg_dt:
             continue
-        # Only count it as manual if it's newer than last bot reply
-        if last_bot_time and msg_dt <= last_bot_time:
+
+        # Only count as manual if sent in the last 30 minutes
+        if (now - msg_dt) > RECENT_WINDOW:
+            continue
+
+        # Must be newer than bot boot time too
+        if msg_dt <= BOOT_TIME_UTC:
             continue
 
         msg_id = msg.get('uuid') or ''
         text   = (msg.get('text') or '').strip()
 
-        # Save to DB regardless (so memory is complete)
+        # Save to DB
         save_message_to_db(msg_id, chat_id, fan_name, MY_UUID, text, msg_time_str, is_mine=True)
 
-        # Hard pause always
+        # Hard pause
         hard_pause_fan(chat_id)
 
-        # Only send Telegram notification ONCE per unique message ID
+        # Only notify once per message ID
         if msg_id and msg_id in MANUAL_REPLY_NOTIFIED:
-            return True  # Already notified, stay silent
+            return True
         if msg_id:
             MANUAL_REPLY_NOTIFIED.add(msg_id)
 
