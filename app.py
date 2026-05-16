@@ -55,14 +55,7 @@ TELEGRAM_CHAT_ID     = os.environ.get('TELEGRAM_CHAT_ID', '')
 POLL_INTERVAL  = 20
 BATCH_WINDOW   = 60   # seconds to wait before firing a reply batch
 
-# Excluded from auto-blacklist. Checked against BOTH handle AND fan_name (lowercased).
-BLACKLIST_WHITELIST = {
-    'eszter',
-    'unlikely-condor-278', 'unlikely condor',
-    'moaning-wasp-252',    'moaning wasp',
-    'molecular-scorpion-79','molecular scorpion',
-    'legitimate-tiglon-855','legitimate tiglon',
-}
+
 
 # ========== BOOT SAFE MODE ==========
 # Safe mode always starts ON. Persisted in DB after first write.
@@ -207,11 +200,8 @@ if bot:
             "/asked <uuid> — Questions asked\n"
             "/sold <uuid> [note] — Mark manual sale\n"
             "/script <uuid> <text> — Set custom script\n"
-            "/clearscript <uuid> — Remove script\n"
-            "/blacklist <uuid> [name] — Blacklist a fan\n"
-            "/unblacklist <uuid> — Remove from blacklist\n"
-            "/fetchblacklist — Fetch all current subs and blacklist them (keeps whitelist)\n\n"
-            "💡 Buttons on every fan notification now work — tap ▶️ to unpause instantly."
+            "/clearscript <uuid> — Remove script\n\n"
+            "💡 Tap ▶️ on any notification to unpause instantly."
         )
 
     @bot.message_handler(commands=['sold'])
@@ -356,80 +346,6 @@ if bot:
             s = "✅" if q['answered'] else "⏳"
             lines.append(f"{s} <b>{q['question']}</b> ({q['asked_at'][:10]})")
         bot.reply_to(message, "\n".join(lines), parse_mode='HTML')
-
-    @bot.message_handler(commands=['blacklist'])
-    def cmd_blacklist(message):
-        if str(message.from_user.id) != str(TELEGRAM_CHAT_ID):
-            return
-        parts = message.text.split(None, 2)
-        if len(parts) < 2:
-            bot.reply_to(message, "Usage: /blacklist <uuid> [display_name]")
-            return
-        chat_id  = parts[1].strip()
-        fan_name = parts[2].strip() if len(parts) > 2 else 'unknown'
-        db_query("INSERT OR IGNORE INTO blacklisted_fans (chat_id, fan_name, blacklisted_at, reason) VALUES (?, ?, ?, ?)",
-                 (chat_id, fan_name, datetime.now().isoformat(), 'manual'))
-        bot.reply_to(message, f"🚫 Blacklisted <code>{chat_id}</code> ({fan_name}). Bot will ignore them.", parse_mode='HTML')
-
-    @bot.message_handler(commands=['unblacklist'])
-    def cmd_unblacklist(message):
-        if str(message.from_user.id) != str(TELEGRAM_CHAT_ID):
-            return
-        parts = message.text.split()
-        if len(parts) < 2:
-            bot.reply_to(message, "Usage: /unblacklist <uuid>")
-            return
-        chat_id = parts[1].strip()
-        db_query("DELETE FROM blacklisted_fans WHERE chat_id=?", (chat_id,))
-        bot.reply_to(message, f"✅ Removed <code>{chat_id}</code> from blacklist.", parse_mode='HTML')
-
-    @bot.message_handler(commands=['fetchblacklist'])
-    def cmd_fetchblacklist(message):
-        """
-        Reads ALL fans from local fan_profiles DB and blacklists them,
-        EXCEPT anyone whose handle OR fan_name (lowercased) is in BLACKLIST_WHITELIST.
-        This is reliable because the DB has every fan we've ever seen — no API pagination issues.
-        """
-        if str(message.from_user.id) != str(TELEGRAM_CHAT_ID):
-            return
-        bot.reply_to(message, "⏳ Reading all fans from local database...")
-        try:
-            all_fans = db_query("SELECT chat_id, fan_name, handle FROM fan_profiles") or []
-            if not all_fans:
-                bot.reply_to(message, "❌ No fans in local DB yet. Make sure the bot has polled at least once.")
-                return
-
-            added   = []
-            skipped = []
-            for fan in all_fans:
-                try:
-                    chat_id  = fan.get('chat_id', '')
-                    fan_name = (fan.get('fan_name') or '').strip()
-                    handle   = (fan.get('handle') or '').strip()
-                    if not chat_id:
-                        continue
-                    # Check whitelist against both handle and display name
-                    name_lower   = fan_name.lower()
-                    handle_lower = handle.lower()
-                    if name_lower in BLACKLIST_WHITELIST or handle_lower in BLACKLIST_WHITELIST:
-                        skipped.append(fan_name or handle)
-                        continue
-                    db_query(
-                        "INSERT OR IGNORE INTO blacklisted_fans (chat_id, fan_name, blacklisted_at, reason) VALUES (?, ?, ?, ?)",
-                        (chat_id, fan_name, datetime.now().isoformat(), 'auto_existing_sub')
-                    )
-                    added.append(fan_name or handle)
-                except Exception:
-                    continue
-
-            msg = (f"✅ Done.\n"
-                   f"🚫 Blacklisted: {len(added)} fans\n"
-                   f"✅ Kept (whitelist): {len(skipped)} — {', '.join(skipped) or 'none'}\n\n"
-                   f"New subscribers will NOT be blacklisted automatically.")
-            bot.reply_to(message, msg)
-
-        except Exception as e:
-            bot.reply_to(message, f"❌ Error: {e}")
 
 
 # ========== SQLITE ==========
@@ -585,15 +501,6 @@ def set_safe_mode(value):
     db_query("INSERT OR REPLACE INTO bot_settings (key, value) VALUES ('safe_mode', ?)",
              ('true' if value else 'false',))
 
-
-# ========== BLACKLIST / BLOCK ==========
-def is_blacklisted(chat_id):
-    row = db_query("SELECT 1 FROM blacklisted_fans WHERE chat_id=?", (chat_id,), fetch_one=True)
-    if row:
-        return True
-    # Also check legacy blocked_fans table
-    row2 = db_query("SELECT 1 FROM blocked_fans WHERE chat_id=?", (chat_id,), fetch_one=True)
-    return bool(row2)
 
 
 # ========== PAUSE HELPERS ==========
@@ -1232,8 +1139,8 @@ def process_new_messages():
             if not chat_id:
                 continue
 
-            # Skip blacklisted
-            if is_blacklisted(chat_id):
+            # Skip if no chat_id
+            if not chat_id:
                 continue
 
             fan_name      = user.get('displayName', 'ismeretlen') or 'ismeretlen'
@@ -1815,6 +1722,10 @@ def brain_view():
 # ========== INIT & BOOT ==========
 init_db()
 
+# Clear ALL pauses on every boot — fresh start, bot talks to everyone
+db_query("UPDATE fan_profiles SET is_paused=0, paused_until=NULL, manual_pause_until=NULL, wait_for_fan_reply=0")
+print("[OK] All pauses cleared on boot")
+
 _env_refresh = os.environ.get('FANVUE_REFRESH_TOKEN', '').strip()
 if _env_refresh:
     existing = load_token('refresh_token')
@@ -1835,8 +1746,8 @@ if bot:
             send_telegram(
                 "🤖 <b>Jazmin Bot v8.2 indult ✅</b>\n\n"
                 "🔒 Safe mode: <b>ON</b>\n"
-                "🛑 Spam fix: kézi üzenet csak egyszer értesít\n"
-                "🔘 Buttons: pause/unpause javítva (új fanoknál is működik)\n\n"
+                "✅ Minden pause törölve — bot frissen indul\n"
+                "💬 Csak boot utáni üzenetekre válaszol\n\n"
                 "Kapcsold ki a safe mode-ot: /safe_off"
             )
     except Exception as e:
