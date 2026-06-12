@@ -508,6 +508,32 @@ def is_fan_paused(chat_id):
     return bool(profile and profile.get('is_paused'))
 
 
+def check_for_manual_message(chat_id, fan_name, api_messages):
+    """Detects messages Rafael sent manually, saves them, starts 2-min silent window."""
+    if not api_messages:
+        return False
+    now = datetime.now(timezone.utc)
+    found_manual = False
+    for msg in api_messages:
+        sender_uuid = (msg.get('sender') or {}).get('uuid', '')
+        if sender_uuid != MY_UUID:
+            continue
+        if msg.get('type', '') == 'AUTOMATED_NEW_FOLLOWER':
+            continue
+        msg_time_str = msg.get('sentAt') or msg.get('createdAt') or msg.get('timestamp') or ''
+        msg_dt = parse_timestamp(msg_time_str)
+        if not msg_dt or msg_dt <= BOOT_TIME_UTC:
+            continue
+        if (now - msg_dt) > timedelta(minutes=5):
+            continue
+        msg_id = msg.get('uuid') or ''
+        text = (msg.get('text') or '').strip()
+        save_message_to_db(msg_id, chat_id, fan_name, MY_UUID, text, msg_time_str, is_mine=True)
+        set_manual_takeover(chat_id)
+        found_manual = True
+    return found_manual
+
+
 
     """
     Detects messages Rafael sent himself (not via the bot) and saves them to
