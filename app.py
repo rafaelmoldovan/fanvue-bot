@@ -136,11 +136,14 @@ def db_query(query, params=(), fetch_one=False):
 
 
 # ========== TOKEN ==========
+def save_token(key, value):
+    db_query('INSERT OR REPLACE INTO tokens (key, value) VALUES (?, ?)', (key, value))
+
+
 def get_safe_mode():
     """Reads safe mode from DB — works across all gunicorn workers."""
     row = db_query('SELECT value FROM tokens WHERE key = ?', ('safe_mode',), fetch_one=True)
     if row is None:
-        # First boot — default ON, save it
         db_query('INSERT OR REPLACE INTO tokens (key, value) VALUES (?, ?)', ('safe_mode', 'on'))
         return True
     return row['value'] == 'on'
@@ -149,7 +152,6 @@ def get_safe_mode():
 def set_safe_mode(on: bool):
     db_query('INSERT OR REPLACE INTO tokens (key, value) VALUES (?, ?)',
              ('safe_mode', 'on' if on else 'off'))
-    db_query('INSERT OR REPLACE INTO tokens (key, value) VALUES (?, ?)', (key, value))
 
 
 def load_token(key):
