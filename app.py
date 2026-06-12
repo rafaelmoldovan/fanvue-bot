@@ -53,9 +53,22 @@ POLL_INTERVAL  = 20
 BATCH_WINDOW   = 60        # seconds to wait before firing a reply batch
 MANUAL_TAKEOVER_WINDOW = timedelta(minutes=2)  # bot stays silent this long after Rafael's manual message
 
-DB_PATH = os.environ.get('DB_PATH', '/data/bot_data.db')
-if not os.path.exists('/data'):
-    DB_PATH = 'bot_data.db'
+def _resolve_db_path():
+    custom = os.environ.get('DB_PATH', '').strip()
+    if custom:
+        return custom
+    try:
+        os.makedirs('/data', exist_ok=True)
+        test = '/data/.write_test'
+        with open(test, 'w') as f:
+            f.write('ok')
+        os.remove(test)
+        return '/data/bot_data.db'
+    except Exception:
+        return 'bot_data.db'
+
+DB_PATH = _resolve_db_path()
+print(f"[DB] Using path: {DB_PATH}")
 
 # ========== SAFE MODE (stored in DB so all gunicorn workers share state) ==========
 
@@ -808,6 +821,7 @@ polling_active = False
 def poll_loop():
     global polling_active
     polling_active = True
+    consecutive_errors = 0
     while polling_active:
         try:
             if get_fanvue_token():
@@ -815,12 +829,18 @@ def poll_loop():
                 scheduled, status = process_new_messages()
                 if sent > 0 or scheduled > 0:
                     print(f"[{datetime.now()}] Sent={sent} Scheduled={scheduled}")
+                consecutive_errors = 0
             else:
-                print(f"[{datetime.now()}] No valid token")
+                print(f"[{datetime.now()}] No valid token — skipping poll")
         except Exception as e:
-            print(f"[{datetime.now()}] Poll error: {e}")
-            send_telegram_error(f"Poll loop error: {e}")
-        time.sleep(POLL_INTERVAL)
+            consecutive_errors += 1
+            print(f"[{datetime.now()}] Poll error #{consecutive_errors}: {e}")
+            if consecutive_errors <= 3:
+                send_telegram_error(f"Poll loop error #{consecutive_errors}: {e}")
+        try:
+            time.sleep(POLL_INTERVAL)
+        except Exception:
+            pass
 
 
 def start_polling():
@@ -907,18 +927,30 @@ def stop_poll():
 
 
 # ========== INIT & BOOT ==========
-init_db()
+try:
+    init_db()
+    print(f"[OK] DB initialized at {DB_PATH}")
+except Exception as _e:
+    print(f"[ERROR] init_db failed: {_e}")
 
-_env_refresh = os.environ.get('FANVUE_REFRESH_TOKEN', '').strip()
-if _env_refresh:
-    existing = load_token('refresh_token')
-    if not existing or existing != _env_refresh:
-        save_token('refresh_token', _env_refresh)
-        refresh_fanvue_token()
-        print("[OK] Auto-loaded refresh token from env")
+try:
+    _env_refresh = os.environ.get('FANVUE_REFRESH_TOKEN', '').strip()
+    if _env_refresh:
+        existing = load_token('refresh_token')
+        if not existing or existing != _env_refresh:
+            save_token('refresh_token', _env_refresh)
+            refresh_fanvue_token()
+            print("[OK] Auto-loaded refresh token from env")
+    else:
+        print("[WARN] FANVUE_REFRESH_TOKEN env var not set — set it in Railway variables")
+except Exception as _e:
+    print(f"[ERROR] Token boot failed: {_e}")
 
-start_polling()
-print("[OK] Polling auto-started on boot")
+try:
+    start_polling()
+    print("[OK] Polling auto-started on boot")
+except Exception as _e:
+    print(f"[ERROR] start_polling failed: {_e}")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
