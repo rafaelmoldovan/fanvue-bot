@@ -57,8 +57,7 @@ DB_PATH = os.environ.get('DB_PATH', '/data/bot_data.db')
 if not os.path.exists('/data'):
     DB_PATH = 'bot_data.db'
 
-# ========== SAFE MODE (on by default — bot processes everything but sends nothing) ==========
-SAFE_MODE = True  # always starts True; disable via GET /safe_mode/off
+# ========== SAFE MODE (stored in DB so all gunicorn workers share state) ==========
 
 
 # ========== TELEGRAM (ERRORS ONLY) ==========
@@ -124,7 +123,19 @@ def db_query(query, params=(), fetch_one=False):
 
 
 # ========== TOKEN ==========
-def save_token(key, value):
+def get_safe_mode():
+    """Reads safe mode from DB — works across all gunicorn workers."""
+    row = db_query('SELECT value FROM tokens WHERE key = ?', ('safe_mode',), fetch_one=True)
+    if row is None:
+        # First boot — default ON, save it
+        db_query('INSERT OR REPLACE INTO tokens (key, value) VALUES (?, ?)', ('safe_mode', 'on'))
+        return True
+    return row['value'] == 'on'
+
+
+def set_safe_mode(on: bool):
+    db_query('INSERT OR REPLACE INTO tokens (key, value) VALUES (?, ?)',
+             ('safe_mode', 'on' if on else 'off'))
     db_query('INSERT OR REPLACE INTO tokens (key, value) VALUES (?, ?)', (key, value))
 
 
@@ -700,7 +711,7 @@ _fan_sending = set()
 
 
 def send_due_batches():
-    if SAFE_MODE:
+    if get_safe_mode():
         return 0  # safe mode on — process & batch everything, but send nothing
     due = get_due_batches()
     if not due:
@@ -830,16 +841,14 @@ def stop_polling():
 # ========== FLASK ROUTES ==========
 @app.route('/safe_mode/off')
 def safe_mode_off():
-    global SAFE_MODE
-    SAFE_MODE = False
+    set_safe_mode(False)
     print(f"[{datetime.now()}] SAFE MODE OFF — bot will now send messages")
     return {"safe_mode": False, "status": "Bot is now live and sending messages"}, 200
 
 
 @app.route('/safe_mode/on')
 def safe_mode_on():
-    global SAFE_MODE
-    SAFE_MODE = True
+    set_safe_mode(True)
     print(f"[{datetime.now()}] SAFE MODE ON — bot silenced")
     return {"safe_mode": True, "status": "Bot silenced — processing only, no sends"}, 200
 
@@ -882,7 +891,7 @@ def status():
     return {
         "token_valid": get_fanvue_token() is not None,
         "polling_active": polling_active,
-        "safe_mode": SAFE_MODE,
+        "safe_mode": get_safe_mode(),
         "pending_batches": pending['c'] if pending else 0,
     }, 200
 
