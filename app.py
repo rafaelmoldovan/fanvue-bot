@@ -405,7 +405,7 @@ def get_full_history_from_db(chat_id, limit=100):
 
 # ========== FAN FACTS (memory of details about each fan) ==========
 def extract_facts_with_gpt(chat_id, fan_text):
-    if not fan_text or len(fan_text.strip()) < 5:
+    if not fan_text or len(fan_text.strip()) < 10:
         return
     try:
         system = (
@@ -419,7 +419,7 @@ def extract_facts_with_gpt(chat_id, fan_text):
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
             json={
-                "model": "gpt-4.1",
+                "model": "gpt-4.1-mini",
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": fan_text}
@@ -427,7 +427,7 @@ def extract_facts_with_gpt(chat_id, fan_text):
                 "max_tokens": 200,
                 "temperature": 0.1,
             },
-            timeout=15
+            timeout=20
         )
         if r.status_code == 200:
             raw = r.json()['choices'][0]['message']['content'].strip()
@@ -638,7 +638,7 @@ def build_system_prompt(chat_id, fan_name, real_name, fan_facts_list, db_history
 
     if db_history:
         prompt += "TELJES EDDIGI BESZÉLGETÉS (legújabb alul — OLVASD EL MINDET, és NE ismételd a saját korábbi mondataidat):\n"
-        for msg in db_history[-80:]:
+        for msg in db_history[-20:]:
             sender = "Jázmin" if msg.get('is_mine') else display_name
             text = (msg.get('text') or '').strip()
             if text:
@@ -659,31 +659,41 @@ def build_system_prompt(chat_id, fan_name, real_name, fan_facts_list, db_history
 
 # ========== GPT REPLY ==========
 def ask_openai(system_prompt, user_text):
-    try:
-        r = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": OPENAI_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text}
-                ],
-                "max_tokens": 120,
-                "temperature": 0.9,
-                "presence_penalty": 0.5,
-                "frequency_penalty": 0.4,
-            },
-            timeout=30
-        )
-        if r.status_code == 200:
-            reply = r.json()['choices'][0]['message']['content'].strip()
-            if reply.startswith('"') and reply.endswith('"'):
-                reply = reply[1:-1].strip()
-            return reply
-        send_telegram_error(f"OpenAI error {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        send_telegram_error(f"OpenAI request failed: {e}")
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": OPENAI_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text}
+                    ],
+                    "max_tokens": 120,
+                    "temperature": 0.9,
+                    "presence_penalty": 0.5,
+                    "frequency_penalty": 0.4,
+                },
+                timeout=30
+            )
+            if r.status_code == 200:
+                reply = r.json()['choices'][0]['message']['content'].strip()
+                if reply.startswith('"') and reply.endswith('"'):
+                    reply = reply[1:-1].strip()
+                return reply
+            elif r.status_code == 429:
+                wait = 10 * (attempt + 1)
+                print(f"[WARN] OpenAI 429 rate limit — waiting {wait}s (attempt {attempt+1}/3)")
+                time.sleep(wait)
+                continue
+            else:
+                send_telegram_error(f"OpenAI error {r.status_code}: {r.text[:200]}")
+                return ""
+        except Exception as e:
+            send_telegram_error(f"OpenAI request failed: {e}")
+            return ""
+    send_telegram_error("OpenAI 429 — all 3 retries failed, skipping reply")
     return ""
 
 
