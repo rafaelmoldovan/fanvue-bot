@@ -113,6 +113,13 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS fan_facts (
         id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, fact_type TEXT,
         fact_value TEXT, discovered_at TEXT)''')
+    # Migration: add is_paused column
+    try:
+        c.execute('ALTER TABLE fan_profiles ADD COLUMN is_paused INTEGER DEFAULT 0')
+        conn.commit()
+        print("[DB] Migrated fan_profiles: added is_paused column")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -358,13 +365,23 @@ def is_emoji_or_nonsense(text):
 
 
 def get_time_context():
-    hour = get_budapest_now().hour
-    if   6  <= hour < 11: return "Most reggel van (6-11)."
-    elif 11 <= hour < 14: return "Most dél van (11-14)."
-    elif 14 <= hour < 18: return "Most délután van (14-18)."
-    elif 18 <= hour < 22: return "Most este van (18-22)."
-    elif 2  <= hour < 6:  return "Most hajnal van (02-06), valószínűleg alszol."
-    return "Most éjjel van (22-02)."
+    now = get_budapest_now()
+    hour = now.hour
+    weekday = now.weekday()  # 0=Monday, 6=Sunday
+    day_names = ["hétfő", "kedd", "szerda", "csütörtök", "péntek", "szombat", "vasárnap"]
+    day_hu = day_names[weekday]
+    time_str = now.strftime("%H:%M")
+
+    if weekday == 6:  # Sunday
+        schedule = "Ma vasárnap van — nem dolgozol, szabad napod van. Pihenhetsz, csinálhatsz amit akarsz."
+    elif 8 <= hour < 18:
+        schedule = f"Most {day_hu} van, {time_str} — épp munkában vagy a menhelyen (8-18h között dolgozol)."
+    elif hour < 8:
+        schedule = f"Most {day_hu} van, {time_str} — még nem kezdtél el dolgozni, reggel indulsz a menhelyre."
+    else:
+        schedule = f"Most {day_hu} van, {time_str} — már hazaértél a munkából, este van."
+
+    return schedule
 
 
 # ========== MEMORY: FULL SQLITE HISTORY ==========
@@ -486,7 +503,12 @@ def is_in_manual_takeover(chat_id):
     return datetime.now(timezone.utc) < until_dt
 
 
-def check_for_manual_message(chat_id, fan_name, api_messages):
+def is_fan_paused(chat_id):
+    profile = db_query("SELECT is_paused FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True)
+    return bool(profile and profile.get('is_paused'))
+
+
+
     """
     Detects messages Rafael sent himself (not via the bot) and saves them to
     history + (re)starts the 2-minute silent window.
@@ -580,7 +602,7 @@ def get_greeting_instruction(db_history, fan_msg_time_str):
 def build_system_prompt(chat_id, fan_name, real_name, fan_facts_list, db_history, time_ctx, fan_msg_time_str):
     display_name = real_name or "a fan"
     prompt = JAZMIN_PERSONALITY + "\n\n"
-    prompt += f"KONTEXTUS:\n- {time_ctx}\n\n"
+    prompt += f"KONTEXTUS:\n- {time_ctx}\n- Ha a fan kérdezi mit csinálsz / hol vagy — ez alapján válaszolj természetesen. Ha munkában vagy, az állatokkal foglalkozol. Ha szabad napod van (vasárnap), pihensz/lazítasz. Ha este van, otthon vagy.\n\n"
 
     if fan_facts_list:
         prompt += "AMIT TUDSZ ERRŐL A FANRÓL (ne kérdezd újra!):\n"
@@ -678,9 +700,9 @@ def process_new_messages():
                         daemon=True
                     ).start()
 
-            # === MANUAL TAKEOVER DETECTION ===
+            # === MANUAL TAKEOVER / PAUSED CHECK ===
             check_for_manual_message(chat_id, fan_name, api_messages)
-            if is_in_manual_takeover(chat_id):
+            if is_in_manual_takeover(chat_id) or is_fan_paused(chat_id):
                 continue
 
             # === FIND LATEST UNPROCESSED FAN MESSAGE ===
@@ -707,7 +729,7 @@ def process_new_messages():
                     continue
 
             existing = db_query('SELECT 1 FROM messages WHERE msg_id=? AND was_replied=1', (msg_id,), fetch_one=True)
-            already_batched = db_query('SELECT 1 FROM scheduled_replies WHERE fan_msg_id=? AND status=?', (msg_id, 'pending'), fetch_one=True)
+            already_batched = db_query('SELECT 1 FROM scheduled_replies WHERE chat_id=? AND status=?', (chat_id, 'pending'), fetch_one=True)
             if existing or already_batched:
                 continue
 
@@ -748,7 +770,7 @@ def send_due_batches():
                 continue
             already_sent_to.add(chat_id)
 
-            if is_in_manual_takeover(chat_id):
+            if is_in_manual_takeover(chat_id) or is_fan_paused(chat_id):
                 db_query("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,))
                 continue
 
@@ -787,7 +809,11 @@ def send_due_batches():
             if not reply or not reply.strip():
                 continue
 
-            mark_batch_sent(batch_id)
+            # Atomic claim — only proceed if batch is still pending (prevents double-send across workers)
+            db_query("UPDATE scheduled_replies SET status='sending' WHERE id=? AND status='pending'", (batch_id,))
+            claimed = db_query("SELECT 1 FROM scheduled_replies WHERE id=? AND status='sending'", (batch_id,), fetch_one=True)
+            if not claimed:
+                continue  # another worker already claimed it
             db_query('UPDATE messages SET was_replied=1 WHERE msg_id=?', (fan_msg_id,))
             _fan_sending.add(chat_id)
 
@@ -799,6 +825,7 @@ def send_due_batches():
             time.sleep(send_delay)
 
             if send_fanvue_message(chat_id, reply):
+                mark_batch_sent(batch_id)
                 now_iso = datetime.now().isoformat()
                 save_message_to_db(
                     f"bot_{now_iso}_{chat_id}", chat_id, fan_name, MY_UUID, reply, now_iso, is_mine=True)
@@ -861,7 +888,32 @@ def stop_polling():
 
 
 # ========== FLASK ROUTES ==========
-@app.route('/safe_mode/off')
+@app.route('/pause/<chat_id>')
+def pause_fan(chat_id):
+    db_query("INSERT OR IGNORE INTO fan_profiles (chat_id, fan_name, total_messages, last_interaction, is_paused) VALUES (?, 'unknown', 0, ?, 0)",
+             (chat_id, datetime.now().isoformat()))
+    db_query("UPDATE fan_profiles SET is_paused=1 WHERE chat_id=?", (chat_id,))
+    db_query("UPDATE scheduled_replies SET status='cancelled' WHERE chat_id=? AND status='pending'", (chat_id,))
+    profile = db_query("SELECT fan_name FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True)
+    name = profile['fan_name'] if profile else chat_id
+    return {"paused": True, "fan": name, "chat_id": chat_id}, 200
+
+
+@app.route('/resume/<chat_id>')
+def resume_fan(chat_id):
+    db_query("UPDATE fan_profiles SET is_paused=0 WHERE chat_id=?", (chat_id,))
+    profile = db_query("SELECT fan_name FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True)
+    name = profile['fan_name'] if profile else chat_id
+    return {"paused": False, "fan": name, "chat_id": chat_id}, 200
+
+
+@app.route('/fans')
+def list_fans():
+    fans = db_query("SELECT chat_id, fan_name, handle, is_paused, total_messages, last_interaction FROM fan_profiles ORDER BY last_interaction DESC") or []
+    return {"fans": fans, "total": len(fans)}, 200
+
+
+
 def safe_mode_off():
     set_safe_mode(False)
     print(f"[{datetime.now()}] SAFE MODE OFF — bot will now send messages")
