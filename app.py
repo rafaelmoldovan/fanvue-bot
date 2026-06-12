@@ -87,6 +87,13 @@ def init_db():
         chat_id TEXT PRIMARY KEY, fan_name TEXT, handle TEXT,
         total_messages INTEGER DEFAULT 0, last_interaction TEXT,
         manual_takeover_until TEXT)''')
+    # Migration: add manual_takeover_until to existing tables that predate this column
+    try:
+        c.execute('ALTER TABLE fan_profiles ADD COLUMN manual_takeover_until TEXT')
+        conn.commit()
+        print("[DB] Migrated fan_profiles: added manual_takeover_until column")
+    except Exception:
+        pass  # column already exists, ignore
     c.execute('''CREATE TABLE IF NOT EXISTS scheduled_replies (
         id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, fan_name TEXT,
         fan_msg_id TEXT, fan_text TEXT, scheduled_time TEXT,
