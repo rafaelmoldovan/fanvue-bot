@@ -1,993 +1,134 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Jázmin Control</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jázmin · Control</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-
-  :root {
-    --bg:       #0a0a0f;
-    --surface:  #111118;
-    --card:     #16161f;
-    --border:   #2a2a38;
-    --border2:  #1e1e2a;
-    --text:     #e8e8f0;
-    --muted:    #6b6b80;
-    --accent:   #7c6af7;
-    --accent2:  #9d8fff;
-    --green:    #22c55e;
-    --red:      #ef4444;
-    --orange:   #f97316;
-    --blue:     #3b82f6;
-    --pink:     #ec4899;
+  :root{
+    --bg:#070b10; --panel:#0d1620; --panel2:#101d2a; --line:#15293a;
+    --cyan:#27d3ff; --cyan-dim:#0e7e9e; --text:#cfe8f5; --muted:#5d7a8c;
+    --green:#2bd576; --amber:#ffb84d; --red:#ff5d6c; --gold:#ffd166;
   }
-
-  body {
-    font-family: 'Inter', sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-    font-size: 14px;
-  }
-
-  /* ── LAYOUT ── */
-  .layout { display: flex; min-height: 100vh; }
-
-  /* ── SIDEBAR ── */
-  .sidebar {
-    width: 240px;
-    background: var(--surface);
-    border-right: 1px solid var(--border2);
-    display: flex;
-    flex-direction: column;
-    position: fixed;
-    top: 0; left: 0; bottom: 0;
-    z-index: 100;
-    padding: 24px 16px;
-  }
-  .logo {
-    display: flex; align-items: center; gap: 10px;
-    padding: 0 8px 24px;
-    border-bottom: 1px solid var(--border2);
-    margin-bottom: 24px;
-  }
-  .logo-icon {
-    width: 32px; height: 32px;
-    background: linear-gradient(135deg, var(--accent), var(--pink));
-    border-radius: 8px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 16px;
-  }
-  .logo-text { font-weight: 700; font-size: 15px; }
-  .logo-sub  { font-size: 10px; color: var(--muted); margin-top: 1px; }
-
-  .nav-label { font-size: 10px; font-weight: 600; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; padding: 0 8px; margin-bottom: 6px; }
-  .nav-item {
-    display: flex; align-items: center; gap: 10px;
-    padding: 9px 10px;
-    border-radius: 8px;
-    color: var(--muted);
-    cursor: pointer;
-    transition: all 0.15s;
-    font-size: 13.5px;
-    margin-bottom: 2px;
-    border: none; background: transparent; width: 100%; text-align: left;
-  }
-  .nav-item:hover { background: var(--card); color: var(--text); }
-  .nav-item.active { background: rgba(124,106,247,0.15); color: var(--accent2); }
-  .nav-item .icon { width: 18px; text-align: center; font-size: 15px; }
-
-  .sidebar-bottom { margin-top: auto; }
-  .safe-pill {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 12px;
-    background: var(--card);
-    border: 1px solid var(--border2);
-    border-radius: 10px;
-    margin-bottom: 8px;
-  }
-  .safe-pill .label { font-size: 12px; font-weight: 500; }
-  .toggle {
-    width: 40px; height: 22px;
-    background: var(--border);
-    border-radius: 11px;
-    position: relative;
-    cursor: pointer;
-    transition: background 0.2s;
-    border: none;
-    flex-shrink: 0;
-  }
-  .toggle.on  { background: var(--green); }
-  .toggle.off { background: var(--red); }
-  .toggle::after {
-    content: '';
-    position: absolute;
-    width: 16px; height: 16px;
-    background: white;
-    border-radius: 50%;
-    top: 3px; left: 3px;
-    transition: transform 0.2s;
-  }
-  .toggle.on::after { transform: translateX(18px); }
-
-  /* ── MAIN ── */
-  .main { margin-left: 240px; flex: 1; padding: 28px 32px; max-width: 1200px; }
-
-  /* ── HEADER ── */
-  .page-header {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 28px;
-  }
-  .page-title { font-size: 22px; font-weight: 700; }
-  .page-sub   { font-size: 13px; color: var(--muted); margin-top: 3px; }
-  .header-actions { display: flex; gap: 10px; }
-
-  /* ── STATS ── */
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 14px;
-    margin-bottom: 28px;
-  }
-  .stat {
-    background: var(--card);
-    border: 1px solid var(--border2);
-    border-radius: 12px;
-    padding: 18px 20px;
-  }
-  .stat-val { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
-  .stat-lbl { font-size: 12px; color: var(--muted); font-weight: 500; }
-  .stat-val.green  { color: var(--green); }
-  .stat-val.purple { color: var(--accent2); }
-  .stat-val.orange { color: var(--orange); }
-  .stat-val.blue   { color: var(--blue); }
-
-  /* ── BUTTONS ── */
-  .btn {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 8px 16px;
-    border-radius: 8px;
-    border: none;
-    font-family: 'Inter', sans-serif;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-    white-space: nowrap;
-  }
-  .btn-primary  { background: var(--accent); color: white; }
-  .btn-primary:hover { background: var(--accent2); }
-  .btn-ghost    { background: var(--card); border: 1px solid var(--border); color: var(--text); }
-  .btn-ghost:hover { border-color: var(--accent); color: var(--accent2); }
-  .btn-danger   { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: var(--red); }
-  .btn-danger:hover { background: rgba(239,68,68,0.2); }
-  .btn-success  { background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3); color: var(--green); }
-  .btn-success:hover { background: rgba(34,197,94,0.2); }
-  .btn-sm { padding: 5px 12px; font-size: 12px; }
-
-  /* ── SEARCH ── */
-  .search-bar {
-    display: flex; gap: 10px; margin-bottom: 20px; align-items: center;
-  }
-  .search-input {
-    flex: 1;
-    background: var(--card);
-    border: 1px solid var(--border2);
-    border-radius: 8px;
-    color: var(--text);
-    font-family: 'Inter', sans-serif;
-    font-size: 13.5px;
-    padding: 9px 14px;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-  .search-input:focus { border-color: var(--accent); }
-  .search-input::placeholder { color: var(--muted); }
-
-  .filter-tabs { display: flex; gap: 6px; }
-  .filter-tab {
-    padding: 6px 14px;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--muted);
-    font-family: 'Inter', sans-serif;
-    transition: all 0.15s;
-  }
-  .filter-tab.active { background: var(--accent); border-color: var(--accent); color: white; }
-  .filter-tab:hover:not(.active) { border-color: var(--accent); color: var(--accent2); }
-
-  /* ── FAN TABLE ── */
-  .fan-table { width: 100%; border-collapse: separate; border-spacing: 0; }
-  .fan-table th {
-    text-align: left;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--muted);
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-    padding: 0 16px 10px;
-    border-bottom: 1px solid var(--border2);
-  }
-  .fan-row {
-    cursor: pointer;
-    transition: background 0.1s;
-  }
-  .fan-row:hover td { background: rgba(124,106,247,0.04); }
-  .fan-row td {
-    padding: 13px 16px;
-    border-bottom: 1px solid var(--border2);
-    vertical-align: middle;
-  }
-  .fan-name-cell { display: flex; align-items: center; gap: 12px; }
-  .avatar {
-    width: 36px; height: 36px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, var(--accent), var(--pink));
-    display: flex; align-items: center; justify-content: center;
-    font-size: 13px; font-weight: 700; color: white;
-    flex-shrink: 0;
-  }
-  .fan-name { font-weight: 600; font-size: 13.5px; }
-  .fan-handle { font-size: 12px; color: var(--muted); margin-top: 1px; }
-  .badge {
-    display: inline-flex; align-items: center; gap: 4px;
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: 600;
-  }
-  .badge-active  { background: rgba(34,197,94,0.12);  color: var(--green); }
-  .badge-paused  { background: rgba(239,68,68,0.12);  color: var(--red); }
-  .badge-manual  { background: rgba(249,115,22,0.12); color: var(--orange); }
-  .badge-dot {
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: currentColor;
-  }
-
-  .note-preview {
-    font-size: 11.5px;
-    color: var(--accent2);
-    background: rgba(124,106,247,0.08);
-    padding: 2px 8px;
-    border-radius: 4px;
-    max-width: 200px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .no-note { font-size: 11.5px; color: var(--muted); }
-
-  .action-btns { display: flex; gap: 6px; }
-
-  /* ── PANEL (drawer) ── */
-  .overlay {
-    position: fixed; inset: 0;
-    background: rgba(0,0,0,0.6);
-    z-index: 200;
-    display: none;
-    backdrop-filter: blur(4px);
-  }
-  .overlay.open { display: block; }
-
-  .panel {
-    position: fixed;
-    top: 0; right: 0; bottom: 0;
-    width: 480px;
-    background: var(--surface);
-    border-left: 1px solid var(--border);
-    z-index: 201;
-    transform: translateX(100%);
-    transition: transform 0.25s cubic-bezier(0.4,0,0.2,1);
-    display: flex; flex-direction: column;
-    overflow: hidden;
-  }
-  .panel.open { transform: translateX(0); }
-
-  .panel-header {
-    padding: 24px 24px 20px;
-    border-bottom: 1px solid var(--border2);
-    display: flex; align-items: flex-start; justify-content: space-between;
-    flex-shrink: 0;
-  }
-  .panel-fan-info { display: flex; align-items: center; gap: 14px; }
-  .panel-avatar {
-    width: 48px; height: 48px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, var(--accent), var(--pink));
-    display: flex; align-items: center; justify-content: center;
-    font-size: 18px; font-weight: 700; color: white;
-  }
-  .panel-name  { font-size: 17px; font-weight: 700; }
-  .panel-handle { font-size: 12px; color: var(--muted); margin-top: 3px; }
-
-  .close-btn {
-    background: var(--card); border: 1px solid var(--border2);
-    border-radius: 8px; width: 32px; height: 32px;
-    display: flex; align-items: center; justify-content: center;
-    cursor: pointer; color: var(--muted); font-size: 18px;
-    flex-shrink: 0; transition: all 0.15s;
-  }
-  .close-btn:hover { color: var(--text); border-color: var(--border); }
-
-  .panel-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
-  .panel-footer {
-    padding: 16px 24px;
-    border-top: 1px solid var(--border2);
-    display: flex; gap: 10px;
-    flex-shrink: 0;
-  }
-
-  .section-title {
-    font-size: 11px; font-weight: 600; color: var(--muted);
-    text-transform: uppercase; letter-spacing: 0.5px;
-    margin-bottom: 10px; margin-top: 20px;
-  }
-  .section-title:first-child { margin-top: 0; }
-
-  .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .info-card {
-    background: var(--card); border: 1px solid var(--border2);
-    border-radius: 8px; padding: 10px 12px;
-  }
-  .info-card .val { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
-  .info-card .lbl { font-size: 11px; color: var(--muted); }
-
-  /* Behavior presets */
-  .presets-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
-  .preset {
-    background: var(--card); border: 1px solid var(--border2);
-    border-radius: 8px; padding: 10px 12px;
-    cursor: pointer; transition: all 0.15s;
-    text-align: left;
-  }
-  .preset:hover { border-color: var(--accent); background: rgba(124,106,247,0.06); }
-  .preset.selected { border-color: var(--accent); background: rgba(124,106,247,0.12); }
-  .preset-emoji { font-size: 18px; margin-bottom: 4px; }
-  .preset-name { font-size: 12px; font-weight: 600; }
-  .preset-desc { font-size: 11px; color: var(--muted); margin-top: 2px; }
-
-  .directive-input {
-    width: 100%;
-    background: var(--card);
-    border: 1px solid var(--border2);
-    border-radius: 8px;
-    color: var(--text);
-    font-family: 'Inter', sans-serif;
-    font-size: 13px;
-    padding: 12px 14px;
-    outline: none;
-    resize: none;
-    height: 100px;
-    transition: border-color 0.15s;
-    line-height: 1.5;
-  }
-  .directive-input:focus { border-color: var(--accent); }
-  .directive-input::placeholder { color: var(--muted); }
-
-  /* Facts */
-  .facts-list { display: flex; flex-wrap: wrap; gap: 6px; }
-  .fact-tag {
-    background: var(--card); border: 1px solid var(--border2);
-    border-radius: 6px; padding: 4px 10px;
-    font-size: 11.5px; color: var(--text);
-  }
-  .fact-tag span { color: var(--muted); margin-right: 4px; }
-
-  /* Status card */
-  .status-card {
-    background: var(--card); border: 1px solid var(--border2);
-    border-radius: 10px; padding: 14px 16px;
-    display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 10px;
-  }
-  .status-card .label { font-size: 13px; font-weight: 500; }
-  .status-card .desc  { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
-
-  /* Toast */
-  .toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 999; display: flex; flex-direction: column; gap: 8px; }
-  .toast {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 10px; padding: 12px 16px;
-    font-size: 13px; font-weight: 500;
-    display: flex; align-items: center; gap: 10px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-    animation: toastIn 0.25s ease;
-    min-width: 240px;
-  }
-  .toast.success { border-color: rgba(34,197,94,0.3); }
-  .toast.error   { border-color: rgba(239,68,68,0.3); }
-  .toast-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .toast.success .toast-dot { background: var(--green); }
-  .toast.error   .toast-dot { background: var(--red); }
-  @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-
-  .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
-  .empty-icon { font-size: 40px; margin-bottom: 12px; }
-  .empty-text { font-size: 14px; }
-
-  @media (max-width: 900px) {
-    .sidebar { display: none; }
-    .main { margin-left: 0; padding: 20px 16px; }
-    .stats-grid { grid-template-columns: repeat(2,1fr); }
-    .panel { width: 100%; }
-  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 70% -10%,#0c1a26 0,var(--bg) 60%);
+       color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
+  header{display:flex;align-items:center;gap:18px;padding:16px 22px;border-bottom:1px solid var(--line);
+         position:sticky;top:0;background:rgba(7,11,16,.92);backdrop-filter:blur(8px);z-index:5}
+  .logo{font-weight:700;letter-spacing:3px;color:var(--cyan);font-size:18px}
+  .logo small{color:var(--muted);letter-spacing:2px;font-weight:400;font-size:11px;margin-left:8px}
+  .stats{display:flex;gap:10px;margin-left:auto;flex-wrap:wrap}
+  .pill{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:6px 14px;
+        font-size:12px;display:flex;gap:7px;align-items:center}
+  .pill b{color:var(--cyan);font-size:14px}
+  .dot{width:8px;height:8px;border-radius:50%}
+  .safe{cursor:pointer;user-select:none}
+  .safe.on{border-color:var(--amber)} .safe.off{border-color:var(--green)}
+  .wrap{padding:20px 22px;max-width:1100px;margin:0 auto}
+  .toolbar{display:flex;gap:12px;margin-bottom:16px;align-items:center}
+  input.search{flex:1;background:var(--panel);border:1px solid var(--line);color:var(--text);
+        padding:11px 14px;border-radius:10px;outline:none;font-size:14px}
+  input.search:focus{border-color:var(--cyan-dim)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+  .card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);
+        border-radius:14px;padding:15px;transition:.15s}
+  .card:hover{border-color:var(--cyan-dim)}
+  .card.ppv{border-color:var(--gold);box-shadow:0 0 0 1px rgba(255,209,102,.25)}
+  .row1{display:flex;align-items:center;gap:10px}
+  .name{font-weight:600;font-size:15px}
+  .handle{color:var(--muted);font-size:12px}
+  .badges{margin-left:auto;display:flex;gap:6px}
+  .badge{font-size:10px;padding:3px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:.5px}
+  .b-ppv{background:rgba(255,209,102,.14);color:var(--gold)}
+  .b-paused{background:rgba(255,93,108,.14);color:var(--red)}
+  .b-active{background:rgba(43,213,118,.12);color:var(--green)}
+  .meta{display:flex;gap:16px;color:var(--muted);font-size:12px;margin:10px 0}
+  .actions{display:flex;gap:8px;flex-wrap:wrap}
+  button{background:var(--panel);border:1px solid var(--line);color:var(--text);
+        padding:8px 12px;border-radius:9px;cursor:pointer;font-size:12px;transition:.12s}
+  button:hover{border-color:var(--cyan);color:var(--cyan)}
+  button.gold:hover{border-color:var(--gold);color:var(--gold)}
+  button.red:hover{border-color:var(--red);color:var(--red)}
+  button.green:hover{border-color:var(--green);color:var(--green)}
+  .note{margin-top:10px;width:100%;background:#0a141d;border:1px solid var(--line);color:var(--text);
+        border-radius:9px;padding:8px 10px;font-size:12px;outline:none;resize:vertical;min-height:34px;font-family:inherit}
+  .empty{color:var(--muted);text-align:center;padding:50px}
+  .flash{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel2);
+        border:1px solid var(--cyan-dim);color:var(--cyan);padding:10px 18px;border-radius:10px;
+        opacity:0;transition:.3s;pointer-events:none}
+  .flash.show{opacity:1}
 </style>
 </head>
 <body>
-<div class="layout">
-
-  <!-- SIDEBAR -->
-  <aside class="sidebar">
-    <div class="logo">
-      <div class="logo-icon">💜</div>
-      <div>
-        <div class="logo-text">Jázmin</div>
-        <div class="logo-sub">Control Panel</div>
-      </div>
-    </div>
-
-    <div class="nav-label">Menu</div>
-    <button class="nav-item active" onclick="showView('fans')">
-      <span class="icon">👥</span> Fans
-    </button>
-    <button class="nav-item" onclick="showView('stats')">
-      <span class="icon">📊</span> Overview
-    </button>
-
-    <div class="sidebar-bottom">
-      <div class="safe-pill">
-        <div>
-          <div class="label" id="safe-label">Safe Mode</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px;" id="safe-desc">Bot is silenced</div>
-        </div>
-        <button class="toggle off" id="safe-toggle" onclick="toggleSafeMode()"></button>
-      </div>
-      <div style="font-size:11px;color:var(--muted);padding:0 4px;line-height:1.6;" id="system-status">
-        Loading...
-      </div>
-    </div>
-  </aside>
-
-  <!-- MAIN -->
-  <main class="main">
-
-    <!-- FANS VIEW -->
-    <div id="view-fans">
-      <div class="page-header">
-        <div>
-          <div class="page-title">Fans</div>
-          <div class="page-sub" id="fans-sub">Loading...</div>
-        </div>
-        <div class="header-actions">
-          <button class="btn btn-ghost" onclick="loadData()">↻ Refresh</button>
-        </div>
-      </div>
-
-      <div class="stats-grid">
-        <div class="stat">
-          <div class="stat-val purple" id="s-total">—</div>
-          <div class="stat-lbl">Total Fans</div>
-        </div>
-        <div class="stat">
-          <div class="stat-val green" id="s-sent">—</div>
-          <div class="stat-lbl">Sent Today</div>
-        </div>
-        <div class="stat">
-          <div class="stat-val orange" id="s-pending">—</div>
-          <div class="stat-lbl">Pending Replies</div>
-        </div>
-        <div class="stat">
-          <div class="stat-val blue" id="s-active">—</div>
-          <div class="stat-lbl">Active (not paused)</div>
-        </div>
-      </div>
-
-      <div class="search-bar">
-        <input class="search-input" type="text" id="search" placeholder="Search by name or handle..." oninput="filterFans()">
-        <div class="filter-tabs">
-          <button class="filter-tab active" onclick="setFilter('all',this)">All</button>
-          <button class="filter-tab" onclick="setFilter('active',this)">Active</button>
-          <button class="filter-tab" onclick="setFilter('paused',this)">Paused</button>
-        </div>
-      </div>
-
-      <table class="fan-table">
-        <thead>
-          <tr>
-            <th>Fan</th>
-            <th>Status</th>
-            <th>Messages</th>
-            <th>Last Active</th>
-            <th>AI Directive</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="fan-tbody">
-          <tr><td colspan="6"><div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Loading fans...</div></div></td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- OVERVIEW VIEW -->
-    <div id="view-stats" style="display:none;">
-      <div class="page-header">
-        <div>
-          <div class="page-title">Overview</div>
-          <div class="page-sub">System status at a glance</div>
-        </div>
-        <button class="btn btn-ghost" onclick="loadData()">↻ Refresh</button>
-      </div>
-      <div style="color:var(--muted);font-size:14px;padding:40px 0;">
-        Real-time system health. Auto-refreshes every 30 seconds.
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;max-width:600px;">
-        <div class="info-card">
-          <div class="val" id="ov-token" style="color:var(--green)">—</div>
-          <div class="lbl">Fanvue Token</div>
-        </div>
-        <div class="info-card">
-          <div class="val" id="ov-poll" style="color:var(--green)">—</div>
-          <div class="lbl">Poll Loop</div>
-        </div>
-        <div class="info-card">
-          <div class="val" id="ov-safe">—</div>
-          <div class="lbl">Safe Mode</div>
-        </div>
-        <div class="info-card">
-          <div class="val" id="ov-pending" style="color:var(--orange)">—</div>
-          <div class="lbl">Pending Batches</div>
-        </div>
-      </div>
-    </div>
-
-  </main>
+<header>
+  <div class="logo">⬡ JÁZMIN<small>CONTROL · v11</small></div>
+  <div class="stats" id="stats"></div>
+</header>
+<div class="wrap">
+  <div class="toolbar">
+    <input class="search" id="search" placeholder="search fans by name / handle…" oninput="render()">
+  </div>
+  <div class="grid" id="grid"></div>
 </div>
-
-<!-- FAN PANEL (drawer) -->
-<div class="overlay" id="overlay" onclick="closePanel()"></div>
-<div class="panel" id="panel">
-  <div class="panel-header">
-    <div class="panel-fan-info">
-      <div class="panel-avatar" id="p-avatar"></div>
-      <div>
-        <div class="panel-name" id="p-name"></div>
-        <div class="panel-handle" id="p-handle"></div>
-      </div>
-    </div>
-    <button class="close-btn" onclick="closePanel()">×</button>
-  </div>
-
-  <div class="panel-body">
-    <!-- Status controls -->
-    <div class="section-title">Chat Status</div>
-    <div class="status-card" id="p-status-card">
-      <div>
-        <div class="label" id="p-status-label">Active</div>
-        <div class="desc" id="p-status-desc">Bot is replying to this fan</div>
-      </div>
-      <button class="btn btn-sm" id="p-pause-btn" onclick="togglePanelPause()"></button>
-    </div>
-
-    <!-- Stats -->
-    <div class="section-title">Info</div>
-    <div class="info-grid">
-      <div class="info-card">
-        <div class="val" id="p-msgs">—</div>
-        <div class="lbl">Total Messages</div>
-      </div>
-      <div class="info-card">
-        <div class="val" id="p-last">—</div>
-        <div class="lbl">Last Active</div>
-      </div>
-    </div>
-
-    <!-- Known facts -->
-    <div class="section-title">What Jázmin knows</div>
-    <div class="facts-list" id="p-facts">
-      <span style="font-size:12px;color:var(--muted);">No facts saved yet</span>
-    </div>
-
-    <!-- Behavior presets -->
-    <div class="section-title">Behavior Presets</div>
-    <div class="presets-grid">
-      <div class="preset" onclick="applyPreset(this,'girlfriend')">
-        <div class="preset-emoji">💕</div>
-        <div class="preset-name">Girlfriend Mode</div>
-        <div class="preset-desc">Warm, personal, flirty</div>
-      </div>
-      <div class="preset" onclick="applyPreset(this,'hype')">
-        <div class="preset-emoji">🔥</div>
-        <div class="preset-name">Max Flirt</div>
-        <div class="preset-desc">Playful, teasing, bold</div>
-      </div>
-      <div class="preset" onclick="applyPreset(this,'revenue')">
-        <div class="preset-emoji">💰</div>
-        <div class="preset-name">Revenue Push</div>
-        <div class="preset-desc">Build curiosity, hint at content</div>
-      </div>
-      <div class="preset" onclick="applyPreset(this,'deep')">
-        <div class="preset-emoji">🧠</div>
-        <div class="preset-name">Deep Connection</div>
-        <div class="preset-desc">Ask about life, be caring</div>
-      </div>
-      <div class="preset" onclick="applyPreset(this,'cool')">
-        <div class="preset-emoji">❄️</div>
-        <div class="preset-name">Play Hard to Get</div>
-        <div class="preset-desc">Short, slightly distant, mysterious</div>
-      </div>
-      <div class="preset" onclick="applyPreset(this,'normal')">
-        <div class="preset-emoji">✨</div>
-        <div class="preset-name">Default</div>
-        <div class="preset-desc">Normal Jázmin personality</div>
-      </div>
-    </div>
-
-    <!-- Custom directive -->
-    <div class="section-title">Custom AI Directive</div>
-    <p style="font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.6;">
-      Tell Jázmin exactly how to behave with this person. Be specific — she'll follow it in every reply.
-    </p>
-    <textarea class="directive-input" id="p-note" placeholder="Examples:
-• Act like his girlfriend, be warm and call him by name
-• He's close to buying — build tension, hint at exclusive content without promising it
-• He's been cold lately, re-engage him slowly, be curious about his week"></textarea>
-
-  </div>
-
-  <div class="panel-footer">
-    <button class="btn btn-primary" style="flex:1" onclick="saveDirective()">Save Directive</button>
-    <button class="btn btn-ghost" onclick="clearDirective()">Clear</button>
-  </div>
-</div>
-
-<!-- TOAST CONTAINER -->
-<div class="toast-container" id="toasts"></div>
+<div class="flash" id="flash"></div>
 
 <script>
-const BASE = window.location.origin;
-const PW   = new URLSearchParams(window.location.search).get('pw') || '';
+const PW = new URLSearchParams(location.search).get('pw') || '';
+let DATA = {fans:[]};
 
-let allFans       = [];
-let currentFilter = 'all';
-let activeFan     = null;
-let safeMode      = true;
+function flash(t){const f=document.getElementById('flash');f.textContent=t;f.classList.add('show');setTimeout(()=>f.classList.remove('show'),1600);}
+async function api(path){ try{const r=await fetch(path+(path.includes('?')?'&':'?')+'key='+encodeURIComponent(PW));return await r.json();}catch(e){return null;} }
+async function post(path,body){ try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Auth':PW},body:JSON.stringify(body)});return await r.json();}catch(e){return null;} }
 
-// ── PRESETS ──────────────────────────────────────────────────────────────────
-const PRESETS = {
-  girlfriend: "Viselkedj úgy mint a legjobb barátnője. Legyen meleg, személyes és kicsit flörtölős. Szólítsd nevén ha tudod, mutass valódi érdeklődést az élete iránt. Úgy chatelj mintha már régóta ismerné egymást.",
-  hype:       "Legyen a lehető legflörtölősebb és legcsintánabb. Titokzatos, játékos, merész. Minden üzenetben tartsd fenn az izgalmat. Utalgatásokkal dolgozz, soha ne legyél explicit, de hagyd hogy a fantáziája dolgozzon.",
-  revenue:    "Finoman, természetesen csigázd fel. Utald meg hogy van olyan oldala amit kevesen látnak. NE ajánlj direkt semmit, csak egy-egy célzást ejtj el — 'majd meglátjuk 😏' stílusban — és válts témát. Legyél titokzatos.",
-  deep:       "Légy nagyon figyelmesen kíváncsi az életére. Kérdezz a hétvégéjéről, a munkájáról, az álmairól. Empatikus, gondoskodó. Azt érezze hogy valóban érdekel ami vele történik. Ha problémát oszt meg, arra fókuszálj.",
-  cool:       "Légy kicsit távolságtartó és rejtélyes. Rövid válaszok, kevesebb kérdés. Hagyd hogy ő tegye meg a következő lépést. Ne légy hideg, csak nehezen megnyerhető.",
-  normal:     ""
-};
-
-// ── DATA ─────────────────────────────────────────────────────────────────────
-async function loadData() {
-  try {
-    const r = await fetch(`${BASE}/dashboard_data`);
-    const d = await r.json();
-    allFans  = d.fans || [];
-
-    // Stats
-    document.getElementById('s-total').textContent   = d.fan_count || 0;
-    document.getElementById('s-sent').textContent    = d.sent_today || 0;
-    document.getElementById('s-pending').textContent = d.pending_batches || 0;
-    document.getElementById('s-active').textContent  = allFans.filter(f => !f.is_paused).length;
-
-    document.getElementById('ov-token').textContent   = d.token_valid   !== false ? 'Connected' : 'Error';
-    document.getElementById('ov-poll').textContent    = d.polling_active ? 'Running'   : 'Stopped';
-    document.getElementById('ov-safe').textContent    = d.safe_mode      ? 'ON'        : 'OFF';
-    document.getElementById('ov-pending').textContent = d.pending_batches || 0;
-
-    // Safe mode toggle
-    safeMode = d.safe_mode;
-    updateSafeUI();
-
-    const total = allFans.length;
-    document.getElementById('fans-sub').textContent = `${total} fan${total !== 1 ? 's' : ''} tracked`;
-    document.getElementById('system-status').innerHTML =
-      `Token: ${d.token_valid !== false ? '<span style="color:var(--green)">✓ OK</span>' : '<span style="color:var(--red)">✗ Error</span>'}` +
-      ` &nbsp;·&nbsp; Poll: ${d.polling_active ? '<span style="color:var(--green)">✓ Running</span>' : '<span style="color:var(--red)">✗ Stopped</span>'}`;
-
-    renderFans();
-  } catch(e) {
-    toast('Failed to load data', 'error');
-  }
+async function load(){
+  const d = await api('/dashboard_data');
+  if(d && d.fans){ DATA=d; renderStats(d); render(); }
 }
-
-function updateSafeUI() {
-  const btn  = document.getElementById('safe-toggle');
-  const lbl  = document.getElementById('safe-label');
-  const desc = document.getElementById('safe-desc');
-  if (safeMode) {
-    btn.className  = 'toggle off';
-    lbl.textContent  = 'Safe Mode ON';
-    desc.textContent = 'Bot is silenced';
-  } else {
-    btn.className  = 'toggle on';
-    lbl.textContent  = 'Bot is Live';
-    desc.textContent = 'Replying to fans';
-  }
+function renderStats(d){
+  const safe = d.safe_mode;
+  document.getElementById('stats').innerHTML = `
+    <div class="pill safe ${safe?'on':'off'}" onclick="toggleSafe(${safe})">
+      <span class="dot" style="background:${safe?'var(--amber)':'var(--green)'}"></span>
+      ${safe?'SAFE MODE (not sending)':'LIVE'}
+    </div>
+    <div class="pill"><span class="dot" style="background:${d.polling_active?'var(--green)':'var(--red)'}"></span>polling</div>
+    <div class="pill">fans <b>${d.fan_count}</b></div>
+    <div class="pill">pending <b>${d.pending_batches}</b></div>
+    <div class="pill">sent today <b>${d.sent_today}</b></div>`;
 }
+async function toggleSafe(cur){ await api('/safe_mode/'+(cur?'off':'on')); flash(cur?'LIVE — bot is sending':'SAFE MODE — paused'); load(); }
 
-async function toggleSafeMode() {
-  const endpoint = safeMode ? 'off' : 'on';
-  try {
-    const r = await fetch(`${BASE}/safe_mode/${endpoint}`);
-    if (r.ok) {
-      safeMode = !safeMode;
-      updateSafeUI();
-      toast(safeMode ? 'Bot silenced — Safe Mode ON' : 'Bot is live — replies enabled', safeMode ? 'error' : 'success');
-    }
-  } catch(e) { toast('Connection failed', 'error'); }
-}
-
-// ── RENDER ────────────────────────────────────────────────────────────────────
-function getInitials(name) {
-  return (name || '?').split(' ').map(w => w[0]).join('').substring(0,2).toUpperCase();
-}
-
-function timeAgo(ts) {
-  if (!ts) return '—';
-  const diff = (Date.now() - new Date(ts)) / 1000;
-  if (diff < 60)    return `${Math.floor(diff)}s ago`;
-  if (diff < 3600)  return `${Math.floor(diff/60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
-  return `${Math.floor(diff/86400)}d ago`;
-}
-
-function renderFans() {
-  const q = (document.getElementById('search').value || '').toLowerCase();
-  let fans = allFans.filter(f => {
-    const matchSearch = !q || (f.fan_name||'').toLowerCase().includes(q) || (f.handle||'').toLowerCase().includes(q);
-    const matchFilter = currentFilter === 'all' ||
-      (currentFilter === 'active' && !f.is_paused) ||
-      (currentFilter === 'paused' && f.is_paused);
-    return matchSearch && matchFilter;
-  });
-
-  const tbody = document.getElementById('fan-tbody');
-  if (!fans.length) {
-    tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-icon">🔍</div><div class="empty-text">No fans found</div></div></td></tr>`;
-    return;
-  }
-
-  tbody.innerHTML = fans.map(f => {
-    const initials = getInitials(f.fan_name);
-    const badge    = f.is_paused
-      ? `<span class="badge badge-paused"><span class="badge-dot"></span>Paused</span>`
-      : `<span class="badge badge-active"><span class="badge-dot"></span>Active</span>`;
-    const noteHtml = f.fan_note
-      ? `<span class="note-preview" title="${esc(f.fan_note)}">${esc(f.fan_note)}</span>`
-      : `<span class="no-note">—</span>`;
-    return `
-      <tr class="fan-row" onclick="openPanel('${f.chat_id}')">
-        <td>
-          <div class="fan-name-cell">
-            <div class="avatar">${initials}</div>
-            <div>
-              <div class="fan-name">${esc(f.fan_name||'Unknown')}</div>
-              <div class="fan-handle">@${esc(f.handle||'—')}</div>
-            </div>
-          </div>
-        </td>
-        <td>${badge}</td>
-        <td style="color:var(--muted)">${f.total_messages||0}</td>
-        <td style="color:var(--muted)">${timeAgo(f.last_interaction)}</td>
-        <td>${noteHtml}</td>
-        <td>
-          <div class="action-btns" onclick="event.stopPropagation()">
-            ${f.is_paused
-              ? `<button class="btn btn-sm btn-success" onclick="quickResume('${f.chat_id}')">▶ Resume</button>`
-              : `<button class="btn btn-sm btn-danger"  onclick="quickPause('${f.chat_id}')">⏸ Pause</button>`
-            }
-            <button class="btn btn-sm btn-ghost" onclick="openPanel('${f.chat_id}')">Edit</button>
-          </div>
-        </td>
-      </tr>`;
+function render(){
+  const q=(document.getElementById('search').value||'').toLowerCase();
+  const fans=DATA.fans.filter(f=>!q||(f.fan_name||'').toLowerCase().includes(q)||(f.handle||'').toLowerCase().includes(q));
+  const g=document.getElementById('grid');
+  if(!fans.length){g.innerHTML='<div class="empty">no fans yet</div>';return;}
+  g.innerHTML=fans.map(f=>{
+    const paused=f.is_paused, ppv=f.ppv_pending;
+    const last=f.last_interaction?new Date(f.last_interaction).toLocaleString():'—';
+    return `<div class="card ${ppv?'ppv':''}">
+      <div class="row1">
+        <div><div class="name">${esc(f.fan_name||'unknown')}</div><div class="handle">@${esc(f.handle||'—')}</div></div>
+        <div class="badges">
+          ${ppv?'<span class="badge b-ppv">PPV pending</span>':''}
+          <span class="badge ${paused?'b-paused':'b-active'}">${paused?'paused':'active'}</span>
+        </div>
+      </div>
+      <div class="meta"><span>💬 ${f.total_messages||0} msgs</span><span>🕓 ${last}</span></div>
+      <div class="actions">
+        ${paused?`<button class="green" onclick="act('/resume/${f.chat_id}','resumed')">▶ resume</button>`
+                :`<button class="red" onclick="act('/pause/${f.chat_id}','paused')">⏸ pause</button>`}
+        <button class="gold" onclick="act('/ppv_sent/${f.chat_id}','PPV flagged — bot will upsell')">🔓 PPV sent</button>
+      </div>
+      <textarea class="note" placeholder="per-fan directive (overrides persona)…" onblur="saveNote('${f.chat_id}',this.value)">${esc(f.fan_note||'')}</textarea>
+    </div>`;
   }).join('');
 }
+async function act(path,msg){ await api(path); flash(msg); load(); }
+async function saveNote(id,v){ await post('/set_note/'+id,{note:v}); flash('note saved'); }
+function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
-function filterFans() { renderFans(); }
-
-function setFilter(f, el) {
-  currentFilter = f;
-  document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
-  el.classList.add('active');
-  renderFans();
-}
-
-function showView(v) {
-  document.getElementById('view-fans').style.display  = v === 'fans'  ? '' : 'none';
-  document.getElementById('view-stats').style.display = v === 'stats' ? '' : 'none';
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  event.currentTarget.classList.add('active');
-}
-
-// ── QUICK ACTIONS ─────────────────────────────────────────────────────────────
-async function quickPause(chatId) {
-  const r = await fetch(`${BASE}/pause/${chatId}`);
-  if (r.ok) { toast('Fan paused', 'success'); loadData(); }
-  else toast('Failed', 'error');
-}
-
-async function quickResume(chatId) {
-  const r = await fetch(`${BASE}/resume/${chatId}`);
-  if (r.ok) { toast('Fan resumed', 'success'); loadData(); }
-  else toast('Failed', 'error');
-}
-
-// ── PANEL ─────────────────────────────────────────────────────────────────────
-async function openPanel(chatId) {
-  const fan = allFans.find(f => f.chat_id === chatId);
-  if (!fan) return;
-  activeFan = fan;
-
-  document.getElementById('p-avatar').textContent  = getInitials(fan.fan_name);
-  document.getElementById('p-name').textContent    = fan.fan_name || 'Unknown';
-  document.getElementById('p-handle').textContent  = '@' + (fan.handle || '—');
-  document.getElementById('p-msgs').textContent    = fan.total_messages || 0;
-  document.getElementById('p-last').textContent    = timeAgo(fan.last_interaction);
-  document.getElementById('p-note').value          = fan.fan_note || '';
-
-  updatePanelStatus(fan);
-
-  // Clear preset selections
-  document.querySelectorAll('.preset').forEach(p => p.classList.remove('selected'));
-
-  // Load facts
-  try {
-    const r = await fetch(`${BASE}/fans`);
-    const d = await r.json();
-  } catch(e) {}
-
-  // Try to load facts
-  loadFacts(chatId);
-
-  document.getElementById('overlay').classList.add('open');
-  document.getElementById('panel').classList.add('open');
-}
-
-async function loadFacts(chatId) {
-  // We don't have a /facts endpoint but we can show what we know from the fan object
-  const container = document.getElementById('p-facts');
-  container.innerHTML = '<span style="font-size:12px;color:var(--muted);">Loading...</span>';
-  try {
-    const r = await fetch(`${BASE}/fan_facts/${chatId}`);
-    if (r.ok) {
-      const d = await r.json();
-      if (d.facts && d.facts.length) {
-        container.innerHTML = d.facts.map(f =>
-          `<span class="fact-tag"><span>${f.fact_type}:</span>${esc(f.fact_value)}</span>`
-        ).join('');
-      } else {
-        container.innerHTML = '<span style="font-size:12px;color:var(--muted);">No facts saved yet</span>';
-      }
-    } else {
-      container.innerHTML = '<span style="font-size:12px;color:var(--muted);">No facts saved yet</span>';
-    }
-  } catch(e) {
-    container.innerHTML = '<span style="font-size:12px;color:var(--muted);">No facts saved yet</span>';
-  }
-}
-
-function updatePanelStatus(fan) {
-  const isPaused = fan.is_paused;
-  const card  = document.getElementById('p-status-card');
-  const label = document.getElementById('p-status-label');
-  const desc  = document.getElementById('p-status-desc');
-  const btn   = document.getElementById('p-pause-btn');
-
-  if (isPaused) {
-    label.textContent = 'Paused';
-    desc.textContent  = 'Bot is not replying to this fan';
-    btn.textContent   = '▶ Resume Bot';
-    btn.className     = 'btn btn-sm btn-success';
-  } else {
-    label.textContent = 'Active';
-    desc.textContent  = 'Bot is replying automatically';
-    btn.textContent   = '⏸ Pause Bot';
-    btn.className     = 'btn btn-sm btn-danger';
-  }
-}
-
-async function togglePanelPause() {
-  if (!activeFan) return;
-  const isPaused  = activeFan.is_paused;
-  const endpoint  = isPaused ? 'resume' : 'pause';
-  const r = await fetch(`${BASE}/${endpoint}/${activeFan.chat_id}`);
-  if (r.ok) {
-    activeFan.is_paused = isPaused ? 0 : 1;
-    const fan = allFans.find(f => f.chat_id === activeFan.chat_id);
-    if (fan) fan.is_paused = activeFan.is_paused;
-    updatePanelStatus(activeFan);
-    toast(isPaused ? 'Fan resumed' : 'Fan paused', 'success');
-    renderFans();
-  } else {
-    toast('Action failed', 'error');
-  }
-}
-
-function closePanel() {
-  document.getElementById('overlay').classList.remove('open');
-  document.getElementById('panel').classList.remove('open');
-  activeFan = null;
-}
-
-// ── DIRECTIVE ─────────────────────────────────────────────────────────────────
-function applyPreset(el, key) {
-  document.querySelectorAll('.preset').forEach(p => p.classList.remove('selected'));
-  el.classList.add('selected');
-  document.getElementById('p-note').value = PRESETS[key] || '';
-}
-
-async function saveDirective() {
-  if (!activeFan) return;
-  const note = document.getElementById('p-note').value.trim();
-  try {
-    const r = await fetch(`${BASE}/set_note/${activeFan.chat_id}`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({note})
-    });
-    if (r.ok) {
-      // Update local cache
-      activeFan.fan_note = note;
-      const fan = allFans.find(f => f.chat_id === activeFan.chat_id);
-      if (fan) fan.fan_note = note;
-      toast('Directive saved — Jázmin will follow this immediately', 'success');
-      renderFans();
-    } else {
-      toast('Save failed', 'error');
-    }
-  } catch(e) { toast('Connection error', 'error'); }
-}
-
-async function clearDirective() {
-  document.getElementById('p-note').value = '';
-  document.querySelectorAll('.preset').forEach(p => p.classList.remove('selected'));
-  if (activeFan) {
-    await fetch(`${BASE}/set_note/${activeFan.chat_id}`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({note: ''})
-    });
-    activeFan.fan_note = '';
-    const fan = allFans.find(f => f.chat_id === activeFan.chat_id);
-    if (fan) fan.fan_note = '';
-    toast('Directive cleared — back to default behavior', 'success');
-    renderFans();
-  }
-}
-
-// ── TOAST ─────────────────────────────────────────────────────────────────────
-function toast(msg, type = 'success') {
-  const container = document.getElementById('toasts');
-  const el = document.createElement('div');
-  el.className = `toast ${type}`;
-  el.innerHTML = `<div class="toast-dot"></div>${esc(msg)}`;
-  container.appendChild(el);
-  setTimeout(() => el.remove(), 3500);
-}
-
-// ── UTILS ─────────────────────────────────────────────────────────────────────
-function esc(s) {
-  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-// ── BOOT ──────────────────────────────────────────────────────────────────────
-loadData();
-setInterval(loadData, 30000);
+load(); setInterval(load, 15000);
 </script>
 </body>
 </html>
