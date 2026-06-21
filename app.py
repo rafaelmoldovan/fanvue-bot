@@ -56,9 +56,10 @@ DASHBOARD_PASSWORD   = os.environ.get('DASHBOARD_PASSWORD', 'jazmin2024')
 REPLY_MODEL = 'claude-sonnet-4-6'   # the chat brain (persona, flirting, depth)
 UTIL_MODEL  = 'claude-haiku-4-5'    # facts + vision (cheap/fast)
 
-POLL_INTERVAL        = 8     # seconds between poll cycles (was 20 → quicker pickup)
-BATCH_WINDOW_MIN     = 12    # coalesce rapid messages; randomized per batch
-BATCH_WINDOW_MAX     = 28
+POLL_INTERVAL        = 8     # SCAN loop cadence (new-message pickup)
+SEND_INTERVAL        = 4     # SEND loop cadence — fires due replies fast, on its own thread
+BATCH_WINDOW_MIN     = 24    # human reply delay / debounce window → ~30-45s total before she replies
+BATCH_WINDOW_MAX     = 38
 MANUAL_TAKEOVER_SECS = 120
 POLL_LOCK_TTL        = 25    # seconds; single-poller leader-election lease
 
@@ -716,8 +717,7 @@ def send_due_batches():
             if not reply:
                 db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,)); continue
 
-            words = len(reply.split())
-            time.sleep(random.uniform(3, 8) if words <= 5 else random.uniform(6, 16) if words <= 15 else random.uniform(9, 22))
+            time.sleep(random.uniform(2, 5))   # short final "typing" pause; the batch window is the main human delay
 
             if send_fanvue_message(chat_id, reply):
                 db_claim("UPDATE scheduled_replies SET status='sent' WHERE id=?", (batch_id,))
@@ -738,26 +738,48 @@ def send_due_batches():
 # ─────────────────────────────────────────────────────────────────────────────
 polling_active = False
 polling_thread = None
+send_thread = None
+_is_leader = False   # set by the scan loop (the lock holder); read by the send loop
 
 def poll_loop():
-    global polling_active
-    polling_active = True; errs = 0
+    """SCAN loop: pick up new fan messages + maintain the single-poller leader lease.
+    The slow per-chat scan lives HERE only — it no longer blocks sending."""
+    global _is_leader
+    errs = 0
     while polling_active:
         try:
             if acquire_poll_lock() and get_fanvue_token():
-                s = send_due_batches(); sc, _ = process_new_messages()
-                if s or sc: print(f"[{datetime.now()}] w={WORKER_ID} sent={s} sched={sc}")
+                _is_leader = True
+                sc, _ = process_new_messages()
+                if sc: print(f"[{datetime.now()}] w={WORKER_ID} scan sched={sc}")
+            else:
+                _is_leader = False
             errs = 0
         except Exception as e:
-            errs += 1; print(f"[poll #{errs}] {e}")
-            if errs <= 3: send_telegram_error(f"poll #{errs}: {e}")
+            errs += 1; print(f"[scan #{errs}] {e}")
+            if errs <= 3: send_telegram_error(f"scan #{errs}: {e}")
         time.sleep(POLL_INTERVAL)
 
+def send_loop():
+    """SEND loop: fire any due replies every few seconds, on its OWN thread, so latency is
+    ~the batch window (30-45s) instead of waiting for the slow chat scan to finish."""
+    while polling_active:
+        try:
+            if _is_leader:
+                s = send_due_batches()
+                if s: print(f"[{datetime.now()}] w={WORKER_ID} sent={s}")
+        except Exception as e:
+            print(f"[send] {e}")
+        time.sleep(SEND_INTERVAL)
+
 def start_polling():
-    global polling_thread
+    global polling_thread, send_thread, polling_active
+    polling_active = True; started = False
     if polling_thread is None or not polling_thread.is_alive():
-        polling_thread = threading.Thread(target=poll_loop, daemon=True); polling_thread.start(); return True
-    return False
+        polling_thread = threading.Thread(target=poll_loop, daemon=True); polling_thread.start(); started = True
+    if send_thread is None or not send_thread.is_alive():
+        send_thread = threading.Thread(target=send_loop, daemon=True); send_thread.start(); started = True
+    return started
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AUTH
