@@ -413,14 +413,20 @@ def extract_facts(msg_id, chat_id, fan_text):
         db_query('UPDATE messages SET facts_done=1 WHERE msg_id=?', (msg_id,)); return
     try:
         resp = client.messages.create(model=UTIL_MODEL, max_tokens=200,
-            system=("Extract personal facts from the fan message. Return ONLY a JSON array of "
-                    "{\"fact_type\",\"fact_value\"}. fact_type in: name, job, location, age, relationship, "
-                    "hobby, family, stress, interest, language, pet. Only clearly stated facts. [] if none."),
+            system=("Extract personal facts from the fan message. Output ONLY a raw JSON array, nothing else — "
+                    "no prose, no explanation, no code fences. Each item is {\"fact_type\",\"fact_value\"}. "
+                    "fact_type in: name, job, location, age, relationship, hobby, family, stress, interest, "
+                    "language, pet. Only clearly stated facts. Output [] if none."),
             messages=[{"role": "user", "content": fan_text}])
         raw = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
-        for f in json.loads(raw):
-            ft, fv = str(f.get('fact_type','')).strip(), str(f.get('fact_value','')).strip()
-            if ft and fv and len(fv) > 1: _save_fact(chat_id, ft, fv)
+        m = re.search(r'\[.*\]', raw, re.DOTALL)   # pull out the JSON array even if the model adds prose
+        if m: raw = m.group(0)
+        facts_list = json.loads(raw)
+        if isinstance(facts_list, list):
+            for f in facts_list:
+                if not isinstance(f, dict): continue
+                ft, fv = str(f.get('fact_type', '')).strip(), str(f.get('fact_value', '')).strip()
+                if ft and fv and len(fv) > 1: _save_fact(chat_id, ft, fv)
     except Exception as e:
         print(f"[facts] {e}")
     finally:
@@ -529,7 +535,7 @@ def should_greet(history, fan_msg_time):
     return False
 
 def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx, fan_msg_time):
-    display = real_name or fan_name or "a fan"
+    label = real_name or "ő"   # transcript label ONLY — never the Fanvue username
     p = f"KONTEXTUS:\n- {time_ctx}\n\n"
     prof = db_query("SELECT fan_note, ppv_pending, warmth, tg_handle FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}
     note = (prof.get('fan_note') or '').strip()
@@ -551,10 +557,14 @@ def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx,
         p += "EDDIGI BESZÉLGETÉS (legújabb alul — OLVASD EL, ne ismételd magad):\n"
         for m in history[-20:]:
             t = (m.get('text') or '').strip()
-            if t: p += f"{'Jázmin' if m.get('is_mine') else display}: {t}\n"
+            if t: p += f"{'Jázmin' if m.get('is_mine') else label}: {t}\n"
         p += "\n"
-    p += f"A fan neve: {display}\n"
-    if not real_name: p += "NEM tudod a valódi nevét — ne szólítsd névvel.\n"
+    if real_name:
+        p += (f"A fan valódi neve: {real_name} (ezt korábban elmondta). NÉHA — nem mindig — szólíthatod a "
+              "nevén, természetesen, ahogy egy igazi lány tenné. Ne erőltesd, ne minden üzenetben.\n")
+    else:
+        p += ("NEM tudod a valódi nevét. SOHA ne szólítsd néven, és SOHA NE használd a Fanvue felhasználónevét "
+              "vagy profilnevét megszólításként — az általában értelmetlen kamu név. Beszélj vele név nélkül.\n")
     if len(history) < 6: p += "⚠️ ÚJ FAN — most ismerkedtek, légy barátságos, kíváncsi, meleg.\n"
     if should_greet(history, fan_msg_time):
         p += "\nEZ ÚJ/ÚJRAINDULT BESZÉLGETÉS. Kezdj lazán (pl 'heyy', 'szia, mizu') — variálj!\n"
@@ -645,8 +655,9 @@ def process_new_messages():
             dt = parse_timestamp(last.get('createdAt') or last.get('sentAt') or last.get('timestamp') or '')
             if dt and (datetime.now(timezone.utc) - dt).total_seconds() > 86400: continue
             if db_query('SELECT 1 FROM messages WHERE msg_id=? AND was_replied=1', (msg_id,), fetch_one=True): continue
-            if db_query("SELECT 1 FROM scheduled_replies WHERE chat_id=? AND status='pending'", (chat_id,), fetch_one=True): continue
 
+            # NOTE: do NOT skip when a batch is already pending — let it EXTEND (append + reset the
+            # timer) so multi-message bursts coalesce into ONE reply and we wait until the fan is done.
             schedule_or_extend_batch(chat_id, fan_name, msg_id, text)
             scheduled += 1
         except Exception as e:
