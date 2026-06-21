@@ -495,8 +495,17 @@ def check_manual_and_ppv(chat_id, fan_name, api_messages):
         if msg.get('type', '') == 'AUTOMATED_NEW_FOLLOWER': continue
         dt = parse_timestamp(msg.get('sentAt') or msg.get('createdAt') or msg.get('timestamp') or '')
         if not dt or dt <= BOOT_TIME_UTC or (now - dt) > timedelta(minutes=5): continue
+        mtext = (msg.get('text') or '').strip()
+        # CRITICAL: the bot's OWN auto-replies are saved with a 'bot...' id. Only a REAL manual
+        # message from Rafael (no matching 'bot%' row) should pause the bot. Otherwise the bot
+        # takes ITSELF over for 120s after every reply and goes silent on the fan.
+        is_own_reply = bool(mtext and db_query(
+            "SELECT 1 FROM messages WHERE chat_id=? AND text=? AND msg_id LIKE 'bot%'",
+            (chat_id, mtext), fetch_one=True))
         save_message_to_db(msg.get('uuid') or '', chat_id, fan_name, MY_UUID,
-                           (msg.get('text') or '').strip(), msg.get('sentAt') or '', is_mine=True, facts_done=1, vision_done=1)
+                           mtext, msg.get('sentAt') or '', is_mine=True, facts_done=1, vision_done=1)
+        if is_own_reply:
+            continue   # our own auto-reply — do NOT take over / muzzle ourselves
         set_takeover(chat_id)
         if msg_has_price(msg):   # best-effort PPV auto-flag
             db_query("UPDATE fan_profiles SET ppv_pending=1 WHERE chat_id=?", (chat_id,))
@@ -556,9 +565,14 @@ def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx,
         p += "AMIT TUDSZ RÓLA (ne kérdezd újra):\n" + "".join(f"- {f['fact_type']}: {f['fact_value']}\n" for f in facts[:15]) + "\n"
     if history:
         p += "EDDIGI BESZÉLGETÉS (legújabb alul — OLVASD EL, ne ismételd magad):\n"
-        for m in history[-20:]:
+        seen_lines = set()
+        for m in history[-40:]:
             t = (m.get('text') or '').strip()
-            if t: p += f"{'Jázmin' if m.get('is_mine') else label}: {t}\n"
+            if not t: continue
+            key = (1 if m.get('is_mine') else 0, t)
+            if key in seen_lines: continue   # drop duplicate rows (a sent reply gets re-saved on re-fetch)
+            seen_lines.add(key)
+            p += f"{'Jázmin' if m.get('is_mine') else label}: {t}\n"
         p += "\n"
     if real_name:
         p += (f"A fan valódi neve: {real_name} (ezt korábban elmondta). NÉHA — nem mindig — szólíthatod a "
