@@ -110,6 +110,7 @@ if USE_PG:
 def _to_pg(query):
     """Translate the SQLite dialect used here into Postgres: ? -> %s, date('now'), and the upsert idioms."""
     query = query.replace("date('now')", "to_char(now(),'YYYY-MM-DD')")  # SQLite date() -> PG; created_at is ISO text
+    query = query.replace('%', '%%')  # escape literal % (e.g. LIKE 'bot%') so psycopg doesn't read it as a placeholder
     s = query.lstrip()
     if re.match(r'(?i)INSERT\s+OR\s+IGNORE', s):
         query = re.sub(r'(?i)INSERT\s+OR\s+IGNORE', 'INSERT', query, count=1).rstrip().rstrip(';').rstrip() + ' ON CONFLICT DO NOTHING'
@@ -710,10 +711,12 @@ def check_manual_and_ppv(chat_id, fan_name, api_messages):
 # BATCHING
 # ─────────────────────────────────────────────────────────────────────────────
 def schedule_or_extend_batch(chat_id, fan_name, fan_msg_id, fan_text):
-    existing = db_query("SELECT * FROM scheduled_replies WHERE chat_id=? AND status='pending' ORDER BY id DESC LIMIT 1",
+    existing = db_query("SELECT * FROM scheduled_replies WHERE chat_id=? AND status IN ('pending','sending') ORDER BY id DESC LIMIT 1",
                         (chat_id,), fetch_one=True)
     now = datetime.now(); fan_text = fan_text or ''
     window = random.randint(BATCH_WINDOW_MIN, BATCH_WINDOW_MAX)
+    if existing and existing.get('status') == 'sending':
+        return   # a reply is being generated RIGHT NOW -> don't create a duplicate batch (the race that double-replied)
     if existing:
         et = existing.get('fan_text') or ''
         if fan_text.strip() and fan_text.strip() not in et:
@@ -894,6 +897,11 @@ def send_due_batches():
             if db_claim("UPDATE scheduled_replies SET status='sending' WHERE id=? AND status='pending'", (batch_id,)) != 1:
                 continue
             db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE chat_id=? AND id!=? AND status='pending'", (chat_id, batch_id))
+
+            # race guard: if the fan message this batch answers was ALREADY replied (duplicate batch from a
+            # 'sending'-window race), cancel BEFORE generating — this is what was causing the double-reply.
+            if item.get('fan_msg_id') and db_query('SELECT 1 FROM messages WHERE msg_id=? AND was_replied=1', (item['fan_msg_id'],), fetch_one=True):
+                db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,)); continue
 
             history = get_history(chat_id, 100)
             facts = get_facts(chat_id); real_name = get_real_name(chat_id)
