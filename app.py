@@ -97,7 +97,8 @@ if USE_PG:
     print("[DB] Postgres mode ON (shared with Telegram bot)")
 
 def _to_pg(query):
-    """Translate the SQLite dialect used here into Postgres: ? -> %s, and the two upsert idioms."""
+    """Translate the SQLite dialect used here into Postgres: ? -> %s, date('now'), and the upsert idioms."""
+    query = query.replace("date('now')", "to_char(now(),'YYYY-MM-DD')")  # SQLite date() -> PG; created_at is ISO text
     s = query.lstrip()
     if re.match(r'(?i)INSERT\s+OR\s+IGNORE', s):
         query = re.sub(r'(?i)INSERT\s+OR\s+IGNORE', 'INSERT', query, count=1).rstrip().rstrip(';').rstrip() + ' ON CONFLICT DO NOTHING'
@@ -906,7 +907,7 @@ def start_polling():
 def require_auth(f):
     @wraps(f)
     def w(*a, **k):
-        key = request.args.get('key') or request.headers.get('X-Auth') or ''
+        key = request.args.get('key') or request.args.get('pw') or request.headers.get('X-Auth') or ''
         if key != DASHBOARD_PASSWORD:
             return {"error": "unauthorized"}, 401
         return f(*a, **k)
@@ -996,26 +997,35 @@ def dashboard():
 @app.route('/connect')
 @require_auth
 def connect():
-    """Start the Fanvue OAuth flow with the FULL scope set. Visit /connect?pw=<DASHBOARD_PASSWORD>."""
+    """Start the Fanvue OAuth flow (PKCE) with the FULL scope set. Visit /connect?key=<DASHBOARD_PASSWORD>."""
+    import hashlib
     state = uuid.uuid4().hex
-    save_token('oauth_state', state)
+    verifier = base64.urlsafe_b64encode(os.urandom(40)).decode().rstrip('=')          # PKCE code_verifier
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
+    save_token('oauth_state', state); save_token('oauth_verifier', verifier)
     from urllib.parse import urlencode
     url = "https://auth.fanvue.com/oauth2/auth?" + urlencode({
         'client_id': FANVUE_CLIENT_ID, 'redirect_uri': FANVUE_REDIRECT_URI,
-        'response_type': 'code', 'scope': FANVUE_SCOPES, 'state': state})
+        'response_type': 'code', 'scope': FANVUE_SCOPES, 'state': state,
+        'code_challenge': challenge, 'code_challenge_method': 'S256'})
     return redirect(url, code=302)
 
 @app.route('/callback')
 def callback():
     """Fanvue redirects here with ?code=...&state=...; exchange the code for a full-scope token."""
     code = request.args.get('code'); state = request.args.get('state')
+    err = request.args.get('error')
+    if err:
+        return (f"Fanvue returned an error: <b>{err}</b> — {request.args.get('error_description','')}<br><br>"
+                f"(Usually means a requested scope isn't granted on the app. Full query: {dict(request.args)})", 400)
     if not code:
-        return ("No code in callback", 400)
+        return (f"No code in callback. Full query Fanvue sent: {dict(request.args)}", 400)
     if not state or state != load_token('oauth_state'):
         return ("Invalid/expired state — start again at /connect?pw=...", 400)
     try:
         r = requests.post("https://auth.fanvue.com/oauth2/token",
-            data={"grant_type": "authorization_code", "code": code, "redirect_uri": FANVUE_REDIRECT_URI},
+            data={"grant_type": "authorization_code", "code": code, "redirect_uri": FANVUE_REDIRECT_URI,
+                  "code_verifier": load_token('oauth_verifier') or ''},
             headers={"Content-Type": "application/x-www-form-urlencoded", "Authorization": get_basic_auth_header()},
             timeout=15)
         if r.status_code != 200:
