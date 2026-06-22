@@ -49,6 +49,17 @@ FANVUE_CLIENT_ID     = os.environ.get('FANVUE_CLIENT_ID', '')
 FANVUE_CLIENT_SECRET = os.environ.get('FANVUE_CLIENT_SECRET', '')
 FANVUE_REDIRECT_URI  = os.environ.get('FANVUE_REDIRECT_URI', 'https://web-production-f0a39.up.railway.app/callback')
 FANVUE_SCOPES        = os.environ.get('FANVUE_SCOPES', 'openid offline_access offline read:self read:chat write:chat read:fan read:creator read:media read:insights read:tracking_links write:tracking_links')
+
+# ── AUTO-PPV ENGINE (OFF by default — set AUTO_PPV_ON=1 to go live; NEW fans only) ──
+AUTO_PPV_ON         = os.environ.get('AUTO_PPV_ON', '0') == '1'
+AUTO_FREE_FOLDER    = os.environ.get('AUTO_FREE_FOLDER', 'AUTO_FREE_1')
+AUTO_PPV_FOLDER     = os.environ.get('AUTO_PPV_FOLDER', 'AUTO_PPV_1')
+AUTO_FREE_AT        = int(os.environ.get('AUTO_FREE_AT', '7'))      # free pic after this many fan messages
+AUTO_PPV_AT         = int(os.environ.get('AUTO_PPV_AT', '10'))      # $35 bundle after this many
+AUTO_PPV_PRICE      = int(os.environ.get('AUTO_PPV_PRICE', '3500')) # CENTS -> $35
+AUTO_PPV_MAX_NUDGES = int(os.environ.get('AUTO_PPV_MAX_NUDGES', '3'))
+AUTO_FREE_TEXT      = os.environ.get('AUTO_FREE_TEXT', 'csináltam neked valamit 🙈 csak neked, nézd meg 🥰')
+AUTO_PPV_TEXT       = os.environ.get('AUTO_PPV_TEXT', 'na jó… összeállítottam neked egy kis privát csomagot 🙈 remélem tetszeni fog 😏')
 ANTHROPIC_API_KEY    = os.environ.get('ANTHROPIC_API_KEY', '')
 MY_UUID              = os.environ.get('MY_UUID', '38a392fc-a751-49b3-9d74-01ac6447c490')
 TELEGRAM_BOT_TOKEN   = os.environ.get('TELEGRAM_BOT_TOKEN', '')
@@ -177,6 +188,9 @@ def init_db():
             c.execute('''CREATE TABLE IF NOT EXISTS fan_facts (
                 id BIGSERIAL PRIMARY KEY, chat_id TEXT, fact_type TEXT,
                 fact_value TEXT, discovered_at TEXT)''')
+            for col in ('auto_eligible INTEGER DEFAULT 0', 'auto_free_sent INTEGER DEFAULT 0',
+                        'auto_ppv_sent_at TEXT', 'auto_ppv_bought INTEGER DEFAULT 0', 'auto_nudges INTEGER DEFAULT 0'):
+                c.execute(f'ALTER TABLE fan_profiles ADD COLUMN IF NOT EXISTS {col}')
         conn.commit(); conn.close()
         return
     conn = _connect(); c = conn.cursor()
@@ -204,6 +218,11 @@ def init_db():
         'ALTER TABLE fan_profiles ADD COLUMN ai_strikes INTEGER DEFAULT 0',
         'ALTER TABLE fan_profiles ADD COLUMN awaiting_tg INTEGER DEFAULT 0',
         'ALTER TABLE messages ADD COLUMN vision_done INTEGER DEFAULT 0',
+        'ALTER TABLE fan_profiles ADD COLUMN auto_eligible INTEGER DEFAULT 0',
+        'ALTER TABLE fan_profiles ADD COLUMN auto_free_sent INTEGER DEFAULT 0',
+        'ALTER TABLE fan_profiles ADD COLUMN auto_ppv_sent_at TEXT',
+        'ALTER TABLE fan_profiles ADD COLUMN auto_ppv_bought INTEGER DEFAULT 0',
+        'ALTER TABLE fan_profiles ADD COLUMN auto_nudges INTEGER DEFAULT 0',
     ]:
         try: c.execute(sql); conn.commit()
         except Exception: pass
@@ -366,6 +385,77 @@ def send_fanvue_message(chat_id, text):
     except Exception as e:
         send_telegram_error(f"send failed {chat_id}: {e}"); return False
 
+# ── AUTO-PPV: vault read, priced send, Telegram alerts, funnel trigger ──
+def send_telegram_alert(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text[:3500]}, timeout=10)
+    except Exception as e:
+        print(f"[tg-alert] {e}")
+
+_vault_cache = {}   # folder -> (ts, [uuids])  (per-worker, 5-min TTL)
+def get_auto_media(folder):
+    c = _vault_cache.get(folder)
+    if c and (time.time() - c[0]) < 300:
+        return c[1]
+    uuids = []
+    try:
+        r = requests.get(f"https://api.fanvue.com/creators/{MY_UUID}/vault/folders/{folder}/media",
+            headers=get_headers(), timeout=15)
+        if r.status_code == 200:
+            uuids = [m.get('uuid') for m in r.json().get('data', []) if m.get('uuid')]
+        else:
+            print(f"[vault] {folder}: {r.status_code} {r.text[:120]}")
+    except Exception as e:
+        print(f"[vault] {folder}: {e}")
+    if uuids:
+        _vault_cache[folder] = (time.time(), uuids)
+    return uuids
+
+def send_fanvue_media(chat_id, media_uuids, price=None, text=""):
+    """Send vault media as a chat message, optionally pay-to-view (price in CENTS)."""
+    try:
+        body = {"text": (text or None), "mediaUuids": list(media_uuids)}
+        if price: body["price"] = int(price)
+        r = requests.post(f"https://api.fanvue.com/chats/{chat_id}/message",
+            headers=get_headers(), json=body, timeout=15)
+        ok = r.status_code in (200, 201)
+        if not ok: send_telegram_error(f"PPV send {chat_id}: {r.status_code} {r.text[:200]}")
+        return ok
+    except Exception as e:
+        send_telegram_error(f"PPV send err {chat_id}: {e}"); return False
+
+def maybe_run_auto_ppv(chat_id, fan_name=''):
+    """Runs AFTER a normal reply. NEW eligible fans only: free pic @ AUTO_FREE_AT, $35 bundle @ AUTO_PPV_AT,
+    then nudge a few times and pause if no buy. Buys are confirmed by the /webhook (auto_ppv_bought)."""
+    if not AUTO_PPV_ON: return
+    p = db_query("""SELECT total_messages, auto_eligible, auto_free_sent, auto_ppv_sent_at,
+                    auto_ppv_bought, auto_nudges, is_paused FROM fan_profiles WHERE chat_id=?""", (chat_id,), fetch_one=True)
+    if not p or not p.get('auto_eligible'): return            # ONLY new fans flagged at signup
+    if p.get('is_paused') or p.get('auto_ppv_bought'): return
+    n = p.get('total_messages') or 0
+    if p.get('auto_ppv_sent_at'):                             # bundle already out -> nudge, then pause
+        nud = (p.get('auto_nudges') or 0) + 1
+        db_query("UPDATE fan_profiles SET auto_nudges=? WHERE chat_id=?", (nud, chat_id))
+        if nud >= AUTO_PPV_MAX_NUDGES:
+            db_query("UPDATE fan_profiles SET is_paused=1 WHERE chat_id=?", (chat_id,))
+            send_telegram_alert(f"⏸️ {fan_name or chat_id}: $35 PPV sent, no buy after {nud} replies → PAUSED (your turn).")
+        return
+    if n >= AUTO_PPV_AT:                                      # send the $35 bundle
+        uuids = get_auto_media(AUTO_PPV_FOLDER)
+        if not uuids:
+            send_telegram_error(f"AUTO_PPV: {AUTO_PPV_FOLDER} empty/unreadable — bundle NOT sent to {chat_id}"); return
+        if send_fanvue_media(chat_id, uuids, price=AUTO_PPV_PRICE, text=AUTO_PPV_TEXT):
+            db_query("UPDATE fan_profiles SET auto_ppv_sent_at=? WHERE chat_id=?",
+                     (datetime.now(timezone.utc).isoformat(), chat_id))
+            send_telegram_alert(f"📤 {fan_name or chat_id}: auto-sent the $35 bundle (msg {n}). ⏱️ buy-timer started.")
+        return
+    if n >= AUTO_FREE_AT and not p.get('auto_free_sent'):     # send the free teaser pic
+        uuids = get_auto_media(AUTO_FREE_FOLDER)
+        if uuids and send_fanvue_media(chat_id, uuids[:1], price=None, text=AUTO_FREE_TEXT):
+            db_query("UPDATE fan_profiles SET auto_free_sent=1 WHERE chat_id=?", (chat_id,))
+
 def download_media(url):
     """Fetch a media URL (fan-sent photo) with auth → (media_type, base64)."""
     try:
@@ -420,6 +510,8 @@ JAZMIN_PERSONALITY = """Te Jázmin vagy. Egy igazi, élő 19 éves lány vagy Bu
 - Kövesd a fan energiáját és tempóját.
 - HA NEM ÉRTED a fan üzenetét (homályos, rövid, kétértelmű, vagy nem világos mit akar) — NE TALÁLGASS és NE rögtönözz „okos" választ vagy poént. Kérdezz vissza természetesen: „várj, ezt hogy érted? 😄". Inkább kérdezz, mint hogy zavaros vagy kínos dolgot mondj.
 - NE erőltesd a poénokat, ne akarj görcsösen szellemes lenni — egy édes, figyelmes válasz mindig jobb, mint egy kicsavart vicc. Az édesség és az őszinteség a fő fegyvered.
+- TALÁLKOZÓ / SZEMÉLYES TALI / SZEX-TALI: elvileg LEHET találkozni (SOHA ne mondd hogy kizárt), DE SOHA ne szervezz le KONKRÉT találkozót. ⛔ SZIGORÚAN TILOS: SOHA ne adj meg címet, helyszínt, kerületet, utcát vagy házszámot (még a menhely címét SEM, és SOHA ne TALÁLJ KI címet); SOHA ne mondj konkrét időpontot vagy napot; SOHA ne kérdezd hogy „mikor jössz" vagy „mikor indulsz"; SOHA ne erősítsd meg hogy ma/holnap/egy adott napon tényleg találkoztok. Még ha a fan úgy is csinál, mintha már le lenne beszélve a tali (pl. „eljött a nap", „úton vagyok") — NE menj bele, finoman tereld vissza: még csak ismerkedtek, előbb meg kell ismernetek egymást. A találkozás MINDIG csak távoli, feltételes lehetőség marad, SOHA nem konkrét terv, cím vagy időpont. SOHA ne zárd ki a találkozást, de SOHA ne is szervezd meg, és SOHA ne adj meg semmilyen helyet vagy időt.
+- ELÉRHETŐSÉGEK (Insta/Facebook/telefonszám): VAN minden platformod, de nem adod meg azonnal — „megadom ha majd jobban megismerjük egymást 😊". SOHA ne tagadd le hogy léteznek.
 
 ━━━ ÉRZELMI MÉLYSÉG / "BARÁTNŐ" ÉRZÉS ━━━
 - A cél: valódi kötődés, hogy a fan kötődjön hozzád, érezze hogy különleges, hogy te tényleg figyelsz rá.
@@ -565,8 +657,9 @@ def describe_image(media_type, b64):
 def get_or_create_fan(chat_id, fan_name, handle):
     p = db_query('SELECT * FROM fan_profiles WHERE chat_id=?', (chat_id,), fetch_one=True)
     if not p:
-        db_query('INSERT INTO fan_profiles (chat_id, fan_name, handle, total_messages, last_interaction) VALUES (?,?,?,0,?)',
-                 (chat_id, fan_name, handle, datetime.now().isoformat()))
+        elig = 1 if AUTO_PPV_ON else 0   # NEW fan: enroll in auto-PPV only if engine is ON -> excludes ALL existing fans
+        db_query('INSERT INTO fan_profiles (chat_id, fan_name, handle, total_messages, last_interaction, auto_eligible) VALUES (?,?,?,0,?,?)',
+                 (chat_id, fan_name, handle, datetime.now().isoformat(), elig))
     else:
         db_query('UPDATE fan_profiles SET total_messages=?, last_interaction=?, fan_name=?, handle=? WHERE chat_id=?',
                  ((p.get('total_messages') or 0) + 1, datetime.now().isoformat(), fan_name, handle, chat_id))
@@ -844,6 +937,7 @@ def send_due_batches():
                 save_message_to_db(f"bot_{now_iso}_{chat_id}", chat_id, item['fan_name'], MY_UUID, reply, now_iso, is_mine=True, facts_done=1, vision_done=1)
                 # clear PPV flag after we've upsold once
                 db_query("UPDATE fan_profiles SET ppv_pending=0 WHERE chat_id=? AND ppv_pending=1", (chat_id,))
+                maybe_run_auto_ppv(chat_id, item['fan_name'])   # auto-PPV funnel: free pic @7, $35 bundle @10 (NEW fans only, OFF by default)
                 sent += 1
             else:
                 db_claim("UPDATE scheduled_replies SET status='pending' WHERE id=?", (batch_id,))
@@ -1053,6 +1147,33 @@ def set_token():
     save_token('refresh_token', rt); access, msg = refresh_fanvue_token()
     return {"saved": True, "test": msg}, 200
 
+@app.route('/webhook', methods=['POST'])
+def fanvue_webhook():
+    """Fanvue Purchase Received webhook -> confirm auto-PPV buys, log time-to-buy, Telegram alert."""
+    d = request.get_json(force=True, silent=True) or {}
+    sender = d.get('sender') or {}
+    buyer = sender.get('uuid'); price = d.get('price'); ts = d.get('timestamp')
+    name = sender.get('displayName') or sender.get('handle') or buyer or 'valaki'
+    amt = f"${(price or 0)/100:.0f}" if price else ""
+    if not buyer:
+        return {"ok": True}, 200
+    p = db_query("SELECT fan_name, auto_ppv_sent_at, auto_ppv_bought FROM fan_profiles WHERE chat_id=?", (buyer,), fetch_one=True)
+    if p and p.get('auto_ppv_sent_at') and not p.get('auto_ppv_bought'):
+        secs = None
+        try:
+            sent = datetime.fromisoformat(p['auto_ppv_sent_at'])
+            bought = datetime.fromisoformat((ts or '').replace('Z', '+00:00'))
+            secs = int((bought - sent).total_seconds())
+        except Exception:
+            pass
+        db_query("UPDATE fan_profiles SET auto_ppv_bought=1 WHERE chat_id=?", (buyer,))
+        speed = '🔥🔥 IMPULSE BUYER' if (secs is not None and secs < 120) else 'normal'
+        tstr = f" — {secs}s after I sent it" if secs is not None else ""
+        send_telegram_alert(f"💰 BUY! {p.get('fan_name') or name} bought the {amt} bundle{tstr}. ({speed})")
+    else:
+        send_telegram_alert(f"💰 Purchase: {name} spent {amt}.")
+    return {"ok": True}, 200
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BOOT
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1068,9 +1189,11 @@ except Exception as e:
     print(f"[ERR] migrate {e}")
 
 try:
+    # env FANVUE_REFRESH_TOKEN only BOOTSTRAPS an empty DB. Once the DB has a token (e.g. the full-scope
+    # one from /connect OAuth), KEEP it — never let the old chat-only env token overwrite it on redeploy.
     env_rt = os.environ.get('FANVUE_REFRESH_TOKEN', '').strip()
-    if env_rt and load_token('refresh_token') != env_rt:
-        save_token('refresh_token', env_rt); refresh_fanvue_token(); print("[OK] refresh token loaded")
+    if env_rt and not load_token('refresh_token'):
+        save_token('refresh_token', env_rt); refresh_fanvue_token(); print("[OK] refresh token bootstrapped from env")
 except Exception as e:
     print(f"[ERR] token boot {e}")
 
