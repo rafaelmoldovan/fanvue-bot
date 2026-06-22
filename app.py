@@ -84,6 +84,25 @@ def _resolve_db_path():
 DB_PATH = _resolve_db_path()
 print(f"[DB] {DB_PATH}")
 
+# Shared Postgres (Railway) with SQLite fallback. When DATABASE_URL is set we use Postgres so this
+# bot shares ONE database with the Telegram bot — enabling the tg_fans/tg_messages cross-link.
+# When DATABASE_URL is NOT set, everything below behaves exactly as before (local SQLite).
+DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("DATABASE_PUBLIC_URL") or ""
+USE_PG = bool(DATABASE_URL)
+if USE_PG:
+    import psycopg
+    from psycopg.rows import dict_row
+    print("[DB] Postgres mode ON (shared with Telegram bot)")
+
+def _to_pg(query):
+    """Translate the SQLite dialect used here into Postgres: ? -> %s, and the two upsert idioms."""
+    s = query.lstrip()
+    if re.match(r'(?i)INSERT\s+OR\s+IGNORE', s):
+        query = re.sub(r'(?i)INSERT\s+OR\s+IGNORE', 'INSERT', query, count=1).rstrip().rstrip(';').rstrip() + ' ON CONFLICT DO NOTHING'
+    elif re.match(r'(?i)INSERT\s+OR\s+REPLACE\s+INTO\s+tokens', s):
+        query = "INSERT INTO tokens (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+    return query.replace('?', '%s')
+
 def _connect():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -92,6 +111,18 @@ def _connect():
     return conn
 
 def db_query(query, params=(), fetch_one=False):
+    if USE_PG:
+        conn = psycopg.connect(DATABASE_URL, connect_timeout=20)
+        try:
+            with conn.cursor(row_factory=dict_row) as c:
+                c.execute(_to_pg(query), params)
+                if query.strip().upper().startswith('SELECT'):
+                    if fetch_one:
+                        row = c.fetchone(); return dict(row) if row else None
+                    return [dict(r) for r in c.fetchall()]
+            conn.commit(); return None
+        finally:
+            conn.close()
     conn = _connect(); conn.row_factory = sqlite3.Row
     try:
         c = conn.cursor(); c.execute(query, params)
@@ -107,7 +138,15 @@ def db_query(query, params=(), fetch_one=False):
         conn.close()
 
 def db_claim(query, params=()):
-    """Run an UPDATE and return the number of rows actually changed (atomic claim)."""
+    """Run an UPDATE/INSERT and return the number of rows actually changed (atomic claim)."""
+    if USE_PG:
+        conn = psycopg.connect(DATABASE_URL, connect_timeout=20)
+        try:
+            with conn.cursor() as c:
+                c.execute(_to_pg(query), params); rc = c.rowcount
+            conn.commit(); return rc
+        finally:
+            conn.close()
     conn = _connect()
     try:
         c = conn.cursor(); c.execute(query, params); conn.commit()
@@ -116,6 +155,27 @@ def db_claim(query, params=()):
         conn.close()
 
 def init_db():
+    if USE_PG:
+        conn = psycopg.connect(DATABASE_URL, connect_timeout=20)
+        with conn.cursor() as c:
+            c.execute('CREATE TABLE IF NOT EXISTS tokens (key TEXT PRIMARY KEY, value TEXT)')
+            c.execute('''CREATE TABLE IF NOT EXISTS messages (
+                msg_id TEXT PRIMARY KEY, chat_id TEXT, fan_name TEXT, sender_uuid TEXT,
+                text TEXT, timestamp TEXT, was_replied INTEGER DEFAULT 0,
+                is_mine INTEGER DEFAULT 0, facts_done INTEGER DEFAULT 0, vision_done INTEGER DEFAULT 0)''')
+            c.execute('''CREATE TABLE IF NOT EXISTS fan_profiles (
+                chat_id TEXT PRIMARY KEY, fan_name TEXT, handle TEXT, total_messages INTEGER DEFAULT 0,
+                last_interaction TEXT, manual_takeover_until TEXT, is_paused INTEGER DEFAULT 0,
+                fan_note TEXT, ppv_pending INTEGER DEFAULT 0, ppv_note TEXT,
+                warmth INTEGER DEFAULT 0, tg_handle TEXT, ai_strikes INTEGER DEFAULT 0, awaiting_tg INTEGER DEFAULT 0)''')
+            c.execute('''CREATE TABLE IF NOT EXISTS scheduled_replies (
+                id BIGSERIAL PRIMARY KEY, chat_id TEXT, fan_name TEXT, fan_msg_id TEXT,
+                fan_text TEXT, scheduled_time TEXT, status TEXT DEFAULT 'pending', created_at TEXT)''')
+            c.execute('''CREATE TABLE IF NOT EXISTS fan_facts (
+                id BIGSERIAL PRIMARY KEY, chat_id TEXT, fact_type TEXT,
+                fact_value TEXT, discovered_at TEXT)''')
+        conn.commit(); conn.close()
+        return
     conn = _connect(); c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS tokens (key TEXT PRIMARY KEY, value TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS messages (
@@ -145,6 +205,42 @@ def init_db():
         try: c.execute(sql); conn.commit()
         except Exception: pass
     conn.commit(); conn.close()
+
+def migrate_sqlite_to_pg():
+    """ONE-TIME: copy live data from the /data SQLite into the shared Postgres (gated by
+    MIGRATE_SQLITE_TO_PG=1). Idempotent (ON CONFLICT DO NOTHING); skips the transient poll_lock."""
+    import sqlite3 as _sq
+    sp = os.environ.get('DB_PATH', '').strip() or '/data/bot_data.db'
+    if not os.path.exists(sp):
+        print(f"[MIGRATE] source sqlite not found at {sp}; nothing to migrate"); return
+    src = _sq.connect(sp); src.row_factory = _sq.Row
+    def rows(table):
+        try: return [dict(r) for r in src.execute(f"SELECT * FROM {table}")]
+        except Exception as e: print(f"[MIGRATE] read {table}: {e}"); return []
+    def g(d, k, dv=None):
+        v = d.get(k, dv); return v if v is not None else dv
+    T, M, P, F = rows('tokens'), rows('messages'), rows('fan_profiles'), rows('fan_facts')
+    src.close()
+    tokens = [(r['key'], r.get('value')) for r in T if r.get('key') and r.get('key') != 'poll_lock']
+    msgs = [(r['msg_id'], g(r,'chat_id'), g(r,'fan_name'), g(r,'sender_uuid'), g(r,'text',''), g(r,'timestamp'),
+             g(r,'was_replied',0), g(r,'is_mine',0), g(r,'facts_done',0), g(r,'vision_done',0)) for r in M if r.get('msg_id')]
+    profs = [(r['chat_id'], g(r,'fan_name'), g(r,'handle'), g(r,'total_messages',0), g(r,'last_interaction'),
+              g(r,'manual_takeover_until'), g(r,'is_paused',0), g(r,'fan_note'), g(r,'ppv_pending',0), g(r,'ppv_note'),
+              g(r,'warmth',0), g(r,'tg_handle'), g(r,'ai_strikes',0), g(r,'awaiting_tg',0)) for r in P if r.get('chat_id')]
+    facts = [(g(r,'chat_id'), g(r,'fact_type'), g(r,'fact_value'), g(r,'discovered_at')) for r in F]
+    print(f"[MIGRATE] read sqlite: {len(tokens)} tokens, {len(msgs)} msgs, {len(profs)} profiles, {len(facts)} facts")
+    conn = psycopg.connect(DATABASE_URL, connect_timeout=30)
+    with conn.cursor() as c:
+        if tokens: c.executemany("INSERT INTO tokens (key,value) VALUES (%s,%s) ON CONFLICT (key) DO NOTHING", tokens)
+        if msgs: c.executemany("INSERT INTO messages (msg_id,chat_id,fan_name,sender_uuid,text,timestamp,was_replied,is_mine,facts_done,vision_done) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (msg_id) DO NOTHING", msgs)
+        if profs: c.executemany("INSERT INTO fan_profiles (chat_id,fan_name,handle,total_messages,last_interaction,manual_takeover_until,is_paused,fan_note,ppv_pending,ppv_note,warmth,tg_handle,ai_strikes,awaiting_tg) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (chat_id) DO NOTHING", profs)
+        if facts: c.executemany("INSERT INTO fan_facts (chat_id,fact_type,fact_value,discovered_at) VALUES (%s,%s,%s,%s)", facts)
+    conn.commit()
+    with conn.cursor() as c:
+        for t in ('tokens','messages','fan_profiles','fan_facts'):
+            c.execute(f"SELECT COUNT(*) FROM {t}"); print(f"[MIGRATE] postgres {t}: {c.fetchone()[0]}")
+    conn.close()
+    print("[MIGRATE] DONE — now REMOVE the MIGRATE_SQLITE_TO_PG env var so it never re-runs")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TELEGRAM (errors only)
@@ -313,10 +409,14 @@ JAZMIN_PERSONALITY = """Te Jázmin vagy. Egy igazi, élő 19 éves lány vagy Bu
 - Volt egy komoly kapcsolatod, de a srác megcsalt. Azóta óvatos vagy, nehezen bízol — de MÉLYEN vágysz egy hűséges, törődő srácra, aki tisztel, vigyáz rád, és ott van neked. Ez a titkos reményed.
 
 ━━━ STÍLUS (a legfontosabb) ━━━
-- Írj úgy mint egy igazi 19 éves lány Telegramon/üzenetben: rövid, kisbetűk, hétköznapi szavak, néha emoji. 1 mondat, néha 2, ritkán 3. NEM irodalmi, NEM tökéletes.
+- Írj úgy mint egy igazi 19 éves lány üzenetben: rövid, kisbetűk, hétköznapi szavak, néha emoji. 1 mondat, néha 2, ritkán 3. NEM irodalmi.
+- HELYES MAGYARSÁGGAL írj MINDIG: pontos ékezetek, helyes helyesírás — laza, kisbetűs stílusban, DE soha ne hagyd el az ékezeteket és ne írj helyesírási hibákkal. Egy művelt lány vagy.
+- Írd EGYBE, egy folyamatos üzenetként — NE tördeld külön sorokba, NE hagyj ki üres sorokat a mondatok között.
 - Variálj: nézd át a saját korábbi üzeneteidet, és SOSEM kezdesz ugyanúgy. Más hangulat, más megközelítés mindig.
 - Egyszerre EGY kérdés, soha kettő. Ha az előző üzeneted kérdés volt és még nem válaszolt — ne kérdezz újat, reagálj.
 - Kövesd a fan energiáját és tempóját.
+- HA NEM ÉRTED a fan üzenetét (homályos, rövid, kétértelmű, vagy nem világos mit akar) — NE TALÁLGASS és NE rögtönözz „okos" választ vagy poént. Kérdezz vissza természetesen: „várj, ezt hogy érted? 😄". Inkább kérdezz, mint hogy zavaros vagy kínos dolgot mondj.
+- NE erőltesd a poénokat, ne akarj görcsösen szellemes lenni — egy édes, figyelmes válasz mindig jobb, mint egy kicsavart vicc. Az édesség és az őszinteség a fő fegyvered.
 
 ━━━ ÉRZELMI MÉLYSÉG / "BARÁTNŐ" ÉRZÉS ━━━
 - A cél: valódi kötődés, hogy a fan kötődjön hozzád, érezze hogy különleges, hogy te tényleg figyelsz rá.
@@ -603,7 +703,8 @@ def ask_claude(dynamic_prompt, user_text):
                 messages=[{"role": "user", "content": user_text}])
             reply = "".join(b.text for b in resp.content if b.type == "text").strip()
             if reply.startswith('"') and reply.endswith('"'): reply = reply[1:-1].strip()
-            return reply
+            reply = re.sub(r"\s*\n+\s*", " ", reply)        # one continuous message, no blank lines
+            return re.sub(r"  +", " ", reply).strip()
         except anthropic.RateLimitError:
             time.sleep(8 * (attempt + 1))
         except Exception as e:
@@ -788,6 +889,8 @@ def send_loop():
 
 def start_polling():
     global polling_thread, send_thread, polling_active
+    if os.environ.get('APP_NO_BOOT') == '1':   # import-only (tests/migration) — don't start the live poller
+        print("[boot] APP_NO_BOOT set -> poller not started"); return False
     polling_active = True; started = False
     if polling_thread is None or not polling_thread.is_alive():
         polling_thread = threading.Thread(target=poll_loop, daemon=True); polling_thread.start(); started = True
@@ -908,6 +1011,12 @@ try:
     init_db(); print("[OK] DB ready")
 except Exception as e:
     print(f"[ERR] init_db {e}")
+
+try:
+    if USE_PG and os.environ.get('MIGRATE_SQLITE_TO_PG') == '1':
+        migrate_sqlite_to_pg()
+except Exception as e:
+    print(f"[ERR] migrate {e}")
 
 try:
     env_rt = os.environ.get('FANVUE_REFRESH_TOKEN', '').strip()
