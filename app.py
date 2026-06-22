@@ -15,7 +15,7 @@ Deploy (Railway): add `anthropic` to requirements.txt; set env ANTHROPIC_API_KEY
 FANVUE_*, MY_UUID, TELEGRAM_*, DASHBOARD_PASSWORD). Point DB_PATH at the same volume as before.
 """
 
-from flask import Flask, request
+from flask import Flask, request, redirect
 import requests
 import os
 import re
@@ -47,6 +47,8 @@ app = Flask(__name__)
 
 FANVUE_CLIENT_ID     = os.environ.get('FANVUE_CLIENT_ID', '')
 FANVUE_CLIENT_SECRET = os.environ.get('FANVUE_CLIENT_SECRET', '')
+FANVUE_REDIRECT_URI  = os.environ.get('FANVUE_REDIRECT_URI', 'https://web-production-f0a39.up.railway.app/callback')
+FANVUE_SCOPES        = os.environ.get('FANVUE_SCOPES', 'read:self read:chat write:chat read:fan read:creator read:media read:insights read:tracking_links write:tracking_links')
 ANTHROPIC_API_KEY    = os.environ.get('ANTHROPIC_API_KEY', '')
 MY_UUID              = os.environ.get('MY_UUID', '38a392fc-a751-49b3-9d74-01ac6447c490')
 TELEGRAM_BOT_TOKEN   = os.environ.get('TELEGRAM_BOT_TOKEN', '')
@@ -991,10 +993,44 @@ def dashboard():
     except FileNotFoundError:
         return "dashboard.html not found", 500
 
+@app.route('/connect')
+@require_auth
+def connect():
+    """Start the Fanvue OAuth flow with the FULL scope set. Visit /connect?pw=<DASHBOARD_PASSWORD>."""
+    state = uuid.uuid4().hex
+    save_token('oauth_state', state)
+    from urllib.parse import urlencode
+    url = "https://auth.fanvue.com/oauth2/auth?" + urlencode({
+        'client_id': FANVUE_CLIENT_ID, 'redirect_uri': FANVUE_REDIRECT_URI,
+        'response_type': 'code', 'scope': FANVUE_SCOPES, 'state': state})
+    return redirect(url, code=302)
+
 @app.route('/callback')
 def callback():
-    code = request.args.get('code')
-    return (f"Code: {code[:30]}...", 200) if code else ("No code", 400)
+    """Fanvue redirects here with ?code=...&state=...; exchange the code for a full-scope token."""
+    code = request.args.get('code'); state = request.args.get('state')
+    if not code:
+        return ("No code in callback", 400)
+    if not state or state != load_token('oauth_state'):
+        return ("Invalid/expired state — start again at /connect?pw=...", 400)
+    try:
+        r = requests.post("https://auth.fanvue.com/oauth2/token",
+            data={"grant_type": "authorization_code", "code": code, "redirect_uri": FANVUE_REDIRECT_URI},
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Authorization": get_basic_auth_header()},
+            timeout=15)
+        if r.status_code != 200:
+            return (f"Token exchange failed: {r.status_code} {r.text[:400]}", 400)
+        d = r.json()
+        rt = d.get('refresh_token')
+        if not rt:
+            return (f"No refresh_token returned: {r.text[:400]}", 400)
+        save_token('refresh_token', rt); save_token('oauth_state', '')
+        access, msg = refresh_fanvue_token()   # derive access_token + expires_at the standard way
+        ok = bool(access)
+        return (f"<h2>{'✅' if ok else '⚠️'} Fanvue connected with full scopes. Token test: {msg}. You can close this tab.</h2>",
+                200 if ok else 500)
+    except Exception as e:
+        return (f"Error: {e}", 500)
 
 @app.route('/set_token', methods=['POST'])
 @require_auth
