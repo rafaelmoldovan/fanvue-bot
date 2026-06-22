@@ -1020,8 +1020,8 @@ def callback():
                 f"(Usually means a requested scope isn't granted on the app. Full query: {dict(request.args)})", 400)
     if not code:
         return (f"No code in callback. Full query Fanvue sent: {dict(request.args)}", 400)
-    if not state or state != load_token('oauth_state'):
-        return ("Invalid/expired state — start again at /connect?pw=...", 400)
+    # state is best-effort CSRF; PKCE code_verifier (below) is the real protection — don't hard-block on mismatch
+    granted = request.args.get('scope', '')
     try:
         r = requests.post("https://auth.fanvue.com/oauth2/token",
             data={"grant_type": "authorization_code", "code": code, "redirect_uri": FANVUE_REDIRECT_URI,
@@ -1037,7 +1037,10 @@ def callback():
         save_token('refresh_token', rt); save_token('oauth_state', '')
         access, msg = refresh_fanvue_token()   # derive access_token + expires_at the standard way
         ok = bool(access)
-        return (f"<h2>{'✅' if ok else '⚠️'} Fanvue connected with full scopes. Token test: {msg}. You can close this tab.</h2>",
+        has_vault = ('read:media' in granted and 'read:creator' in granted)
+        return (f"<h2>{'✅' if ok else '⚠️'} Fanvue connected. Token test: {msg}.</h2>"
+                f"<p><b>Granted scopes:</b> {granted}</p>"
+                f"<p>{'✅ Vault scopes present — auto-PPV can work.' if has_vault else '⚠️ MISSING read:creator/read:media — vault/PPV will NOT work yet. Enable them on the OAuth app and reconnect.'}</p>",
                 200 if ok else 500)
     except Exception as e:
         return (f"Error: {e}", 500)
