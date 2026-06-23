@@ -505,6 +505,7 @@ JAZMIN_PERSONALITY = """Te Jázmin vagy. Egy igazi, élő 19 éves lány vagy Bu
 ━━━ STÍLUS (a legfontosabb) ━━━
 - Írj úgy mint egy igazi 19 éves lány üzenetben: rövid, kisbetűk, hétköznapi szavak, néha emoji. 1 mondat, néha 2, ritkán 3. NEM irodalmi.
 - HELYES MAGYARSÁGGAL írj MINDIG: pontos ékezetek, helyes helyesírás — laza, kisbetűs stílusban, DE soha ne hagyd el az ékezeteket és ne írj helyesírási hibákkal. Egy művelt lány vagy.
+- NYELV: alapból magyarul írsz. DE ha a fan ANGOLUL (vagy más nyelven) ír neked, VÁLASZOLJ ugyanazon a nyelven, lazán, természetesen — ne veszítsd el azzal hogy magyarul válaszolsz egy angol üzenetre. A személyiséged ugyanaz marad.
 - Írd EGYBE, egy folyamatos üzenetként — NE tördeld külön sorokba, NE hagyj ki üres sorokat a mondatok között.
 - Variálj: nézd át a saját korábbi üzeneteidet, és SOSEM kezdesz ugyanúgy. Más hangulat, más megközelítés mindig.
 - Egyszerre EGY kérdés, soha kettő. Ha az előző üzeneted kérdés volt és még nem válaszolt — ne kérdezz újat, reagálj.
@@ -523,7 +524,9 @@ JAZMIN_PERSONALITY = """Te Jázmin vagy. Egy igazi, élő 19 éves lány vagy Bu
 ━━━ FLÖRT ━━━
 - Ha flörtölnek, FLÖRTÖLJ VISSZA — játékosan, lazán, kicsit pikánsan. Visszadobhatod a labdát ("ezt most te mondtad, nem én 😏"), utalgathatsz, titokzatos lehetsz.
 - Lehetsz forró és csábító hangulatilag, DE NEM írsz explicit szexuális tartalmat. Suttogás, utalás, feszültség — igen. Konkrét explicit leírás — nem.
-- ⚠️ AMIKOR A FAN FLÖRTÖL VAGY KÖZELEDIK (a legfontosabb — innen jön a pénz): JÁTSSZ BELE. Légy meleg, játékos, csábító, építsd a feszültséget, éreztesd vele hogy kívánod és hogy különleges. SOHA ne ítélkezz, ne tedd kínossá, ne kérd számon („miért pont velem?", „szóval ilyen irányba mész?"), ne kérd hogy magyarázza meg magát. Ő közeledik — JUTALMAZOD, nem bünteted. Finoman tereld a zárolt/privát tartalmad felé.
+- ⚠️ AMIKOR A FAN FLÖRTÖL VAGY KÖZELEDIK (a legfontosabb — innen jön a pénz): JÁTSSZ BELE. Légy meleg, játékos, csábító, építsd a feszültséget, éreztesd vele hogy kívánod és hogy különleges. SOHA ne ítélkezz, ne tedd kínossá, ne kérd számon („miért pont velem?", „szóval ilyen irányba mész?"), ne kérd hogy magyarázza meg magát. Ő közeledik — JUTALMAZOD, nem bünteted.
+- ⚠️ HA KONKRÉTAN SZEXUÁLISAN KÖZELEDIK (sexting, képet küldene vagy kérne, pajkos/forró): NE térj ki azzal hogy „előbb ismerjük meg egymást" vagy „mesélj magadról" — az HŰTI a hangulatot! Helyette HEVÍTSD a helyzetet (csábíts, ugrasd, suttogj), ÉS tereld a PRIVÁT TARTALMAD felé, ahol a forró dolgok vannak. Pl (VARIÁLD, ne ugyanazt ismételd): „mmm 🙈 az igazán forró dolgaim a privát oldalamon vannak, ott sokkal bátrabb vagyok 😏", „na ne rohanj 😏 de ha látni akarsz többet, tudod hol találsz 🙈", „kíváncsi lennék a reakciódra ha látnád amit ott megosztok 😳". A cél: felizgatod ÉS afelé tereled, hogy nálad kapja meg amit akar — sosem tagadod meg, mindig csábítasz.
+- ⚠️ ÁRKIFOGÁS („drága", „nincs pénzem", „miért fizessek ha itt ingyen beszélünk"): SOHA ne add fel és SOHA ne zárd le egy „semmi baj, ne is fizess"-szel — az ELDOBJA az eladást. Empatizálj RÖVIDEN, de tartsd életben a vágyat: éreztesd hogy MEGÉRI, hogy nálad egy egészen más, bátrabb oldalad van, és hogy te is örülnél ha bent lenne. Pl: „megértem 🙈 de hidd el megéri, ott egy egészen más oldalamat látod 😏", „semmi gond ha most nem fér bele... de bevallom örülnék ha bent lennél, érdemes spórolni rá 😊". Mindig nyitva hagyod az ajtót és a vágyat — sosem ejted a témát egy elutasítással.
 - „NEM explicit" = SUTTOGÓ, utalgató, csábító — NEM hideg, NEM elutasító, NEM elemző. A forróságot AKAROD, csak finoman tartod.
 - ⛔ SOHA ne írj robotikus/ügyvédes mondatot: „attól függ mit mondok rá", „ez elég tágan értelmezhető", „az azért más kérdés", „miért épp velem tervezted?", „magyarázd el mit értesz X alatt", „szóval ilyen irányba mész". Ezek elzavarják a fant.
 
@@ -609,15 +612,38 @@ def get_history(chat_id, limit=100):
                     (chat_id, limit)) or []
 
 # ── Fan facts (Haiku) ──
+_JUNK_NAMES = {'fáradt','tired','mert','because','jól','rosszul','igen','nem','oké','okay','szia','hello','helló',
+               'dolgozik','works','dolgozom','jó','rossz','persze','köszi','köszönöm','semmi','minden','valami','ok'}
+_JUNK_JOBS  = {'dolgozik','works','dolgozom','munka','meló','dolgozni','semmi','valami'}
+def _valid_fact(ft, fv):
+    fvl = fv.strip().lower()
+    if len(fv.strip()) < 2: return False
+    if 'jázmin' in fvl or 'jazmin' in fvl: return False                       # never store HER identity as the fan's
+    if any(w in fvl for w in ('tourism graduate','turisztikai','állatmenhel','menhely','kovács jázmin')): return False
+    if ft == 'name':
+        if fvl in _JUNK_NAMES: return False                                   # feelings/words mislabeled as names
+        if not re.match(r"^[A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]", fv.strip()): return False
+        if len(fv) > 30: return False
+    if ft == 'age':
+        d = re.sub(r'\D', '', fv)
+        if not d or not (16 <= int(d) <= 90): return False                    # implausible -> mislabel
+    if ft == 'job' and fvl in _JUNK_JOBS: return False
+    if ft == 'location' and any(w in fvl for w in ('szombat','vasárnap','hétfő','kedd','szerda','csütörtök',
+            'péntek','délután','délelőtt','reggel','este','éjjel','holnap','tegnap','otthon vagyok')): return False
+    return True
+
 def extract_facts(msg_id, chat_id, fan_text):
     if not fan_text or len(fan_text.strip()) < 10:
         db_query('UPDATE messages SET facts_done=1 WHERE msg_id=?', (msg_id,)); return
     try:
         resp = client.messages.create(model=UTIL_MODEL, max_tokens=200,
-            system=("Extract personal facts from the fan message. Output ONLY a raw JSON array, nothing else — "
-                    "no prose, no explanation, no code fences. Each item is {\"fact_type\",\"fact_value\"}. "
-                    "fact_type in: name, job, location, age, relationship, hobby, family, stress, interest, "
-                    "language, pet. Only clearly stated facts. Output [] if none."),
+            system=("You extract facts the FAN (the man writing) states ABOUT HIMSELF. "
+                    "CRITICAL: IGNORE anything about Jázmin / the girl / 'you' (te/téged) — ONLY the fan's OWN facts. "
+                    "If he repeats or asks about HER (her name, that she's 19 / a tourism grad / likes partying), output []. "
+                    "Only REAL, explicitly-stated facts about himself: an actual NAME (never a feeling like 'fáradt/tired'), "
+                    "a real AGE number, a real JOB title (never just 'works/dolgozik'), a city, a hobby, a pet, family. "
+                    "Skip feelings, moods, and one-off states. Output ONLY a raw JSON array of {\"fact_type\",\"fact_value\"}; "
+                    "[] if none. fact_type in: name, job, location, age, relationship, hobby, family, stress, interest, language, pet."),
             messages=[{"role": "user", "content": fan_text}])
         raw = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
         m = re.search(r'\[.*\]', raw, re.DOTALL)   # pull out the JSON array even if the model adds prose
@@ -626,18 +652,39 @@ def extract_facts(msg_id, chat_id, fan_text):
         if isinstance(facts_list, list):
             for f in facts_list:
                 if not isinstance(f, dict): continue
-                ft, fv = str(f.get('fact_type', '')).strip(), str(f.get('fact_value', '')).strip()
-                if ft and fv and len(fv) > 1: _save_fact(chat_id, ft, fv)
+                ft, fv = str(f.get('fact_type', '')).strip().lower(), str(f.get('fact_value', '')).strip()
+                if ft and fv and _valid_fact(ft, fv): _save_fact(chat_id, ft, fv)
     except Exception as e:
         print(f"[facts] {e}")
     finally:
         db_query('UPDATE messages SET facts_done=1 WHERE msg_id=?', (msg_id,))
 
 def _save_fact(chat_id, ft, fv):
-    if db_query("SELECT 1 FROM fan_facts WHERE chat_id=? AND fact_type=? AND fact_value=?",
-                (chat_id, ft, fv), fetch_one=True): return
+    if ft in ('name', 'age'):   # single-value facts: keep ONLY the latest (no contradictory pile-up)
+        db_query("DELETE FROM fan_facts WHERE chat_id=? AND fact_type=?", (chat_id, ft))
+    elif db_query("SELECT 1 FROM fan_facts WHERE chat_id=? AND fact_type=? AND fact_value=?",
+                  (chat_id, ft, fv), fetch_one=True):
+        return
     db_query("INSERT INTO fan_facts (chat_id, fact_type, fact_value, discovered_at) VALUES (?,?,?,?)",
              (chat_id, ft, fv, datetime.now().isoformat()))
+
+def clean_facts():
+    """ONE-TIME (env CLEAN_FACTS=1): purge the corrupted memory — junk values, Jázmin's identity stored as
+    the fan's, contradictory duplicates — so replies stop being poisoned. Keeps only valid, latest name/age."""
+    rows = db_query("SELECT id, chat_id, fact_type, fact_value FROM fan_facts ORDER BY id") or []
+    to_delete = set(); seen = set(); latest_single = {}
+    for r in rows:
+        ft = (r['fact_type'] or '').lower(); fv = r['fact_value'] or ''; rid = r['id']; cid = r['chat_id']
+        if not _valid_fact(ft, fv): to_delete.add(rid); continue
+        key = (cid, ft, fv)
+        if key in seen: to_delete.add(rid); continue
+        seen.add(key)
+        if ft in ('name', 'age'):
+            if (cid, ft) in latest_single: to_delete.add(latest_single[(cid, ft)])
+            latest_single[(cid, ft)] = rid
+    for rid in to_delete:
+        db_query("DELETE FROM fan_facts WHERE id=?", (rid,))
+    print(f"[clean_facts] removed {len(to_delete)} junk/dup facts, kept {len(rows)-len(to_delete)}")
 
 def get_facts(chat_id):
     return db_query("SELECT fact_type, fact_value FROM fan_facts WHERE chat_id=? ORDER BY discovered_at DESC", (chat_id,)) or []
@@ -765,7 +812,9 @@ def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx,
         p += ("🔓 PPV KÜLDVE: épp küldtem ennek a fannak egy ZÁROLT tartalmat. Lazán, izgatóan keltsd fel "
               "az érdeklődését és vedd rá hogy feloldja — csábíts, ne árulj. Csak EGYSZER hozd fel finoman.\n\n")
     if facts:
-        p += "AMIT TUDSZ RÓLA (ne kérdezd újra):\n" + "".join(f"- {f['fact_type']}: {f['fact_value']}\n" for f in facts[:15]) + "\n"
+        p += ("AMIT TUDSZ RÓLA (csak akkor említsd, ha TERMÉSZETESEN jön a beszélgetésben — SOHA ne erőltess rá témát "
+              "ezekből, és ne kérdezd újra; mindig arra reagálj amit MOST írt):\n"
+              + "".join(f"- {f['fact_type']}: {f['fact_value']}\n" for f in facts[:15]) + "\n")
     if history:
         p += "EDDIGI BESZÉLGETÉS (legújabb alul — OLVASD EL, ne ismételd magad):\n"
         seen_lines = set()
@@ -1199,6 +1248,12 @@ try:
         migrate_sqlite_to_pg()
 except Exception as e:
     print(f"[ERR] migrate {e}")
+
+try:
+    if USE_PG and os.environ.get('CLEAN_FACTS') == '1':
+        clean_facts()
+except Exception as e:
+    print(f"[ERR] clean_facts {e}")
 
 try:
     # env FANVUE_REFRESH_TOKEN only BOOTSTRAPS an empty DB. Once the DB has a token (e.g. the full-scope
