@@ -66,8 +66,9 @@ TELEGRAM_BOT_TOKEN   = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID     = os.environ.get('TELEGRAM_CHAT_ID', '')
 DASHBOARD_PASSWORD   = os.environ.get('DASHBOARD_PASSWORD', 'jazmin2024')
 
-REPLY_MODEL = 'claude-sonnet-4-6'   # the chat brain (persona, flirting, depth)
-UTIL_MODEL  = 'claude-haiku-4-5'    # facts + vision (cheap/fast)
+REPLY_MODEL          = os.environ.get('REPLY_MODEL', 'claude-sonnet-4-6')          # the chat brain (persona, flirting, depth)
+REPLY_MODEL_FALLBACK = os.environ.get('REPLY_MODEL_FALLBACK', 'claude-haiku-4-5')  # degraded-but-functional if the primary errors out
+UTIL_MODEL           = os.environ.get('UTIL_MODEL', 'claude-haiku-4-5')            # facts + vision (cheap/fast)
 
 POLL_INTERVAL        = 8     # SCAN loop cadence (new-message pickup)
 SEND_INTERVAL        = 4     # SEND loop cadence — fires due replies fast, on its own thread
@@ -339,13 +340,22 @@ def refresh_fanvue_token():
     except Exception as e:
         return None, f"err {e}"
 
+_token_refresh_lock = threading.Lock()
 def get_fanvue_token():
     access, exp = load_token('access_token'), load_token('expires_at')
     if access and exp:
         try:
             if datetime.now() < datetime.fromisoformat(exp): return access
         except Exception: pass
-    return refresh_fanvue_token()[0]
+    # serialize refreshes so two threads/requests don't both burn the (single-use) refresh token;
+    # re-check inside the lock in case another worker just refreshed while we were waiting.
+    with _token_refresh_lock:
+        access, exp = load_token('access_token'), load_token('expires_at')
+        if access and exp:
+            try:
+                if datetime.now() < datetime.fromisoformat(exp): return access
+            except Exception: pass
+        return refresh_fanvue_token()[0]
 
 def get_headers():
     return {"Authorization": f"Bearer {get_fanvue_token() or ''}",
@@ -929,10 +939,11 @@ def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx,
 # CLAUDE REPLY  (Sonnet 4.6 + prompt caching on the static persona)
 # ─────────────────────────────────────────────────────────────────────────────
 def ask_claude(dynamic_prompt, user_text):
+    model = REPLY_MODEL
     for attempt in range(3):
         try:
             resp = client.messages.create(
-                model=REPLY_MODEL, max_tokens=220, temperature=0.85,
+                model=model, max_tokens=220, temperature=0.85,
                 system=[
                     {"type": "text", "text": JAZMIN_PERSONALITY, "cache_control": {"type": "ephemeral"}},
                     {"type": "text", "text": dynamic_prompt},
@@ -944,7 +955,7 @@ def ask_claude(dynamic_prompt, user_text):
             reply = re.sub(r"  +", " ", reply).strip()
             if _BANNED_PHRASE.search(reply):                 # robotic / "go to my private page" relapse -> regenerate ONCE
                 try:
-                    resp2 = client.messages.create(model=REPLY_MODEL, max_tokens=220, temperature=0.85,
+                    resp2 = client.messages.create(model=model, max_tokens=220, temperature=0.85,
                         system=[{"type": "text", "text": JAZMIN_PERSONALITY, "cache_control": {"type": "ephemeral"}},
                                 {"type": "text", "text": dynamic_prompt},
                                 {"type": "text", "text": "FONTOS: az előző válaszod tiltott fordulatot tartalmazott (attól függ / mit értesz X alatt / menj a privát oldalamra). EZ ITT a Fanvue = a privát oldalad; írd újra TERMÉSZETESEN, e nélkül."}],
@@ -962,6 +973,9 @@ def ask_claude(dynamic_prompt, user_text):
         except anthropic.RateLimitError:
             time.sleep(8 * (attempt + 1))
         except Exception as e:
+            if model != REPLY_MODEL_FALLBACK:        # primary errored (overload/500/etc.) -> try the fallback once
+                send_telegram_error(f"claude err on {model} ({e}); falling back to {REPLY_MODEL_FALLBACK}")
+                model = REPLY_MODEL_FALLBACK; continue
             send_telegram_error(f"claude err: {e}"); return ""
     return ""
 
@@ -1039,6 +1053,11 @@ def process_new_messages():
 # ─────────────────────────────────────────────────────────────────────────────
 def send_due_batches():
     if get_safe_mode(): return 0
+    # reclaim batches stuck in 'sending' (a worker died mid-generation) so they don't hang forever
+    try:
+        stale = (datetime.now() - timedelta(minutes=10)).isoformat()
+        db_claim("UPDATE scheduled_replies SET status='pending' WHERE status='sending' AND scheduled_time < ?", (stale,))
+    except Exception: pass
     sent = 0; handled = set()
     for item in get_due_batches():
         chat_id = item.get('chat_id'); batch_id = item['id']
@@ -1322,6 +1341,19 @@ def set_token():
 @app.route('/webhook', methods=['POST'])
 def fanvue_webhook():
     """Fanvue Purchase Received webhook -> confirm auto-PPV buys, log time-to-buy, Telegram alert."""
+    # OPT-IN signature check: set env FANVUE_WEBHOOK_SECRET to enable. Confirm Fanvue's exact signing scheme/header
+    # in their webhook docs. If a recognized signature header is present it's verified strictly; otherwise fail-open.
+    _secret = os.environ.get('FANVUE_WEBHOOK_SECRET', '')
+    if _secret:
+        import hmac, hashlib
+        _raw = request.get_data() or b""
+        _sig = (request.headers.get('X-Fanvue-Signature') or request.headers.get('Fanvue-Signature')
+                or request.headers.get('X-Signature') or '').strip()
+        if _sig:
+            _expected = hmac.new(_secret.encode(), _raw, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(_sig.split('=')[-1].lower(), _expected.lower()):
+                print("[webhook] signature mismatch -> rejected", flush=True)
+                return {"ok": False, "error": "bad signature"}, 401
     d = request.get_json(force=True, silent=True) or {}
     sender = d.get('sender') or {}
     buyer = sender.get('uuid'); price = d.get('price'); ts = d.get('timestamp')
