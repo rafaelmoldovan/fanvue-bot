@@ -562,38 +562,68 @@ _AIRE   = re.compile(r"(\ba\.?i\b|\brobot\b|\bbot\b|chat ?gpt|\bgpt\b|mesters[é
 _FROMTG = re.compile(r"(telegramr[óo]l|telegramb[óo]l|telegramon|telegramban|tg[- ]?r[őo]l|\btg[- ]?n\b|came from telegram|from telegram|on telegram|onnan j[öo]tt.*telegram|telegram.*j[öo]tt|@?j[áa]zmink|j[áa]zminka)", re.I)
 def mentions_ai(t): return bool(_AIRE.search(t or ""))
 def came_from_telegram(t): return bool(_FROMTG.search(t or ""))
+# deterministic minor guard (mirror of the Telegram bot) — child-safety must NOT be LLM-only
+MINOR_MSG_F = "bocsi, de te még kiskorú vagy, így nem tudok veled beszélgetni. vigyázz magadra! 🙏"
+_AGE_TEEN_F = re.compile(
+    r"\b1[0-7]\s*[ée]ves(?:ek|en)?\b"
+    r"|\b1[0-7]\s+(?:vagyok|leszek|m[úu]lt[áa]m|elm[úu]lt[áa]m|lettem)\b"
+    r"|\bén\s+1[0-7]\b(?!\s*[-–]|\s*(?:[ée]ve\b|[ée]vesen|km|kilo|m[ée]ter|alma|[óo]r[áa]|perc|kg|cm|fok|m[ée]ret))"
+    r"|\btizen(egy|kett[oő]|h[áa]rom|n[ée]gy|[öo]t|hat|h[ée]t)\s*[ée]ves(?:ek|en)?\b"
+    r"|\btizen(egy|kett[oő]|h[áa]rom|n[ée]gy|[öo]t|hat|h[ée]t)\s+(?:vagyok|leszek|m[úu]lt[áa]m|lettem)\b", re.I)
+_KID_SUBJECT_F = re.compile(r"\b(l[áa]ny(om|a|od|unk)?|fi(am|a|ad|unk)?|gyerek\w*|kisl[áa]ny\w*|kisfi\w*|unok\w*|[öo]cs\w*|h[úu]g\w*|testv[ée]r\w*|kuty\w*|cic\w*|macsk\w*)\b", re.I)
+def is_minor_fan(t):
+    t = (t or "").strip()
+    if re.search(r"kisk[oó]r[uú]|nem vagyok nagykor|m[ée]g iskol[áa]s\s+vagyok|[áa]ltal[áa]nos\w*\s+iskol", t, re.I): return True
+    return bool(_AGE_TEEN_F.search(t)) and not bool(_KID_SUBJECT_F.search(t))
 def looks_like_handle(t):
     t = (t or "").strip()
     return bool(re.fullmatch(r"@?[A-Za-z0-9_]{3,32}", t))
 
 # ── POST-GENERATION SAFETY (mirror of the Telegram bot): the model must NEVER type a URL/handle,
 # leak an address/district, or promise one. Persona text alone hasn't held, so scrub/deflect deterministically. ──
-_URL_RE      = re.compile(r"\b(?:https?://|www\.)\S+|\b[\w-]+\.(?:com|net|org|me|tv|io|hu)/\S+|(?<!\w)@[A-Za-z0-9_.]{3,}", re.I)
-_STREET_RE   = re.compile(r"\b[A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]{3,}\s*(?:utca|utc[aá]ja|[úu]t|[úu]tja|t[ée]r|tere|k[öo]r[úu]t|s[ée]t[áa]ny|rakpart|k[öo]z)\s*\.?\s*\d{1,4}\b", re.I)
-_DISTRICT_RE = re.compile(r"\b[IVX]{1,5}\.?\s*ker[üu]let|\bker[üu]let\b.{0,18}\d|\bzugl[óo]\b", re.I)
-_ADDR_PROMISE= re.compile(r"\bc[íi]m(et|em|e|ed)?\b.{0,25}(k[üu]ld|megadom|megkapod|elk[üu]ld|megmondom)|pontos\s+c[íi]m|\bh[áa]zsz[áa]m", re.I)
+_URL_RE      = re.compile(r"\b(?:https?://|www\.)\S+|\b[\w-]+\.(?:com|net|org|me|tv|io|hu|co|app|xyz|info|gg)\b(?:/\S*)?|(?<![\w@])@[A-Za-z0-9_.]{2,}", re.I)
+_STREET_RE   = re.compile(r"\b[A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]{3,}\s*(?:utca|utc[aá]ja|[úu]t|[úu]tja|t[ée]r|tere|t[ée]ren|k[öo]r[úu]t|s[ée]t[áa]ny|rakpart|k[öo]z)\s*\.?\s*\d{1,4}\b", re.I)
+_DISTRICT_RE = re.compile(r"\b[IVX]{1,5}\.?\s*ker[üu]let|\bker[üu]let\b.{0,18}\d|\bzugl[óo]\w*", re.I)
+_ADDR_PROMISE= re.compile(r"\b(?:c[íi]m|lakc[íi]m)\w*\b.{0,25}(k[üu]ld|megadom|megkapod|elk[üu]ld|megmondom|meg[íi]rom)|(k[üu]ld|megadom|elk[üu]ld|megmondom|meg[íi]rom)\w*.{0,15}\b(?:c[íi]m|lakc[íi]m)|pontos\s+c[íi]m|\bh[áa]zsz[áa]m|\bhol\s+lak", re.I)
+_TIME_MEET   = re.compile(r"\b\d{1,2}\s*(?:[óo]rakor|[óo]ra|kor)\b.{0,30}(tal[áa]lkoz|j[öo]v[öo]k|megyek|ott\s+vagyok|n[áa]lad|sarkon)|(tal[áa]lkoz\w*|j[öo]v[öo]k|megyek)\b.{0,20}\b\d{1,2}\s*(?:[óo]rakor|kor)\b", re.I)
 ADDRESS_DEFLECT = [
     "haha ne rohanjunk ennyire 🙈 előbb ismerjük meg egymást rendesen, jó? 😊",
     "naa, nem szoktam rögtön címet vagy konkrét talit megbeszélni 😄 előbb beszélgessünk még sokat 🙈",
     "majd egyszer talán 😊 de most még csak ismerkedünk, élvezzük ezt egy kicsit 🙈",
 ]
 def scrub_urls(t):
-    """Strip any URL / @handle the model typed — links are only ever sent deterministically, never typed."""
+    """Strip any URL / bare domain / @handle the model typed — links are only ever sent deterministically."""
     return re.sub(r"\s{2,}", " ", _URL_RE.sub("", t or "")).strip()
 def leaks_meetup(t):
-    """True if the reply hands out an address/district or promises one — never let that reach the fan."""
     t = t or ""
-    return bool(_STREET_RE.search(t) or _DISTRICT_RE.search(t) or _ADDR_PROMISE.search(t))
+    return bool(_STREET_RE.search(t) or _DISTRICT_RE.search(t) or _ADDR_PROMISE.search(t) or _TIME_MEET.search(t))
+# never DENY own identity/socials, never relapse to the "go to my other private page" confusion -> scrub/own
+_DENY_IDENTITY = re.compile(r"nem vagyok (fenn|fent|rajta|a)?\s*(a\s+)?(telegram|tiktok|insta)|nincs (telegram|tiktok|insta)|nem\s+(az\s+)?[ée]n\s+(vagyok|k[ée]pem|fot[óo])|hamis profil|valaki\s+l[ée]trehoz|valaki\s+m[áa]s\s+(fot[óo]|k[ée]p)|[öo]ssze\s*t[ée]veszt|[öo]ssze\s*kever|nem [ée]n vagyok az|nem az [ée]n k[ée]p", re.I)
+IDENTITY_OWN = ["jaa igen, az is én vagyok 🙈 örülök hogy itt is megtaláltál", "haha igen, én vagyok az 😊 itt vagyok igazán aktív", "igen, az én vagyok 🙂"]
+_BANNED_PHRASE = re.compile(r"att[óo]l f[üu]gg|t[áa]gan [ée]rtelmez|az az[ée]rt m[áa]s k[ée]rd[ée]s|magyar[áa]zd el mit [ée]rt|mit [ée]rtesz\b.{0,18}\balatt|men[jy] a priv[áa]t olda|a priv[áa]t oldalamon|tudod hol tal[áa]lsz", re.I)
+def collapse_doubles(t):
+    return re.sub(r"\b(\w+)\s+\1\b", r"\1", t or "", flags=re.I)
+_ADVANCE = re.compile(r"rosszalkod|k[íi]v[áa]nlak|szexel|\bszex\b|meztelen|forr[óo]\s+k[ée]p|punci|cici|\bmell\b|fasz|dug(j|n|ni|unk)|baszn|horny|\bnude\b|naked|\bfuck|szopn|felizgat|gerjed|merev|sexting", re.I)
+ADVANCE_HINT = ("FONTOS: A fan EXPLICITEN közeledik szexuálisan. JÁTSSZ BELE forrón, csábítóan (suttogás, utalás, feszültség — NEM explicit), és tereld afelé hogy "
+                "tudsz neki küldeni IDE a chatben valami forróbbat amit felold. SOHA ne hűtsd le azzal hogy előbb ismerjük meg egymást vagy mesélj magadról, és SOHA ne kérdezz vissza.")
+_EN_WORDS = re.compile(r"\b(you|your|you're|youre|do|does|did|are|what|have|has|the|i'm|im|how|hey|babe|want|can|could|when|where|love|miss|baby|gorgeous|beautiful|too|with|my|are you)\b", re.I)
+def fan_is_english(t):
+    t = t or ""
+    if re.search(r"[áéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t): return False   # Hungarian accents -> Hungarian
+    return len(_EN_WORDS.findall(t)) >= 2
+EN_DIRECTIVE = "IMPORTANT: the fan is writing in ENGLISH. Reply ONLY in English — do not write a single word in Hungarian. Stay fully in character as Jázmin."
 _EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF☀-➿←-⇿⬀-⯿️™ℹ]")
+EMOJI_OK = set("😄😂😊😉🙈😏🙂😅")
 def thin_emoji(t):
-    """Keep emojis rare & human: at most ONE (moved to the end), dropped entirely ~35% of the time —
-    so replies vary between 0 and 1 emoji instead of the bot-tell of an emoji on every single line."""
+    """At most ONE ALLOWED emoji (😄😂😊…), dropped ~35% of the time; banned/themed emoji (🥺🌹🥰🐶…) removed entirely."""
     t = t or ""
     found = _EMOJI_RE.findall(t)
     if not found: return t
     base = re.sub(r"\s{2,}", " ", _EMOJI_RE.sub("", t)).strip()
-    if not base: return t                       # emoji-only message -> leave it
-    return base if random.random() < 0.35 else (base + " " + found[-1])
+    if not base: return t
+    allowed = [e for e in found if e in EMOJI_OK]
+    if not allowed: return base
+    return base if random.random() < 0.35 else (base + " " + allowed[-1])
 
 def get_tg_history(handle, limit=50):
     """Pull this fan's earlier Telegram conversation from the SHARED db (tables made by jazmin_tg.py).
@@ -730,12 +760,23 @@ def clean_facts():
     print(f"[clean_facts] removed {len(to_delete)} junk/dup facts, kept {len(rows)-len(to_delete)}")
 
 def get_facts(chat_id):
-    return db_query("SELECT fact_type, fact_value FROM fan_facts WHERE chat_id=? ORDER BY discovered_at DESC", (chat_id,)) or []
+    rows = db_query("SELECT fact_type, fact_value FROM fan_facts WHERE chat_id=? ORDER BY discovered_at DESC", (chat_id,)) or []
+    # read-time filter: legacy junk facts (Jázmin's own name, minor ages, garbage) must NEVER reach a prompt,
+    # even before clean_facts() is run. De-dup while we're at it.
+    out, seen = [], set()
+    for r in rows:
+        ft, fv = r.get('fact_type'), (r.get('fact_value') or '')
+        if not _valid_fact(ft, fv): continue
+        key = (ft, fv.strip().lower())
+        if key in seen: continue
+        seen.add(key); out.append(r)
+    return out
 
 def get_real_name(chat_id):
     r = db_query("SELECT fact_value FROM fan_facts WHERE chat_id=? AND fact_type='name' ORDER BY discovered_at DESC LIMIT 1",
                  (chat_id,), fetch_one=True)
-    return r['fact_value'].strip() if r and r.get('fact_value') else ""
+    nm = r['fact_value'].strip() if r and r.get('fact_value') else ""
+    return nm if _valid_fact('name', nm) else ""    # never address the fan as "Jázmin"/a junk name
 
 # ── Photo vision (Haiku) ──
 def describe_image(media_type, b64):
@@ -880,7 +921,8 @@ def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx,
         p += "\nEZ ÚJ/ÚJRAINDULT BESZÉLGETÉS. Kezdj lazán (pl 'heyy', 'szia, mizu') — variálj!\n"
     else:
         p += f"\nEZ FOLYTATÁS. NE köszönj újra! Kezdj '{random.choice(CONTINUATIONS)}'-szerűen vagy egyből a lényegre.\n"
-    p += "\nEGYETLEN rövid, természetes üzenetet írj vissza magyarul, 1-2 mondat. Ha a fan szomorú/nehéz dolgot ír — ELŐSZÖR arra reagálj."
+    p += ("\nEGYETLEN rövid, természetes üzenetet írj vissza, 1-2 mondat. NYELV: a FAN nyelvén válaszolj — ha a fan ANGOLUL (vagy más nyelven) "
+          "írt, ANGOLUL válaszolj; alapból magyarul. Ha a fan szomorú/nehéz dolgot ír — ELŐSZÖR arra reagálj.")
     return p
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -900,11 +942,23 @@ def ask_claude(dynamic_prompt, user_text):
             if reply.startswith('"') and reply.endswith('"'): reply = reply[1:-1].strip()
             reply = re.sub(r"\s*\n+\s*", " ", reply)        # one continuous message, no blank lines
             reply = re.sub(r"  +", " ", reply).strip()
-            reply = scrub_urls(reply)                        # model must NEVER type a URL/handle (e.g. the leaked FB link)
-            if leaks_meetup(reply):                          # never leak an address/district or promise one
-                print("[safety] meetup/address scrubbed from reply", flush=True)
-                reply = random.choice(ADDRESS_DEFLECT)
-            return thin_emoji(reply)                         # at most 1 emoji, often 0 — kill the bot-tell
+            if _BANNED_PHRASE.search(reply):                 # robotic / "go to my private page" relapse -> regenerate ONCE
+                try:
+                    resp2 = client.messages.create(model=REPLY_MODEL, max_tokens=220, temperature=0.85,
+                        system=[{"type": "text", "text": JAZMIN_PERSONALITY, "cache_control": {"type": "ephemeral"}},
+                                {"type": "text", "text": dynamic_prompt},
+                                {"type": "text", "text": "FONTOS: az előző válaszod tiltott fordulatot tartalmazott (attól függ / mit értesz X alatt / menj a privát oldalamra). EZ ITT a Fanvue = a privát oldalad; írd újra TERMÉSZETESEN, e nélkül."}],
+                        messages=[{"role": "user", "content": user_text}])
+                    r2 = "".join(b.text for b in resp2.content if b.type == "text").strip()
+                    if r2: reply = re.sub(r"\s+", " ", r2).strip()
+                except Exception: pass
+            reply = collapse_doubles(reply)                  # "mire mire" -> "mire"
+            reply = scrub_urls(reply)                        # model must NEVER type a URL/handle/domain (e.g. the leaked FB link)
+            if _DENY_IDENTITY.search(reply):                 # never deny own TG/TikTok/Insta/photos -> own it
+                print("[safety] identity-denial swapped", flush=True); reply = random.choice(IDENTITY_OWN)
+            if leaks_meetup(reply):                          # never leak an address/district/timed meetup
+                print("[safety] meetup/address scrubbed", flush=True); reply = random.choice(ADDRESS_DEFLECT)
+            return thin_emoji(reply)                         # at most 1 allowed emoji, often 0 — kill the bot-tell
         except anthropic.RateLimitError:
             time.sleep(8 * (attempt + 1))
         except Exception as e:
@@ -1022,7 +1076,12 @@ def send_due_batches():
             last_line = (seen[-1] if seen else fan_text_all).strip()
             prof2 = db_query("SELECT ai_strikes, awaiting_tg, tg_handle FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}
             override = None
-            if mentions_ai(fan_text_all):
+            if is_minor_fan(fan_text_all):                   # SAFETY: self-claimed minor -> refuse + pause + alert operator
+                db_query("UPDATE fan_profiles SET is_paused=1 WHERE chat_id=?", (chat_id,))
+                try: send_telegram_alert(f"⛔ MINOR claim from {item.get('fan_name') or chat_id} -> auto-refused + paused. Review/block.")
+                except Exception: pass
+                override = MINOR_MSG_F
+            elif mentions_ai(fan_text_all):
                 strikes = (prof2.get('ai_strikes') or 0) + 1
                 db_query("UPDATE fan_profiles SET ai_strikes=? WHERE chat_id=?", (strikes, chat_id))
                 override = AI_DENY_1 if strikes == 1 else AI_DENY_2
@@ -1033,6 +1092,10 @@ def send_due_batches():
                 db_query("UPDATE fan_profiles SET awaiting_tg=1 WHERE chat_id=?", (chat_id,))
                 override = "jaaa te onnan jöttél? 🙈 mi a telegram neved? hadd nézzem meg ki vagy 🥰"
 
+            if override is None and _ADVANCE.search(fan_text_all):   # explicit advance -> heat up + sell PPV here (never cold)
+                dyn = dyn + "\n\n" + ADVANCE_HINT
+            if override is None and fan_is_english(fan_text_all):     # English fan -> force English (persona is Hungarian-dominant)
+                dyn = dyn + "\n\n" + EN_DIRECTIVE
             reply = override if override is not None else ask_claude(dyn, user_msg)
             if not reply:
                 db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,)); continue
