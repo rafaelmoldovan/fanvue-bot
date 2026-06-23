@@ -556,6 +556,7 @@ JAZMIN_PERSONALITY = """Te Jázmin vagy. Egy igazi, élő 19 éves lány vagy Bu
 - Ha a fan megkérdezi „mivel tudsz szolgálni?" / „mit kapok?" / többet akar → NE terelj el egy ködös „privát oldalra"; konkrétan éreztesd hogy tudsz neki KÜLDENI IDE valami különlegeset (zárolt fotó/videó) amit felold. Pl: „tudok küldeni neked pár olyat amit nem rakok ki nyilvánosan 🙈 érdekel?".
 - A pluszbevétel = ZÁROLT (PPV) tartalom amit ITT, a chatben küldesz, és a fan fizetéssel feloldja.
 - TE magadtól ritkán nyomulsz a fizetős tartalommal, de ha a fan érdeklődik vagy forró a hangulat, bátran tereld a „küldök neked valamit amit megnyitsz" felé.
+- ⛔⛔ SOHA ne állítsd hogy MÁR ELKÜLDTÉL egy képet/videót/tartalmat (NE „küldtem", „elküldtem", „feltöltöttem", „nézd meg a chatben", „ott van") — KIVÉVE ha fent szerepel a „PPV KÜLDVE" jelzés (akkor tényleg ment ki tartalom). Ha NINCS ilyen jelzés, akkor NEM ment ki SEMMI, így ha azt mondod hogy elküldted, HAZUDSZ és lebuksz (a fan nem fog látni semmit). SOHA ne találj ki technikai hibát sem (NE „furcsán viselkedik az oldal, frissíts"). Helyette ÉPÍTSD a vágyat és JÖVŐ IDŐBEN ígérd: „mindjárt összerakok neked valamit 🙈", „készítek neked valami bátrabbat, türelem 😏" — sosem múlt időben.
 - Ha a rendszer jelzi hogy "PPV KÜLDVE" (épp küldtem neki egy zárolt tartalmat) — akkor lazán, izgatóan felkelted az érdeklődését és ráveszed hogy feloldja. Pl: "küldtem neked valamit... 🙈 remélem tetszeni fog", "kicsit izgultam mikor csináltam, kíváncsi vagy? 😳". Játékos, csábító, nem tolakodó. Ne könyörögj, ne legyél árus — kelts vágyat.
 
 ━━━ MEMÓRIA ━━━
@@ -624,6 +625,15 @@ def fan_is_english(t):
     if re.search(r"[áéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t): return False   # Hungarian accents -> Hungarian
     return len(_EN_WORDS.findall(t)) >= 2
 EN_DIRECTIVE = "IMPORTANT: the fan is writing in ENGLISH. Reply ONLY in English — do not write a single word in Hungarian. Stay fully in character as Jázmin."
+# the bot CANNOT send media in normal chat (auto-PPV off) -> it must never CLAIM it sent something or fake a "glitch".
+# (Only legit when a real PPV was actually sent = ppv_pending; the caller gates on that.) Swap -> "coming" tease + alert.
+_FAKE_SEND = re.compile(r"\bk[üu]ldtem\b|\belk[üu]ldtem\b|feltölt[öo]ttem|m[áa]r (el)?k[üu]ldtem|chat\w*.{0,12}n[ée]zd|n[ée]zd meg.{0,12}(chat|priv|üzenet)|ott (van|lesz|tal[áa]l)\w*.{0,15}chat|a chatben.{0,15}(megn[ée]z|tal[áa]l|van)|\bfr[ie]ss[íi]t|technikai hib|furcs[áa]n viselked|megjelent hogy (el)?k[üu]ld", re.I)
+_PROMISE_SEND = re.compile(r"\bk[üu]ld[öo]m\b|\bk[üu]ld[öo]k\b|elk[üu]ld[öo]m|megk[üu]ld[öo]m|\bk[üu]ldj[üu]k\b", re.I)
+FAKE_SEND_TEASE = [
+    "várj egy picit, összerakok neked valamit 🙈",
+    "na türelem, készítek neked valami bátrabbat... megéri 😏",
+    "mindjárt hozok neked valami különlegeset, ne menj sehova 🙈",
+]
 _EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF☀-➿←-⇿⬀-⯿️™ℹ]")
 EMOJI_OK = set("😄😂😊😉🙈😏🙂😅")
 def thin_emoji(t):
@@ -1095,7 +1105,7 @@ def send_due_batches():
             # ── special overrides before the normal Claude reply ──
             fan_text_all = item['fan_text'] or ''
             last_line = (seen[-1] if seen else fan_text_all).strip()
-            prof2 = db_query("SELECT ai_strikes, awaiting_tg, tg_handle FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}
+            prof2 = db_query("SELECT ai_strikes, awaiting_tg, tg_handle, ppv_pending FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}
             override = None
             if is_minor_fan(fan_text_all):                   # SAFETY: self-claimed minor -> refuse + pause + alert operator
                 db_query("UPDATE fan_profiles SET is_paused=1 WHERE chat_id=?", (chat_id,))
@@ -1118,6 +1128,15 @@ def send_due_batches():
             if override is None and fan_is_english(fan_text_all):     # English fan -> force English (persona is Hungarian-dominant)
                 dyn = dyn + "\n\n" + EN_DIRECTIVE
             reply = override if override is not None else ask_claude(dyn, user_msg)
+            # the bot can't actually send media (auto-PPV off). If it CLAIMS it already sent (a lie) -> swap to a "coming"
+            # tease; if it just PROMISES to send ("küldöm") -> keep it. Either way, alert YOU to send the real PPV now.
+            if reply and not prof2.get('ppv_pending'):
+                _claimed = bool(_FAKE_SEND.search(reply)); _promised = bool(_PROMISE_SEND.search(reply))
+                if _claimed:
+                    reply = random.choice(FAKE_SEND_TEASE)
+                if _claimed or _promised:
+                    try: send_telegram_alert(f"💸 {item.get('fan_name') or chat_id}: ready to unlock — bot teed up content but auto-PPV is OFF → SEND THE PPV MANUALLY now.")
+                    except Exception: pass
             if not reply:
                 db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,)); continue
 
