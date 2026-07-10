@@ -65,10 +65,10 @@ REPLY_MODEL          = os.environ.get('REPLY_MODEL', 'claude-sonnet-4-6')
 REPLY_MODEL_FALLBACK = os.environ.get('REPLY_MODEL_FALLBACK', 'claude-haiku-4-5')
 UTIL_MODEL           = os.environ.get('UTIL_MODEL', 'claude-haiku-4-5')
 
-POLL_INTERVAL        = 8
-SEND_INTERVAL        = 4
-BATCH_WINDOW_MIN     = 24
-BATCH_WINDOW_MAX     = 38
+POLL_INTERVAL        = int(os.environ.get('POLL_INTERVAL', '5'))       # scan pickup (was 8) — tune live on Railway
+SEND_INTERVAL        = int(os.environ.get('SEND_INTERVAL', '4'))
+BATCH_WINDOW_MIN     = int(os.environ.get('BATCH_WINDOW_MIN', '12'))    # human debounce low  (was 24)
+BATCH_WINDOW_MAX     = int(os.environ.get('BATCH_WINDOW_MAX', '22'))    # human debounce high (was 38) → avg reply ~25-30s
 MANUAL_TAKEOVER_SECS = 120
 POLL_LOCK_TTL        = 25
 
