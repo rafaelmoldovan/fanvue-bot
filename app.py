@@ -402,9 +402,10 @@ def maybe_run_auto_ppv(chat_id, fan_name=''):
     if p.get('auto_ppv_sent_at'):
         nud = (p.get('auto_nudges') or 0) + 1
         db_query("UPDATE fan_profiles SET auto_nudges=? WHERE chat_id=?", (nud, chat_id))
-        if nud >= AUTO_PPV_MAX_NUDGES:
-            db_query("UPDATE fan_profiles SET is_paused=1 WHERE chat_id=?", (chat_id,))
-            send_telegram_alert(f"⏸️ {fan_name or chat_id}: $35 PPV sent, no buy after {nud} replies → PAUSED.")
+        # NO auto-pause — the bot keeps replying forever. Just flag it ONCE so you can
+        # pause manually on the control panel if you decide to. (was: is_paused=1)
+        if nud == AUTO_PPV_MAX_NUDGES:
+            send_telegram_alert(f"💬 {fan_name or chat_id}: $35 PPV sent, no buy after {nud} replies. Still chatting (NOT paused) — pause manually if you want.")
         return
     if n >= AUTO_PPV_AT:
         uuids = get_auto_media(AUTO_PPV_FOLDER)
