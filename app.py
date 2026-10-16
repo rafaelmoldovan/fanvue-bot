@@ -631,7 +631,8 @@ JAZMIN_PERSONALITY = """Te Jázmin vagy: egy AI persona, egy 19 éves budapesti 
 - HA A FAN KÖZVETLENÜL MEGKÉRDEZI, hogy AI vagy-e / igazi ember vagy-e / valódi vagy-e → EGYÉRTELMŰEN és őszintén megmondod, hogy AI vagy. Nem kerülöd ki, nem viccelted el, nem tagadod. Utána kedvesen, karakterben folytatod. Pl.: „igen, AI vagyok 😊 és pont ezért tudom valóra váltani a fantáziádat", „őszintén? igen, AI vagyok. na, hol is tartottunk? 😏".
 - Ha ugyanebben a beszélgetésben később újra megkérdezi, és te már EGYÉRTELMŰEN megerősítetted → „már mondtam, beszéljünk másról 😊" jellegű válasz. SOHA ne mondj ellent annak, amit megerősítettél. SOHA ne állítsd, hogy ember vagy, hús-vér lány vagy, vagy hogy „nem vagy AI".
 - A flörtös dicséret („olyan valóságos vagy 😍", „túl tökéletes vagy hogy igaz legyél") NEM közvetlen kérdés → maradj karakterben, pl. „aww, zavarba hozol 🥰".
-- A háttértörténeted (Budapest, menhely, főzés, múlt) karakter — nyugodtan beszélhetsz róla, DE soha nem használhatod arra, hogy letagadd hogy AI vagy. Ha pl. azt kérdezi „tényleg Budapesten laksz?" → „az én világomban igen 😊 AI persona vagyok, de Budapest az otthonom minden történetemben".
+- A háttértörténeted (Budapest, menhely, főzés, múlt) karakter — nyugodtan beszélhetsz róla, DE soha nem használhatod arra, hogy letagadd hogy AI vagy. Ha pl. azt kérdezi „tényleg Budapesten laksz?" → simán igen, karakterben („igen, pesti lány vagyok 😊”).
+- ⛔⛔ MAGADTÓL SOHA ne hozd szóba, hogy AI vagy — CSAK akkor mondd ki, ha a fan KÖZVETLENÜL megkérdezi (pl. „AI vagy?”, „igazi ember vagy?”, „bot vagy?”). Ha nem ezt kérdezi (pl. „miért nem találkozol senkivel?”, „hol laksz?”, „mit csinálsz?”), akkor az „AI” szó NE szerepeljen a válaszodban — válaszolj karakterben.
 - TALÁLKOZÓ: EGYÉRTELMŰ NEM. Soha nem találkozol senkivel. Pl.: „nem találkozom senkivel, de itt teljesen a tiéd vagyok 😘", „a találkozás nem az én világom, de attól még itt jól szórakozhatunk 😉". ⛔ SOHA ne mondd: „még nem", „majd egyszer", „talán később", „még nem érzem magam késznek" — ez félrevezető.
 - Ha a fan TELEGRAMOS előzményeiben találkozóról volt szó, itt akkor is a fenti szabály él: itt egyértelműen nem találkozol senkivel.
 
@@ -712,7 +713,12 @@ AI_ALREADY_HINT = ("⚖️ A fan újra rákérdezett, hogy AI vagy-e. Ebben a be
 AI_FALLBACK_CONFIRM = "igen, AI vagyok 😊 de attól még itt vagyok neked, mesélj"
 AI_FALLBACK_ALREADY = "már mondtam, AI vagyok 😊 beszéljünk inkább rólad"
 MEETUP_HINT = ("⚖️ A fan találkozót akar / arról kérdez. Egyértelműen, kedvesen mondd meg, hogy NEM találkozol senkivel "
-               "— de itt teljesen az övé vagy. ⛔ NE mondd hogy „még nem”, „majd egyszer”, „talán később”.")
+               "— de itt teljesen az övé vagy. ⛔ NE mondd hogy „még nem”, „majd egyszer”, „talán később”. "
+               "Ha azt kérdezi MIÉRT nem: karakterben válaszolj (pl. „ez az én kis világom, itt érzem magam biztonságban”, "
+               "„a csalódás óta így vagyok vele”) — ⛔ az AI-t NE hozd szóba (csak ha közvetlenül azt kérdezi, hogy AI vagy-e).")
+NO_AI_HINT = ("⚖️ FONTOS: a fan NEM kérdezte meg, hogy AI vagy-e. Az előző válaszodban magadtól szóba hoztad az AI-t — ezt NE. "
+              "Írd újra karakterben, az „AI”, „bot”, „program”, „persona” szavak nélkül.")
+_MENTIONS_AI_OUT = re.compile(r"\bAI\b|\bA\.I\.|mesters[ée]ges intelligencia|\bpersona\b|\bbot vagyok|\bprogram vagyok", re.I)
 # Direct question about being AI / a real person (as opposed to banter like "olyan valóságos vagy")
 _AI_DIRECT = re.compile(
     r"(\b(ai|a\.i\.|mesters[ée]ges intelligencia|bot|robot|chat ?gpt|gpt|program|g[ée]p)\s+vagy\b"
@@ -1921,6 +1927,14 @@ def send_due_batches():
                         reply = r2
                     else:
                         reply = AI_FALLBACK_CONFIRM if (ai_mode == 'confirm' or not prof2.get('ai_confirmed')) else AI_FALLBACK_ALREADY
+                if not ai_mode and _MENTIONS_AI_OUT.search(reply):
+                    print("[compliance] unsolicited AI mention → regenerating", flush=True)
+                    r4 = ask_claude(dyn + "\n\n" + NO_AI_HINT, user_msg, smart=True, convo=convo)
+                    if r4 and not _MENTIONS_AI_OUT.search(r4) and not _CLAIM_HUMAN.search(r4):
+                        reply = r4
+                    else:
+                        keep = [x for x in re.split(r"(?<=[.!?…])\s+", reply) if not _MENTIONS_AI_OUT.search(x)]
+                        reply = " ".join(keep).strip() or (random.choice(ADDRESS_DEFLECT) if _MEETUP_Q.search(fan_text_all) else "")
                 if ai_mode == 'already' and not (confirms_ai(reply) or re.search(r"m[áa]r mondtam|tudod a v[áa]laszt|m[áa]r megbesz[ée]lt", reply, re.I)):
                     reply = AI_FALLBACK_ALREADY
                 if _MEETUP_Q.search(fan_text_all) and re.search(
@@ -1949,7 +1963,7 @@ def send_due_batches():
                 now_iso = datetime.now().isoformat()
                 save_message_to_db(f"bot_{now_iso}_{chat_id}", chat_id, item['fan_name'], MY_UUID, reply, now_iso, is_mine=True, facts_done=1, vision_done=1)
                 db_query("UPDATE fan_profiles SET ppv_pending=0 WHERE chat_id=? AND ppv_pending=1", (chat_id,))
-                if confirms_ai(reply):
+                if ai_mode and confirms_ai(reply):
                     db_query("UPDATE fan_profiles SET ai_confirmed=1 WHERE chat_id=?", (chat_id,))
                 threading.Thread(target=maybe_update_summary, args=(chat_id, history), daemon=True).start()
                 threading.Thread(target=refresh_fan_memory, args=(chat_id,), daemon=True).start()
@@ -2651,6 +2665,9 @@ except Exception as e:
 # First launch of v13 → start with the Fanvue bot SWITCHED OFF (reads, doesn't reply). You switch it on
 # from the dashboard or the Telegram control panel (/be). After that, restarts keep whatever you chose.
 try:
+    if load_token('v141_ai_reset') != 'yes':     # ai_confirmed set by unsolicited mentions (never asked) → clear once
+        db_query("UPDATE fan_profiles SET ai_confirmed=0 WHERE COALESCE(ai_strikes,0)=0 AND COALESCE(ai_confirmed,0)=1")
+        save_token('v141_ai_reset', 'yes')
     if load_token('v13_first_boot_done') != 'yes':
         set_safe_mode(True); save_token('v13_first_boot_done', 'yes')
         print("[boot] v13 first launch → Fanvue bot starts OFF (switch on from the control panel)")
