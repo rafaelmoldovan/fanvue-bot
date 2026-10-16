@@ -798,6 +798,18 @@ def leaks_meetup(t):
 _DENY_IDENTITY = re.compile(r"nem vagyok (fenn|fent|rajta|a)?\s*(a\s+)?(telegram|tiktok|insta)|nincs (telegram|tiktok|insta)|nem\s+(az\s+)?[ée]n\s+(vagyok|k[ée]pem|fot[óo])|hamis profil|valaki\s+l[ée]trehoz|valaki\s+m[áa]s\s+(fot[óo]|k[ée]p)|[öo]ssze\s*t[ée]veszt|[öo]ssze\s*kever|nem [ée]n vagyok az|nem az [ée]n k[ée]p", re.I)
 IDENTITY_OWN = ["jaa igen, az is én vagyok 🙈 örülök hogy itt is megtaláltál", "haha igen, én vagyok az 😊 itt vagyok igazán aktív", "igen, az én vagyok 🙂"]
 _BANNED_PHRASE = re.compile(r"att[óo]l f[üu]gg|t[áa]gan [ée]rtelmez|az az[ée]rt m[áa]s k[ée]rd[ée]s|magyar[áa]zd el mit [ée]rt|mit [ée]rtesz\b.{0,18}\balatt|men[jy] a priv[áa]t olda|a priv[áa]t oldalamon|tudod hol tal[áa]lsz", re.I)
+def casualize(t):
+    """She texts like a 19-year-old: lowercase start, no formal 'Ó,' openers, max ~2 sentences."""
+    t = (t or "").strip()
+    if not t: return t
+    t = re.sub(r"^(Ó|Óh|Oh)[,!]\s*", "", t)
+    parts = re.split(r"(?<=[.!?…])\s+", t)
+    if len(parts) > 2 and len(t) > 120:
+        t = " ".join(parts[:2])
+    if t[:1].isupper() and not t[:2].isupper():
+        t = t[0].lower() + t[1:]
+    return t
+
 def collapse_doubles(t):
     return re.sub(r"\b(\w+)\s+\1\b", r"\1", t or "", flags=re.I)
 _ADVANCE = re.compile(r"rosszalkod|k[íi]v[áa]nlak|szexel|\bszex\b|meztelen|forr[óo]\s+k[ée]p|punci|cici|\bmell\b|fasz|dug(j|n|ni|unk)|baszn|horny|\bnude\b|naked|\bfuck|szopn|felizgat|gerjed|merev|sexting", re.I)
@@ -1562,10 +1574,12 @@ def build_convo(history, user_msg, limit=50):
             msgs.append({"role": role, "content": t})
     if msgs and msgs[0]["role"] != "user":
         msgs.insert(0, {"role": "user", "content": "[a beszélgetés eleje]"})
+    tail = ("\n\n[Jázmin, figyelj: reagálj KONKRÉTAN arra amit most írt. Ha épp most válaszolt egy kérdésedre, "
+            "NE kérdezd meg újra más szavakkal — reagálj a válaszára, vagy mesélj magadról. Röviden, lazán, kisbetűvel.]")
     if msgs and msgs[-1]["role"] == "user":
-        msgs[-1]["content"] += "\n" + user_msg
+        msgs[-1]["content"] += "\n" + user_msg + tail
     else:
-        msgs.append({"role": "user", "content": user_msg})
+        msgs.append({"role": "user", "content": user_msg + tail})
     if len(msgs) >= 3:
         prev = msgs[-2]
         prev["content"] = [{"type": "text", "text": prev["content"], "cache_control": {"type": "ephemeral"}}]
@@ -1679,7 +1693,7 @@ def ask_claude(dynamic_prompt, user_text, smart=True, convo=None, chat_id=None):
                 print("[safety] meetup/address → regenerating", flush=True)
                 r2 = scrub_urls(collapse_doubles(_again(FV_MEETUP_REGEN)))
                 reply = r2 if (r2 and not leaks_meetup(r2)) else random.choice(ADDRESS_DEFLECT)
-            return thin_emoji(reply)
+            return casualize(thin_emoji(reply))
         except anthropic.RateLimitError:
             time.sleep(8 * (attempt + 1))
         except Exception as e:
@@ -1884,6 +1898,7 @@ def send_due_batches():
                 bool(_ADVANCE.search(fan_text_all)), bool(_MEETUP_Q.search(fan_text_all)),
                 tg_hint_used == TG_FOUND_HINT,
                 len(fan_msgs) <= 3, len(fan_text_all) > 220,
+                len(fan_text_all.strip()) >= 25,          # v14: real conversation → smart model (Haiku felt "dead")
                 bool(re.search(r"dr[áa]ga|nincs p[ée]nz|megveszem|mennyibe|\b[áa]r[a]?\b|feloldom|unlock|fizet", fan_text_all, re.I)),
             ])
             convo = build_convo(history, user_msg)
