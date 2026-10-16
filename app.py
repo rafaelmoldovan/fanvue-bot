@@ -2379,6 +2379,71 @@ def control(action):
 def fans():
     return {"fans": db_query("SELECT chat_id, fan_name, handle, is_paused, total_messages, last_interaction, fan_note, ppv_pending, warmth_points FROM fan_profiles ORDER BY last_interaction DESC") or []}, 200
 
+# ── Telegram re-login (new session for the Telegram bot, no terminal needed) ──
+_TG_LOGIN_HTML = """<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Telegram login</title><body style="font-family:sans-serif;max-width:420px;margin:30px auto;padding:0 16px">
+<h3>Jázmin Telegram újra-bejelentkezés</h3><p style="color:#b00">{msg}</p>
+<form method=post>{fields}<button style="padding:10px 18px;margin-top:10px">{btn}</button></form>
+<p style="color:#777;font-size:13px">A kódot a Telegram küldi a Jázmin fiókra. Az új munkamenet az adatbázisba kerül, a Telegram bot magától újraindul vele.</p></body>"""
+
+def _tg_run(coro_fn):
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro_fn())
+    finally:
+        loop.close()
+
+@app.route('/tg_login', methods=['GET', 'POST'])
+@require_auth
+def tg_login():
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    from telethon.errors import SessionPasswordNeededError
+    api_id = int(os.environ.get('TG_API_ID', '0') or 0); api_hash = os.environ.get('TG_API_HASH', '')
+    if not api_id or not api_hash:
+        return "TG_API_ID / TG_API_HASH missing on the web service", 500
+    step = request.form.get('step', '')
+    field = lambda n, t, ph: f'<input name={n} type={t} placeholder="{ph}" style="width:100%;padding:10px;margin:6px 0" required>'
+    try:
+        if step == 'phone':
+            phone = request.form.get('phone', '').strip()
+            async def go():
+                c = TelegramClient(StringSession(), api_id, api_hash); await c.connect()
+                r = await c.send_code_request(phone); tmp = c.session.save(); await c.disconnect()
+                return r.phone_code_hash, tmp
+            h, tmp = _tg_run(go)
+            save_token('tg_login_tmp', json.dumps({"phone": phone, "hash": h, "sess": tmp}))
+            return _TG_LOGIN_HTML.format(msg="Kód elküldve a Telegram appba.", btn="Belépés",
+                                         fields="<input type=hidden name=step value=code>" + field("code", "text", "Telegram kód"))
+        if step in ('code', 'password'):
+            st = json.loads(load_token('tg_login_tmp') or '{}')
+            code = request.form.get('code', '').strip(); pw = request.form.get('password', '')
+            async def go():
+                c = TelegramClient(StringSession(st.get('sess', '')), api_id, api_hash); await c.connect()
+                try:
+                    if step == 'code':
+                        await c.sign_in(st['phone'], code, phone_code_hash=st['hash'])
+                    else:
+                        await c.sign_in(password=pw)
+                except SessionPasswordNeededError:
+                    tmp = c.session.save(); await c.disconnect(); return None, tmp
+                me = await c.get_me(); s_ = c.session.save(); await c.disconnect()
+                return s_, getattr(me, 'first_name', '')
+            res, extra = _tg_run(go)
+            if res is None:
+                st['sess'] = extra; save_token('tg_login_tmp', json.dumps(st))
+                return _TG_LOGIN_HTML.format(msg="Kétlépcsős jelszó kell.", btn="Belépés",
+                                             fields="<input type=hidden name=step value=password>" + field("password", "password", "Telegram jelszó (2FA)"))
+            save_token('tg_session', res); save_token('tg_login_tmp', '')
+            send_telegram_alert(f"✅ Telegram bejelentkezés kész ({extra}). A Telegram bot pár percen belül újraindul.")
+            return _TG_LOGIN_HTML.format(msg=f"✅ Kész, bejelentkezve: {extra}. A Telegram bot magától újraindul.", btn="OK", fields="")
+    except Exception as e:
+        return _TG_LOGIN_HTML.format(msg=f"Hiba: {e}", btn="Kód kérése",
+                                     fields="<input type=hidden name=step value=phone>" + field("phone", "text", "+36…"))
+    return _TG_LOGIN_HTML.format(msg="", btn="Kód kérése",
+                                 fields="<input type=hidden name=step value=phone>" + field("phone", "text", "Jázmin telefonszáma (+36…)"))
+
 @app.route('/dashboard_data')
 @require_auth
 def dashboard_data():
