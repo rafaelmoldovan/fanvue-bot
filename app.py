@@ -48,7 +48,7 @@ import anthropic
 BUDAPEST_TZ   = ZoneInfo('Europe/Budapest')
 BOOT_TIME_UTC = datetime.now(timezone.utc)
 WORKER_ID     = uuid.uuid4().hex[:8]
-print(f"[{datetime.now()}] BOT v13 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
+print(f"[{datetime.now()}] BOT v14 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
 
 def get_budapest_now():
     return datetime.now(BUDAPEST_TZ).replace(tzinfo=None)
@@ -2035,7 +2035,7 @@ def create_tracking_link(tg_uid):
             d = r.json() if r.text else {}
             d = d.get('data', d) if isinstance(d, dict) else {}
             uuid_ = _pick(d, 'uuid', 'id', 'trackingLink.uuid')
-            url = _pick(d, 'url', 'link', 'trackingUrl', 'shareUrl', 'fullUrl', 'trackingLink.url')
+            url = _pick(d, 'linkUrl', 'url', 'link', 'trackingUrl', 'shareUrl', 'fullUrl', 'trackingLink.url')
             if url and not str(url).startswith('http'): url = 'https://www.fanvue.com/' + str(url).lstrip('/')
             print(f"[tracking] created for {tg_uid}: uuid={uuid_} url={url} keys={list(d.keys())[:12]}", flush=True)
             return uuid_, url, None if (uuid_ and url) else f"unexpected response: {r.text[:200]}"
@@ -2043,10 +2043,44 @@ def create_tracking_link(tg_uid):
         if r.status_code not in (400, 422): break
     return None, None, last
 
+def _repair_failed_tracking():
+    """v14.1: links were created on Fanvue but the URL field ('linkUrl') wasn't read → rows marked failed.
+    Find them by name in the list and mark ready (no duplicates created)."""
+    rows = db_query("SELECT tg_user_id FROM tg_tracking WHERE status='failed'") or []
+    if not rows: return
+    by_name = {}
+    for page in range(1, 21):
+        try:
+            r = requests.get(f"https://api.fanvue.com/tracking-links?page={page}&size=50&limit=50", headers=get_headers(), timeout=15)
+            if r.status_code != 200: break
+            data = (r.json() or {}).get('data') or []
+        except Exception:
+            break
+        new = 0
+        for d in data:
+            nm = d.get('name')
+            if nm and nm not in by_name: by_name[nm] = d; new += 1
+        if not data or not new: break
+    for row in rows:
+        d = by_name.get(f"tg{row['tg_user_id']}"[:40])
+        url = _pick(d or {}, 'linkUrl', 'url')
+        if d and url:
+            if not str(url).startswith('http'): url = 'https://www.fanvue.com/' + str(url).lstrip('/')
+            db_query("UPDATE tg_tracking SET status='ready', link_uuid=?, url=?, created_at=?, error=NULL WHERE tg_user_id=?",
+                     (d.get('uuid'), url, datetime.now(timezone.utc).isoformat(), row['tg_user_id']))
+        else:
+            db_query("UPDATE tg_tracking SET status='requested', error=NULL WHERE tg_user_id=?", (row['tg_user_id'],))
+    print(f"[tracking] repaired {len(rows)} failed row(s); example url: {next(iter(by_name.values()), {}).get('linkUrl')}", flush=True)
+
 _tracking_alerted = [False]
+_tracking_repaired = [False]
 def tracking_links_tick():
     """Create requested links; then check which Fanvue users came through each link."""
     _ensure_tracking_table()
+    if not _tracking_repaired[0]:
+        _tracking_repaired[0] = True
+        try: _repair_failed_tracking()
+        except Exception as e: print(f"[tracking] repair: {e}")
     for row in (db_query("SELECT tg_user_id FROM tg_tracking WHERE status='requested' LIMIT 10") or []):
         uuid_, url, err = create_tracking_link(row['tg_user_id'])
         if uuid_ and url:
