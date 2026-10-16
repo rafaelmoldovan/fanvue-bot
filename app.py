@@ -114,8 +114,9 @@ def llm_create(**kw):
     kw2 = dict(kw)
     if major >= 5:
         kw2.pop("temperature", None)
-        if "haiku" not in model:
-            kw2["extra_body"] = {"thinking": {"type": "between_tools"}}
+        # Haiku 5.x thinks by default (wastes tokens, truncates short answers) → off.
+        # Sonnet/Opus 5.x reject "disabled" and use "between_tools" for "don't think before answering".
+        kw2["extra_body"] = {"thinking": {"type": "disabled" if "haiku" in model else "between_tools"}}
     try:
         return _Resp(LLM_CLIENT.messages.create(**kw2))
     except Exception as e:
