@@ -2114,6 +2114,38 @@ def link_tg(chat_id):
 def unlink_tg(chat_id):
     unlink_tg_fan(chat_id); return {"ok": True}, 200
 
+@app.route('/export_chats')
+@require_auth
+def export_chats():
+    """Read-only plain-text transcripts for reviewing how the bots talk. ?src=tg|fv&since=YYYY-MM-DD&page=0&per=10"""
+    from flask import Response
+    src = request.args.get('src', 'tg'); since = request.args.get('since', '2026-10-16')
+    page = int(request.args.get('page', 0)); per = min(int(request.args.get('per', 10)), 30)
+    out = []
+    if src == 'tg':
+        ids = db_query("SELECT user_id, MAX(id) mid FROM tg_messages WHERE ts >= ? GROUP BY user_id ORDER BY mid DESC", (since,)) or []
+        out.append(f"TELEGRAM chats active since {since}: {len(ids)} (page {page}, {per}/page)")
+        for r in ids[page * per:(page + 1) * per]:
+            f = db_query("SELECT * FROM tg_fans WHERE user_id=?", (r['user_id'],), fetch_one=True) or {}
+            out.append(f"\n===== TG {r['user_id']} | {tg_display(f)} | state={f.get('state')} msgs={f.get('msg_count')} pics={f.get('pic_asks')} =====")
+            for m in db_query("SELECT is_mine, text, ts FROM tg_messages WHERE user_id=? ORDER BY id", (r['user_id'],)) or []:
+                out.append(f"{(m.get('ts') or '')[5:16]} {'J' if m['is_mine'] else 'F'}: {(m.get('text') or '').strip()}")
+    else:
+        ids = db_query("SELECT chat_id, MAX(timestamp) mt FROM messages WHERE timestamp >= ? GROUP BY chat_id ORDER BY mt DESC", (since,)) or []
+        out.append(f"FANVUE chats active since {since}: {len(ids)} (page {page}, {per}/page)")
+        for r in ids[page * per:(page + 1) * per]:
+            p_ = db_query("SELECT fan_name, total_messages, warmth_points, tg_user_id, ai_confirmed, is_paused, ppv_pending FROM fan_profiles WHERE chat_id=?", (r['chat_id'],), fetch_one=True) or {}
+            out.append(f"\n===== FV {r['chat_id'][:8]} | {p_.get('fan_name')} | msgs={p_.get('total_messages')} warmth={p_.get('warmth_points')} tg={'yes' if p_.get('tg_user_id') else 'no'} ai_conf={p_.get('ai_confirmed')} paused={p_.get('is_paused')} =====")
+            seen = set()
+            for m in db_query("SELECT is_mine, text, timestamp, msg_id FROM messages WHERE chat_id=? ORDER BY timestamp", (r['chat_id'],)) or []:
+                t = (m.get('text') or '').strip()
+                k = (m['is_mine'], t)
+                if not t or k in seen and m['is_mine']: continue
+                seen.add(k)
+                who = ('J' if str(m.get('msg_id', '')).startswith('bot') else 'R') if m['is_mine'] else 'F'
+                out.append(f"{(m.get('timestamp') or '')[5:16]} {who}: {t}")
+    return Response("\n".join(out), mimetype='text/plain; charset=utf-8')
+
 @app.route('/control/<action>', methods=['POST', 'GET'])
 @require_auth
 def control(action):
