@@ -1,4 +1,4 @@
 timeout = 120
 workers = 1
-threads = 2
+threads = 8
 worker_class = "gthread"

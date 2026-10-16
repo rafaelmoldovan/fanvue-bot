@@ -94,8 +94,15 @@ function renderStats(d){
     <div class="pill"><span class="dot" style="background:${d.polling_active?'var(--green)':'var(--red)'}"></span>polling</div>
     <div class="pill">fans <b>${d.fan_count}</b></div>
     <div class="pill">pending <b>${d.pending_batches}</b></div>
-    <div class="pill">sent today <b>${d.sent_today}</b></div>`;
+    <div class="pill">sent today <b>${d.sent_today}</b></div>
+    <div class="pill" onclick="ctl('tg:${d.telegram_on?'off':'on'}')" style="cursor:pointer">
+      <span class="dot" style="background:${d.telegram_on?'var(--green)':'var(--amber)'}"></span>Telegram bot ${d.telegram_on?'ON':'OFF'}</div>
+    <div class="pill" ${d.token_status==='dead'?`onclick="ctl('reconnect')" style="cursor:pointer"`:''}>
+      <span class="dot" style="background:${d.token_status==='dead'?'var(--red)':'var(--green)'}"></span>Fanvue ${d.token_status==='dead'?'DISCONNECTED — tap to reconnect':'connected'}</div>
+    <button class="green" onclick="ctl('all:on')">▶ Start both</button>
+    <button class="red" onclick="ctl('all:off')">⏸ Stop both</button>`;
 }
+async function ctl(a){ const r=await api('/control/'+a); flash((r&&r.message)||'ok'); load(); }
 async function toggleSafe(cur){ await api('/safe_mode/'+(cur?'off':'on')); flash(cur?'LIVE — bot is sending':'SAFE MODE — paused'); load(); }
 
 function render(){

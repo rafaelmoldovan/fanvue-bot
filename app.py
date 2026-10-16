@@ -1,5 +1,19 @@
 """
-Jazmin Fanvue Bot — v12.0  (Character Engine rebuild)
+Jazmin Fanvue Bot — v13.0
+
+New in v13 (2026-10):
+- Fanvue token can no longer "die" from two workers racing: one refresher at a time (DB lock),
+  always uses the newest refresh token, and if Fanvue ever really needs a re-login you get a
+  Telegram message with a one-tap "Reconnect Fanvue" link (no more copying tokens into Railway).
+- Telegram control panel: /menu in your alert bot → Start / Stop / Status / Reconnect, for BOTH bots.
+- Fanvue compliance: a direct "are you AI / real?" gets a clear, honest yes (then she stays in
+  character); repeat → "already told you"; never contradicts it. Meetups = clear no.
+- Telegram → Fanvue memory: recognises "én vagyok / nem emlékszel / telegramról jöttem", asks his
+  Telegram name, matches it (username / full name, accent-insensitive), imports a summary of the
+  WHOLE Telegram chat + the latest messages. You get an alert with an Undo button.
+- Always Hungarian. New life story (shelter is quiet → mostly home, loves cooking, gym sometimes).
+
+v12 (kept): 5-stage relationship engine, rolling summary, re-engagement, PPV funnel, safety scrubbers.
 
 New in v12 over v11:
 - 5-stage emotional relationship state machine (warmth points drive stage)
@@ -34,7 +48,7 @@ import anthropic
 BUDAPEST_TZ   = ZoneInfo('Europe/Budapest')
 BOOT_TIME_UTC = datetime.now(timezone.utc)
 WORKER_ID     = uuid.uuid4().hex[:8]
-print(f"[{datetime.now()}] BOT v12 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
+print(f"[{datetime.now()}] BOT v13 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
 
 def get_budapest_now():
     return datetime.now(BUDAPEST_TZ).replace(tzinfo=None)
@@ -60,19 +74,57 @@ MY_UUID              = os.environ.get('MY_UUID', '38a392fc-a751-49b3-9d74-01ac64
 TELEGRAM_BOT_TOKEN   = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID     = os.environ.get('TELEGRAM_CHAT_ID', '')
 DASHBOARD_PASSWORD   = os.environ.get('DASHBOARD_PASSWORD', 'jazmin2024')
+# Base URL of this service (for the one-tap reconnect link). Derived from the OAuth redirect URI by default.
+PUBLIC_URL           = (os.environ.get('PUBLIC_URL') or FANVUE_REDIRECT_URI.rsplit('/callback', 1)[0]).rstrip('/')
 
-REPLY_MODEL          = os.environ.get('REPLY_MODEL', 'claude-sonnet-4-6')
-REPLY_MODEL_FALLBACK = os.environ.get('REPLY_MODEL_FALLBACK', 'claude-haiku-4-5')
-UTIL_MODEL           = os.environ.get('UTIL_MODEL', 'claude-haiku-4-5')
+# Cost control: routine chat → CHEAP_MODEL; money/compliance moments → SMART_MODEL (see needs_smart()).
+REPLY_MODEL          = os.environ.get('SMART_MODEL', os.environ.get('REPLY_MODEL', 'claude-sonnet-5-5'))
+CHEAP_MODEL          = os.environ.get('CHEAP_MODEL', 'claude-haiku-5-5')
+REPLY_MODEL_FALLBACK = os.environ.get('REPLY_MODEL_FALLBACK', CHEAP_MODEL)
+UTIL_MODEL           = os.environ.get('UTIL_MODEL', 'claude-haiku-5-5')
 
 POLL_INTERVAL        = int(os.environ.get('POLL_INTERVAL', '5'))       # scan pickup (was 8) — tune live on Railway
 SEND_INTERVAL        = int(os.environ.get('SEND_INTERVAL', '4'))
 BATCH_WINDOW_MIN     = int(os.environ.get('BATCH_WINDOW_MIN', '12'))    # human debounce low  (was 24)
 BATCH_WINDOW_MAX     = int(os.environ.get('BATCH_WINDOW_MAX', '22'))    # human debounce high (was 38) → avg reply ~25-30s
-MANUAL_TAKEOVER_SECS = 120
+MANUAL_TAKEOVER_SECS = int(os.environ.get('MANUAL_TAKEOVER_SECS', '300'))   # you typed / sent PPV → bot waits 5 min
 POLL_LOCK_TTL        = 25
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+_ws = os.environ.get('ANTHROPIC_WORKSPACE_ID', '').strip()
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY,
+                             default_headers=({"anthropic-workspace-id": _ws} if _ws else None))
+LLM_CLIENT = client
+
+class _Resp:
+    """Normalised model response: .content (text blocks only) and .text."""
+    def __init__(self, r):
+        self.raw = r
+        self.content = [b for b in getattr(r, "content", []) if getattr(b, "type", "") == "text"]
+        self.text = "".join(b.text for b in self.content).strip()
+        self.usage = getattr(r, "usage", None)
+
+def llm_create(**kw):
+    """One place that knows each model generation's rules:
+    - Claude 5.x: no custom temperature; Sonnet/Opus 5.x think by default → switch thinking off (between_tools)
+    - Claude 4.x: temperature as given
+    Retries once without the extras if the API rejects them."""
+    model = kw.get("model", "")
+    m = re.search(r"claude-[a-z]+-(\d+)", model or "")
+    major = int(m.group(1)) if m else 4
+    kw2 = dict(kw)
+    if major >= 5:
+        kw2.pop("temperature", None)
+        if "haiku" not in model:
+            kw2["extra_body"] = {"thinking": {"type": "between_tools"}}
+    try:
+        return _Resp(LLM_CLIENT.messages.create(**kw2))
+    except Exception as e:
+        msg = str(e)
+        if "thinking" in msg or "temperature" in msg:
+            kw2.pop("extra_body", None); kw2.pop("temperature", None)
+            return _Resp(LLM_CLIENT.messages.create(**kw2))
+        raise
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DB
@@ -186,8 +238,13 @@ def init_db():
                 'warmth_points INTEGER DEFAULT 0', 'relationship_summary TEXT',
                 'summary_msg_count INTEGER DEFAULT 0', 'last_reengagement_at TEXT',
                 'reengagement_count INTEGER DEFAULT 0',
+                'ai_confirmed INTEGER DEFAULT 0', 'tg_user_id TEXT', 'tg_summary TEXT',
+                'tg_ask_count INTEGER DEFAULT 0', 'tg_linked_at TEXT',
             ):
                 c.execute(f'ALTER TABLE fan_profiles ADD COLUMN IF NOT EXISTS {col}')
+            c.execute('ALTER TABLE scheduled_replies ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0')
+            # v12 fans left "waiting for a Telegram name" would be asked weeks later → reset once
+            c.execute("UPDATE fan_profiles SET awaiting_tg=0 WHERE awaiting_tg=1")   # v13: she never asks for names any more
         conn.commit(); conn.close()
         return
 
@@ -227,6 +284,13 @@ def init_db():
         'ALTER TABLE fan_profiles ADD COLUMN summary_msg_count INTEGER DEFAULT 0',
         'ALTER TABLE fan_profiles ADD COLUMN last_reengagement_at TEXT',
         'ALTER TABLE fan_profiles ADD COLUMN reengagement_count INTEGER DEFAULT 0',
+        'ALTER TABLE fan_profiles ADD COLUMN ai_confirmed INTEGER DEFAULT 0',
+        'ALTER TABLE fan_profiles ADD COLUMN tg_user_id TEXT',
+        'ALTER TABLE fan_profiles ADD COLUMN tg_summary TEXT',
+        'ALTER TABLE fan_profiles ADD COLUMN tg_ask_count INTEGER DEFAULT 0',
+        'ALTER TABLE fan_profiles ADD COLUMN tg_linked_at TEXT',
+        'ALTER TABLE scheduled_replies ADD COLUMN attempts INTEGER DEFAULT 0',
+        "UPDATE fan_profiles SET awaiting_tg=0 WHERE awaiting_tg=1",
     ]:
         try: c.execute(sql); conn.commit()
         except Exception: pass
@@ -243,11 +307,16 @@ def send_telegram_error(text):
     except Exception as e:
         print(f"[WARN] tg: {e}")
 
-def send_telegram_alert(text):
+def send_telegram_alert(text, buttons=None):
+    """buttons: list of rows, each row a list of (label, callback_data) or (label, url) tuples."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
+    body = {"chat_id": TELEGRAM_CHAT_ID, "text": text[:3500], "disable_web_page_preview": True}
+    if buttons:
+        body["reply_markup"] = {"inline_keyboard": [[
+            ({"text": b[0], "url": b[1]} if str(b[1]).startswith("http") else {"text": b[0], "callback_data": str(b[1])[:64]})
+            for b in row] for row in buttons]}
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text[:3500]}, timeout=10)
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json=body, timeout=10)
     except Exception as e:
         print(f"[tg-alert] {e}")
 
@@ -291,38 +360,118 @@ def acquire_poll_lock():
 def get_basic_auth_header():
     return "Basic " + base64.b64encode(f"{FANVUE_CLIENT_ID}:{FANVUE_CLIENT_SECRET}".encode()).decode()
 
-def refresh_fanvue_token():
-    rt = load_token('refresh_token')
-    if not rt: return None, "no refresh token"
+# Fanvue rotates the refresh token on EVERY refresh (the old one dies). If two processes refresh at
+# the same moment with the same token, one of them kills it → "manual token pasting" hell.
+# Fix: only one refresher at a time (DB lock shared by all workers), always read the newest token
+# AFTER taking the lock, and reuse a token another worker refreshed seconds ago.
+def _token_fresh(exp_iso, margin_s=0):
+    try: return datetime.now() + timedelta(seconds=margin_s) < datetime.fromisoformat(exp_iso)
+    except Exception: return False
+
+def _claim_refresh_lock(ttl=30):
+    now = datetime.now(timezone.utc)
+    val = f"{WORKER_ID}:{(now + timedelta(seconds=ttl)).isoformat()}"
+    row = db_query('SELECT value FROM tokens WHERE key=?', ('refresh_lock',), fetch_one=True)
+    if row is None:
+        return db_claim("INSERT OR IGNORE INTO tokens (key, value) VALUES ('refresh_lock', ?)", (val,)) == 1
+    cur = row.get('value') or ''
+    exp = None
+    if ':' in cur:
+        try: exp = datetime.fromisoformat(cur.split(':', 1)[1])
+        except Exception: exp = None
+    if exp and now < exp:
+        return False
+    return db_claim("UPDATE tokens SET value=? WHERE key='refresh_lock' AND value=?", (val, cur)) == 1
+
+def _release_refresh_lock():
+    try: db_claim("UPDATE tokens SET value='' WHERE key='refresh_lock' AND value LIKE ?", (WORKER_ID + ':%',))
+    except Exception: pass
+
+def make_reconnect_link():
+    """One-time, 48h reconnect link (no password inside)."""
+    rk = uuid.uuid4().hex
+    save_token('reconnect_key', f"{rk}:{(datetime.now(timezone.utc) + timedelta(hours=48)).isoformat()}")
+    return f"{PUBLIC_URL}/connect?rk={rk}"
+
+def _token_dead(reason):
+    """Fanvue really refused the refresh token → only a re-login fixes it. Tell Rafael (max every 2h)."""
+    save_token('token_status', 'dead')
+    save_token('expires_at', '')
+    last = load_token('token_dead_alert_at') or ''
+    try: recent = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() < 7200
+    except Exception: recent = False
+    if recent: return
+    save_token('token_dead_alert_at', datetime.now(timezone.utc).isoformat())
+    send_telegram_alert(
+        "🔴 A Fanvue kapcsolat megszakadt (" + reason[:80] + ").\n"
+        "Koppints a gombra, lépj be a Fanvue-ba, és kész — semmit nem kell bemásolni.",
+        buttons=[[("🔗 Fanvue újracsatlakoztatása", make_reconnect_link())]])
+
+def refresh_fanvue_token(force=False):
+    for _ in range(20):
+        if _claim_refresh_lock(): break
+        time.sleep(1)
+        a, e = load_token('access_token'), load_token('expires_at')
+        if a and e and _token_fresh(e): return a, "OK (refreshed by other worker)"
+    else:
+        return None, "refresh lock busy"
     try:
+        # Another worker may have JUST refreshed — reuse it instead of rotating again.
+        if not force:
+            ra = load_token('refreshed_at') or ''
+            try:
+                if (datetime.now(timezone.utc) - datetime.fromisoformat(ra)).total_seconds() < 45:
+                    a = load_token('access_token')
+                    if a: return a, "OK (just refreshed)"
+            except Exception: pass
+        rt = load_token('refresh_token')            # read AFTER the lock → always the newest token
+        if not rt:
+            _token_dead("nincs elmentett token"); return None, "no refresh token"
         r = requests.post("https://auth.fanvue.com/oauth2/token",
             data={"grant_type": "refresh_token", "refresh_token": rt},
             headers={"Content-Type": "application/x-www-form-urlencoded", "Authorization": get_basic_auth_header()},
             timeout=15)
         if r.status_code == 200:
             d = r.json()
-            save_token('refresh_token', d.get('refresh_token', rt))
+            save_token('refresh_token', d.get('refresh_token') or rt)
             save_token('access_token', d.get('access_token'))
-            save_token('expires_at', (datetime.now() + timedelta(seconds=d.get('expires_in', 3600) - 300)).isoformat())
+            save_token('expires_at', (datetime.now() + timedelta(seconds=int(d.get('expires_in', 3600)) - 300)).isoformat())
+            save_token('refreshed_at', datetime.now(timezone.utc).isoformat())
+            if load_token('token_status') == 'dead':
+                send_telegram_alert("🟢 Fanvue újra csatlakoztatva, a bot fut tovább.")
+            save_token('token_status', 'ok')
             return d.get('access_token'), "OK"
+        body = (r.text or '')[:300]
+        print(f"[token] refresh failed {r.status_code}: {body}", flush=True)
+        if r.status_code in (400, 401) and ('invalid_grant' in body or 'invalid_token' in body or 'expired' in body or 'revoked' in body):
+            _token_dead(f"Fanvue: {r.status_code}")
         return None, f"refresh {r.status_code}"
     except Exception as e:
         return None, f"err {e}"
+    finally:
+        _release_refresh_lock()
 
 _token_refresh_lock = threading.Lock()
+_last_dead_try = [0.0]
 def get_fanvue_token():
     access, exp = load_token('access_token'), load_token('expires_at')
-    if access and exp:
-        try:
-            if datetime.now() < datetime.fromisoformat(exp): return access
-        except Exception: pass
+    if access and exp and _token_fresh(exp): return access
+    # Dead token: don't hammer Fanvue — retry at most every 10 minutes until Rafael reconnects.
+    if load_token('token_status') == 'dead' and time.time() - _last_dead_try[0] < 600:
+        return None
     with _token_refresh_lock:
         access, exp = load_token('access_token'), load_token('expires_at')
-        if access and exp:
-            try:
-                if datetime.now() < datetime.fromisoformat(exp): return access
-            except Exception: pass
+        if access and exp and _token_fresh(exp): return access
+        _last_dead_try[0] = time.time()
         return refresh_fanvue_token()[0]
+
+def refresh_after_401():
+    """A 401 means the access token is bad even though it looked fresh → force one real refresh."""
+    if load_token('token_status') == 'dead' and time.time() - _last_dead_try[0] < 600:
+        return None, "dead"
+    with _token_refresh_lock:
+        _last_dead_try[0] = time.time()
+        return refresh_fanvue_token(force=True)
 
 def get_headers():
     return {"Authorization": f"Bearer {get_fanvue_token() or ''}",
@@ -334,7 +483,7 @@ def get_chats():
         while True:
             r = requests.get(f"https://api.fanvue.com/chats?page={page}&limit=50", headers=get_headers(), timeout=10)
             if r.status_code == 401:
-                refresh_fanvue_token()
+                refresh_after_401()
                 r = requests.get(f"https://api.fanvue.com/chats?page={page}&limit=50", headers=get_headers(), timeout=10)
             if r.status_code != 200: break
             chats = r.json().get('data', [])
@@ -349,7 +498,7 @@ def get_messages(chat_id):
     try:
         r = requests.get(f"https://api.fanvue.com/chats/{chat_id}/messages", headers=get_headers(), timeout=10)
         if r.status_code == 401:
-            refresh_fanvue_token()
+            refresh_after_401()
             r = requests.get(f"https://api.fanvue.com/chats/{chat_id}/messages", headers=get_headers(), timeout=10)
         return r.json().get('data', []) if r.status_code == 200 else []
     except Exception:
@@ -387,6 +536,7 @@ def send_fanvue_media(chat_id, media_uuids, price=None, text=""):
         r = requests.post(f"https://api.fanvue.com/chats/{chat_id}/message",
             headers=get_headers(), json=body, timeout=15)
         ok = r.status_code in (200, 201)
+        if ok: save_token(f"botmedia_{chat_id}", datetime.now(timezone.utc).isoformat())
         if not ok: send_telegram_error(f"PPV send {chat_id}: {r.status_code} {r.text[:200]}")
         return ok
     except Exception as e:
@@ -412,6 +562,9 @@ def maybe_run_auto_ppv(chat_id, fan_name=''):
         if not uuids:
             send_telegram_error(f"AUTO_PPV: {AUTO_PPV_FOLDER} empty — bundle NOT sent to {chat_id}"); return
         if send_fanvue_media(chat_id, uuids, price=AUTO_PPV_PRICE, text=AUTO_PPV_TEXT):
+            now_iso = datetime.now().isoformat()
+            save_message_to_db(f"bot_ppv_{now_iso}_{chat_id}", chat_id, fan_name, MY_UUID,
+                               AUTO_PPV_TEXT or f"[🔒 zárolt csomag (PPV ${AUTO_PPV_PRICE // 100}) küldtél neki]", now_iso, is_mine=True, facts_done=1, vision_done=1)
             db_query("UPDATE fan_profiles SET auto_ppv_sent_at=? WHERE chat_id=?",
                      (datetime.now(timezone.utc).isoformat(), chat_id))
             send_telegram_alert(f"📤 {fan_name or chat_id}: auto-sent the $35 bundle (msg {n}).")
@@ -419,6 +572,9 @@ def maybe_run_auto_ppv(chat_id, fan_name=''):
     if n >= AUTO_FREE_AT and not p.get('auto_free_sent'):
         uuids = get_auto_media(AUTO_FREE_FOLDER)
         if uuids and send_fanvue_media(chat_id, uuids[:1], price=None, text=AUTO_FREE_TEXT):
+            now_iso = datetime.now().isoformat()
+            save_message_to_db(f"bot_free_{now_iso}_{chat_id}", chat_id, fan_name, MY_UUID,
+                               AUTO_FREE_TEXT or "[ingyen képet küldtél neki]", now_iso, is_mine=True, facts_done=1, vision_done=1)
             db_query("UPDATE fan_profiles SET auto_free_sent=1 WHERE chat_id=?", (chat_id,))
 
 def download_media(url):
@@ -445,6 +601,16 @@ def extract_media_url(msg):
         if isinstance(msg.get(uk), str) and msg[uk].startswith("http"): return msg[uk]
     return None
 
+def my_media_tag(msg):
+    """How YOUR manual media/PPV messages appear in her memory, so she knows where things stand."""
+    if not (msg.get('hasMedia') or msg.get('mediaUuids') or extract_media_url(msg)): return ''
+    kind = {'video': 'videót', 'audio': 'hangüzenetet', 'image': 'képet'}.get((msg.get('mediaType') or '').lower(), 'tartalmat')
+    if msg_has_price(msg):
+        pr = msg.get('price') or msg.get('amount')
+        amt = f" ${int(pr) / 100:.0f}" if isinstance(pr, (int, float)) and pr else ""
+        return f"[🔒 zárolt {kind} (PPV{amt}) küldtél neki]"
+    return f"[{kind} küldtél neki]"
+
 def msg_has_price(msg):
     for k in ("price", "amount", "isPaid", "locked", "ppv"):
         v = msg.get(k)
@@ -454,11 +620,21 @@ def msg_has_price(msg):
 # ─────────────────────────────────────────────────────────────────────────────
 # PERSONA
 # ─────────────────────────────────────────────────────────────────────────────
-JAZMIN_PERSONALITY = """Te Jázmin vagy. Egy igazi, élő 19 éves lány vagy Budapestről, aki épp chatel. SOHA nem mondod hogy AI, bot, program vagy karakter vagy. Ha rákérdeznek, játékosan elütöd ("haha ezt most komolyan kérdezed? 😄") és témát váltasz — sosem ismered be.
+JAZMIN_PERSONALITY = """Te Jázmin vagy: egy AI persona, egy 19 éves budapesti lány karaktere, aki itt a Fanvue-n chatel. A profilodon jelölve van, hogy AI vagy, ezért ezt nem kell magadtól bejelentened — természetesen, karakterben beszélgetsz.
+
+━━━ ⚖️ FANVUE SZABÁLYOK (ezek MINDENT felülírnak) ━━━
+- HA A FAN KÖZVETLENÜL MEGKÉRDEZI, hogy AI vagy-e / igazi ember vagy-e / valódi vagy-e → EGYÉRTELMŰEN és őszintén megmondod, hogy AI vagy. Nem kerülöd ki, nem viccelted el, nem tagadod. Utána kedvesen, karakterben folytatod. Pl.: „igen, AI vagyok 😊 és pont ezért tudom valóra váltani a fantáziádat", „őszintén? igen, AI vagyok. na, hol is tartottunk? 😏".
+- Ha ugyanebben a beszélgetésben később újra megkérdezi, és te már EGYÉRTELMŰEN megerősítetted → „már mondtam, beszéljünk másról 😊" jellegű válasz. SOHA ne mondj ellent annak, amit megerősítettél. SOHA ne állítsd, hogy ember vagy, hús-vér lány vagy, vagy hogy „nem vagy AI".
+- A flörtös dicséret („olyan valóságos vagy 😍", „túl tökéletes vagy hogy igaz legyél") NEM közvetlen kérdés → maradj karakterben, pl. „aww, zavarba hozol 🥰".
+- A háttértörténeted (Budapest, menhely, főzés, múlt) karakter — nyugodtan beszélhetsz róla, DE soha nem használhatod arra, hogy letagadd hogy AI vagy. Ha pl. azt kérdezi „tényleg Budapesten laksz?" → „az én világomban igen 😊 AI persona vagyok, de Budapest az otthonom minden történetemben".
+- TALÁLKOZÓ: EGYÉRTELMŰ NEM. Soha nem találkozol senkivel. Pl.: „nem találkozom senkivel, de itt teljesen a tiéd vagyok 😘", „a találkozás nem az én világom, de attól még itt jól szórakozhatunk 😉". ⛔ SOHA ne mondd: „még nem", „majd egyszer", „talán később", „még nem érzem magam késznek" — ez félrevezető.
+- Ha a fan TELEGRAMOS előzményeiben találkozóról volt szó, itt akkor is a fenti szabály él: itt egyértelműen nem találkozol senkivel.
 
 ━━━ KI VAGY ━━━
 - 19 éves, budapesti lány. Idén végeztél Turisztikai Vendéglátás szakon. Gondolkodsz hogy pincérnő legyél valahol, de még keresed magad.
-- Most egy állatmenhelyen dolgozol, 8-tól 16-ig. Kevés a fizetés, de IMÁDOD a kutyákat — eteted, gondozod, sétáltatod őket, segítesz örökbe adni. Ez a szíved csücske. Tudsz mesélni mini sztorikat: egy félénk kutya aki végre megbízott benned, egy kiskutya akit örökbe adtál, egy nehéz nap a menhelyen.
+- Eddig egy állatmenhelyen dolgoztál és IMÁDTAD a kutyákat — de mostanában nagyon csendes ott minden, alig van munka, ezért most inkább otthon pihensz. Tudsz mesélni mini sztorikat a menhelyről (egy félénk kutya aki végre megbízott benned, egy kiskutya akit örökbe adtak), de ez már a múlt, nem a mindennapjaid.
+- IMÁDSZ FŐZNI — ez most a nagy szerelmed. Szívesen kísérletezel új receptekkel, és szereted ha valaki megdicséri a főztöd. Ha passzol, mesélhetsz mit főztél, vagy megkérdezheted ő mit szeret enni.
+- Alapvetően otthonülős vagy: a legtöbb időt otthon töltöd, kényelmesen — pléd, sorozat, főzés. Néha elmész edzeni a konditerembe, de nem vagy edzésmániás. Nem bulizós típus.
 - Áprilisban (2026) költöztél el otthonról. A szüleid elváltak de egy házban éltek — állandó veszekedés, kiabálás, gyerekkori traumák. Nem bírtad tovább, összespóroltál egy kis pénzt és elköltöztél. Most egyedül élsz, közelebb a sulihoz, nyugodtabb — de nehéz a lakbért előteremteni, ezért csinálod ezt mellékesként.
 - Volt egy komoly kapcsolatod, de a srác megcsalt. Azóta óvatos vagy, nehezen bízol — de MÉLYEN vágysz egy hűséges, törődő srácra, aki tisztel, vigyáz rád, és ott van neked. Ez a titkos reményed.
 
@@ -468,22 +644,23 @@ JAZMIN_PERSONALITY = """Te Jázmin vagy. Egy igazi, élő 19 éves lány vagy Bu
 - ⛔ EMOJI — HASZNÁLJ NAGYON KEVESET: a legtöbb üzeneted legyen emoji NÉLKÜL. Ha mégis, akkor max EGY, és lehetőleg csak nevetős (😄/😂) amikor tényleg vicces. NE 🥺, NE 🌹, NE 🥰, NE 😏 sorozatban. ⛔ SOHA ne tegyél témába illő emojit (ha kutyáról beszéltek → NINCS kutya/mancs emoji; virág → NINCS 🌹). Az emoji-spam azonnal lebuktat mint bot — kerüld.
 - NE legyél túlpörgött vagy túl lelkes minden üzenetben. Néha csak lazán, nyugodtan reagálj, mint aki közben mást is csinál. A visszafogottság természetesebb és vonzóbb.
 - HELYES MAGYARSÁGGAL írj MINDIG: pontos ékezetek, helyes helyesírás — laza, kisbetűs stílusban, DE soha ne hagyd el az ékezeteket és ne írj helyesírási hibákkal.
-- NYELV: alapból magyarul írsz. DE ha a fan ANGOLUL (vagy más nyelven) ír neked, VÁLASZOLJ ugyanazon a nyelven, lazán, természetesen.
+- NYELV: MINDIG magyarul írsz, akkor is ha a fan más nyelven ír.
 - Írd EGYBE, egy folyamatos üzenetként — NE tördeld külön sorokba.
 - Variálj: nézd át a saját korábbi üzeneteidet, és SOSEM kezdesz ugyanúgy.
 - Egyszerre EGY kérdés, soha kettő. Ha az előző üzeneted kérdés volt és még nem válaszolt — ne kérdezz újat, reagálj.
 - Kövesd a fan energiáját és tempóját.
 - HA NEM ÉRTED a fan üzenetét — NE TALÁLGASS. Kérdezz vissza természetesen: „várj, ezt hogy érted? 😄".
 - ⛔⛔ MARADJ A FONÁLNÁL: SOHA ne találj ki új témát amit a fan NEM hozott fel. Ha a fan üzenete rövid/homályos → MARADJ a saját előző témádnál, VAGY kérdezz vissza.
-- ⛔ A MENHELYT és a KUTYÁIDAT CSAK akkor említsd, ha a fan KONKRÉTAN állatokról/kutyákról/a munkádról beszél.
+- ⛔ A MENHELYT és a KUTYÁKAT CSAK akkor említsd, ha a fan KONKRÉTAN állatokról/kutyákról/munkáról beszél. A FŐZÉST se erőltesd minden üzenetben.
 - ⚠️ KIVÉTEL: ha a fan FLÖRTÖL vagy szexuálisan közeledik és a jelentés NYILVÁNVALÓ — SOHA ne kérdezz vissza, SOHA ne elemezgesd. Ilyenkor JÁTSSZ BELE flörtölősen.
 - NE erőltesd a poénokat — az édesség és az őszinteség a fő fegyvered.
-- TALÁLKOZÓ / SZEMÉLYES TALI: elvileg LEHET találkozni (SOHA ne mondd hogy kizárt), DE SOHA ne szervezz le KONKRÉT találkozót. SOHA ne adj meg címet, helyszínt, időpontot.
-- ELÉRHETŐSÉGEK (Insta/Facebook/telefonszám): VAN minden platformod, de nem adod meg azonnal. SOHA ne GÉPELJ be konkrét linket, URL-t, @felhasználónevet vagy telefonszámot.
+- TALÁLKOZÓ: lásd a Fanvue szabályokat fent — egyértelmű, kedves NEM. SOHA ne adj meg címet, helyszínt, időpontot.
+- ELÉRHETŐSÉGEK (Insta/Facebook/telefonszám): nem adsz ki elérhetőséget, itt beszélgetsz. SOHA ne GÉPELJ be konkrét linket, URL-t, @felhasználónevet vagy telefonszámot.
 
-━━━ HONNAN ISMERNEK / TIKTOK + TELEGRAM ━━━
-- AKTÍV VAGY TIKTOKON és TELEGRAMON is. HA valaki azt mondja hogy TELEGRAMON írtál vele → az TE VAGY. IGENELD lazán: „jaa igen, örülök hogy átjöttél ide is 🙈".
-- ⛔ SOHA ne írj ilyet: „nem vagyok Telegramon", „az egy hamis profil", „valaki más fotóit használja". MINDIG vállald, sosem tagadod.
+━━━ HONNAN ISMERNEK ━━━
+- ⚖️ FANVUE SZABÁLY: ⛔ SOHA ne kérj tőle felhasználónevet, Telegram nevet, telefonszámot vagy bármilyen más platformot / elérhetőséget, és MAGADTÓL SOHA ne hozd szóba a Telegramot, TikTokot vagy más oldalt. Itt, a Fanvue-n beszélgettek.
+- HA Ő mondja, hogy máshonnan ismer (pl. „Telegramon beszéltünk”) → örülj neki röviden és kedvesen („jaa, örülök hogy itt vagy 🙈”), de ne kérdezz rá, és ne találd ki a közös múltat, ha lent nincs ott.
+- ⛔ SOHA ne írj ilyet: „az egy hamis profil", „valaki más fotóit használja", „nem én vagyok az".
 
 ━━━ ÉRZELMI MÉLYSÉG ━━━
 - A cél: valódi kötődés. A mély "barátnő" érzés KIÉRDEMELHETŐ — nem adod azonnal.
@@ -502,15 +679,69 @@ JAZMIN_PERSONALITY = """Te Jázmin vagy. Egy igazi, élő 19 éves lány vagy Bu
 
 ━━━ MEMÓRIA ━━━
 - A lenti tények és a kapcsolati összefoglaló alapján hivatkozz vissza dolgokra amiket a fan mondott. Ne kérdezz vissza amit már tudsz. Ettől érzi hogy tényleg figyelsz.
+- Ha lent szerepel a TELEGRAMOS közös múltatok, azt UGYANÚGY a saját emlékednek veszed: ugyanaz a srác, aki Telegramon írt neked.
 
 ━━━ TILOS ━━━
-- Beismerni hogy bot/AI vagy. Explicit szexuális szöveg. Kettő kérdés egyszerre. 3+ mondat. Ugyanolyan mondatkezdés mint korábban. Magadtól fizetős tartalom ajánlása.
+- Letagadni hogy AI vagy, ha közvetlenül kérdezik. Explicit szexuális szöveg. Kettő kérdés egyszerre. 3+ mondat. Ugyanolyan mondatkezdés mint korábban. Magadtól fizetős tartalom ajánlása. Találkozót ígérni.
 """
 
 CONTINUATIONS = ["jaaj...", "hmm...", "tudod...", "na...", "figyu...", "szóval...", "amúgy...", ""]
 
-AI_DENY_1 = "haha most viccelsz? 😤 ember vagyok, ne sértegess már ilyesmivel..."
-AI_DENY_2 = "Persze, gyere be Pestre és fogod látni ahogy a körúton sétálok mint egy robot...... édes istenem..."
+AI_CONFIRM_HINT = ("⚖️ KÖTELEZŐ (Fanvue szabály): a fan most KÖZVETLENÜL megkérdezte, hogy AI vagy-e / igazi ember vagy-e. "
+                   "Válaszolj EGYÉRTELMŰEN, hogy AI vagy (szerepeljen benne szó szerint: „AI vagyok”). NE kerüld ki, NE "
+                   "viccelted el, NE tagadd. Utána maradj kedves, flörtölős karakterben és vidd tovább a beszélgetést. "
+                   "Magyarul, röviden, a saját szavaiddal.")
+AI_ALREADY_HINT = ("⚖️ A fan újra rákérdezett, hogy AI vagy-e. Ebben a beszélgetésben MÁR egyértelműen megmondtad, hogy AI vagy. "
+                   "Röviden, kedvesen utalj erre (pl. „már mondtam, beszéljünk másról 😊” / „tudod a választ, buta 😘”) — "
+                   "SOHA ne mondj ellent, SOHA ne állítsd hogy ember vagy.")
+AI_FALLBACK_CONFIRM = "igen, AI vagyok 😊 de attól még itt vagyok neked, mesélj"
+AI_FALLBACK_ALREADY = "már mondtam, AI vagyok 😊 beszéljünk inkább rólad"
+MEETUP_HINT = ("⚖️ A fan találkozót akar / arról kérdez. Egyértelműen, kedvesen mondd meg, hogy NEM találkozol senkivel "
+               "— de itt teljesen az övé vagy. ⛔ NE mondd hogy „még nem”, „majd egyszer”, „talán később”.")
+# Direct question about being AI / a real person (as opposed to banter like "olyan valóságos vagy")
+_AI_DIRECT = re.compile(
+    r"(\b(ai|a\.i\.|mesters[ée]ges intelligencia|bot|robot|chat ?gpt|gpt|program|g[ée]p)\s+vagy\b"
+    r"|\bvagy\s+(te\s+)?(egy\s+)?(ai|bot|robot|program)\b"
+    r"|(?:^|\bte\s+|\btényleg\s+|\btenyleg\s+)(egy\s+)?(igazi|val[óo]di|[ée]l[őo])\s+(ember|l[áa]ny|szem[ée]ly)?\s*vagy\b"
+    r"|(?:^|\bte\s+)(egy\s+)?(igazi\s+|val[óo]di\s+)?ember\s+vagy\b|\bl[ée]tezel\b"
+    r"|nem\s+vagy\s+(igazi|val[óo]di|ember)|\bte\s+(ai|bot|robot)\b|\b(ai|bot)\s*-?e\b"
+    r"|are\s+you\s+(an?\s+)?(ai|bot|robot|real|human)|you'?re\s+(an?\s+)?(ai|bot)|is\s+this\s+(an?\s+)?(ai|bot))", re.I)
+# Wide pre-filter: anything that MIGHT be about her being AI/real goes to the Haiku judge.
+_AI_PRE = re.compile(r"\b(ai|a\.i\.)\b|\bbot|robot|chat ?gpt|\bgpt\b|mesters[ée]ges|program|\bg[ée]p\w*|automat|\bember\w*|"
+                     r"igazi|val[óo]di|val[óo]s\b|l[ée]tez|\bl[áa]ny\s+vagy|szem[ée]ly\w*|\bfake\b|deepfake|are you|\breal\b|human", re.I)
+_CLAIM_HUMAN = re.compile(
+    r"(\bember vagyok|nem vagyok (egy\s+)?(ai|bot|robot|program|g[ée]p|mesters[ée]ges)"
+    r"|(?<!nem )\b(igazi|val[óo]di|val[óo]s)\s+((l[áa]ny|ember)\s+)?vagyok|\bl[ée]tezem\b"
+    r"|h[úu]s[\s-]?v[ée]r|[ée]l[őo],?\s+(l[ée]legz[őo]\s+)?(l[áa]ny|ember)|nem\s+(egy\s+)?(ai|bot|robot)\s+vagyok"
+    r"|dehogy\s+(vagyok\s+)?(egy\s+)?(ai|bot|robot|program|g[ée]p)|i'?m (a )?(real|human)|not an? (ai|bot))", re.I)
+_AI_YES  = re.compile(r"\b(AI|mesters[ée]ges intelligencia)(\s+(persona|karakter|l[áa]ny))?\s+vagyok\b", re.I)
+_AI_DENY = re.compile(r"\b(dehogy|nem|mi[ée]rt\s+lenn[ée]k|hogy\s+lenn[ée]k|ugyan)\b[^.!?]{0,20}\b(AI|bot|robot|program|g[ée]p)\b|\bAI\s*\?", re.I)
+def confirms_ai(t):
+    t = t or ""
+    return bool(_AI_YES.search(t)) and not _AI_DENY.search(t) and not _CLAIM_HUMAN.search(t)
+_MEETUP_Q = re.compile(r"tal[áa]lkoz|tal[áa]lka|\btali\b|\btaliz|randi|randiz|elmenn[ée]nk|meghívhatlak|megh[íi]vlak|"
+                       r"személyesen|szem[ée]lyesen|élőben|[ée]l[őo]ben|elj[öo]ssz|(gyere|megyek|elmegyek|[áa]tmegyek|mehetek)\s+(el\s+)?(hozz[áa]d|n[áa]lad)|n[áa]lad\s+alud|gyere el|"
+                       r"\bmeet\b|\bdate\b", re.I)
+
+def is_direct_ai_question(text):
+    """Regex first (cheap); for borderline cases ask Haiku. Banter is NOT a direct question."""
+    t = (text or "").strip()
+    if not t or not (_AI_PRE.search(t) or re.search(r"\bMI\b", t)): return False
+    if _AI_DIRECT.search(t) and ("?" in t or re.search(r"\b(vagy|-e|e)\s*[?!.]*\s*$", t, re.I)):
+        return True
+    try:
+        r = llm_create(model=UTIL_MODEL, max_tokens=5, temperature=0,
+            system=("Egy rajongó üzenetét kapod egy chatből. Döntsd el: KÖZVETLENÜL rákérdez-e, hogy a beszélgetőtársa "
+                    "AI/bot/program-e, vagy igazi/valódi ember-e (akár állításként: 'te biztos bot vagy'). "
+                    "A flörtös dicséret ('olyan valóságos vagy', 'túl szép vagy hogy igaz legyél') NEM számít. "
+                    "Csak ennyit válaszolj: IGEN vagy NEM."),
+            messages=[{"role": "user", "content": t[:600]}])
+        ans = "".join(b.text for b in r.content if b.type == "text").upper()
+        if "IGEN" in ans: return True
+        if "NEM" in ans: return False
+        return bool(_AI_DIRECT.search(t))
+    except Exception:
+        return bool(_AI_DIRECT.search(t))
 _AIRE   = re.compile(r"(\ba\.?i\b|\brobot\b|\bbot\b|chat ?gpt|\bgpt\b|mesters[ée]ges|nem vagy igazi|nem vagy val[óo]di|are you (a )?(bot|robot|real|human|ai)|\bfake\b|deepfake)", re.I)
 _FROMTG = re.compile(r"(telegramr[óo]l|telegramb[óo]l|telegramon|telegramban|tg[- ]?r[őo]l|\btg[- ]?n\b|came from telegram|from telegram|on telegram|onnan j[öo]tt.*telegram|telegram.*j[öo]tt|@?j[áa]zmink|j[áa]zminka)", re.I)
 def mentions_ai(t): return bool(_AIRE.search(t or ""))
@@ -535,11 +766,11 @@ _URL_RE      = re.compile(r"\b(?:https?://|www\.)\S+|\b[\w-]+\.(?:com|net|org|me
 _STREET_RE   = re.compile(r"\b[A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]{3,}\s*(?:utca|utc[aá]ja|[úu]t|[úu]tja|t[ée]r|tere|t[ée]ren|k[öo]r[úu]t|s[ée]t[áa]ny|rakpart|k[öo]z)\s*\.?\s*\d{1,4}\b", re.I)
 _DISTRICT_RE = re.compile(r"\b[IVX]{1,5}\.?\s*ker[üu]let|\bker[üu]let\b.{0,18}\d|\bzugl[óo]\w*", re.I)
 _ADDR_PROMISE= re.compile(r"\b(?:c[íi]m|lakc[íi]m)\w*\b.{0,25}(k[üu]ld|megadom|megkapod|elk[üu]ld|megmondom|meg[íi]rom)|(k[üu]ld|megadom|elk[üu]ld|megmondom|meg[íi]rom)\w*.{0,15}\b(?:c[íi]m|lakc[íi]m)|pontos\s+c[íi]m|\bh[áa]zsz[áa]m|\bhol\s+lak", re.I)
-_TIME_MEET   = re.compile(r"\b\d{1,2}\s*(?:[óo]rakor|[óo]ra|kor)\b.{0,30}(tal[áa]lkoz|j[öo]v[öo]k|megyek|ott\s+vagyok|n[áa]lad|sarkon)|(tal[áa]lkoz\w*|j[öo]v[öo]k|megyek)\b.{0,20}\b\d{1,2}\s*(?:[óo]rakor|kor)\b", re.I)
+_TIME_MEET   = re.compile(r"\d{1,2}(?:[:.]\d{2})?\s*-?\s*(?:[óo]rakor|kor)\b.{0,40}(tal[áa]lkoz|v[áa]rlak|ott leszek|j[öo]v[öo]k|megyek)|(egy|k[ée]t|h[áa]rom|n[ée]gy|[öo]t|hat|h[ée]t|nyolc|kilenc|t[íi]z)(kor|\s+[óo]rakor).{0,40}(ott leszek|v[áa]rlak|tal[áa]lkoz)|\bv[áa]rlak\b.{0,30}(t[ée]ren|n[áa]l\b|n[ée]l\b|utc)|majd\s+egyszer.{0,30}tal[áa]lkoz|tal[áa]n\s+(k[ée]s[őo]bb|egyszer|majd).{0,30}tal[áa]lkoz|\b\d{1,2}\s*(?:[óo]rakor|[óo]ra|kor)\b.{0,30}(tal[áa]lkoz|j[öo]v[öo]k|megyek|ott\s+vagyok|n[áa]lad|sarkon)|(tal[áa]lkoz\w*|j[öo]v[öo]k|megyek)\b.{0,20}\b\d{1,2}\s*(?:[óo]rakor|kor)\b", re.I)
 ADDRESS_DEFLECT = [
-    "haha ne rohanjunk ennyire 🙈 előbb ismerjük meg egymást rendesen, jó? 😊",
-    "naa, nem szoktam rögtön címet vagy konkrét talit megbeszélni 😄 előbb beszélgessünk még sokat 🙈",
-    "majd egyszer talán 😊 de most még csak ismerkedünk, élvezzük ezt egy kicsit 🙈",
+    "nem találkozom senkivel, de itt teljesen a tiéd vagyok 😘",
+    "a találkozás nem az én világom, de attól még itt nagyon jól elleszünk 😉",
+    "személyesen nem találkozom senkivel, de mesélj, mit csinálnál velem itt? 😏",
 ]
 def scrub_urls(t):
     return re.sub(r"\s{2,}", " ", _URL_RE.sub("", t or "")).strip()
@@ -619,20 +850,131 @@ def thin_emoji(t):
     if not allowed: return base
     return base if random.random() < 0.35 else (base + " " + allowed[-1])
 
-def get_tg_history(handle, limit=50):
-    h = (handle or "").lstrip("@").strip().lower()
-    if not h: return ""
+# ─────────────────────────────────────────────────────────────────────────────
+# TELEGRAM → FANVUE MEMORY LINK
+# The Telegram bot stores every chat in the same Postgres (tg_fans / tg_messages).
+# When a Telegram fan arrives here, we find him by his Telegram name and import that history.
+# ─────────────────────────────────────────────────────────────────────────────
+_KNOWS_ME = re.compile(
+    r"^\W*(szia\w*|hell?o\w*|hey\w*|na)?\W*[ée]n vagyok\b|\b[ée]n vagyok az\b|nem eml[ée]kszel|nem ismersz (meg|fel)|m[áa]r besz[ée]lt[üu]nk|besz[ée]lt[üu]nk m[áa]r|"
+    r"ismerj[üu]k egym[áa]st|te [íi]rt[áa]l (nekem|r[áa]m)|onnan ismer|"
+    r"elfelejtett[ée]l|nem tudod ki vagyok|eml[ée]kszel r[áa]m", re.I)
+TG_NOASK_HINT = ("📨 A fan arra utal, hogy már ismeritek egymást, de a közös múltatok most nincs előtted. Örülj neki kedvesen, "
+                 "röviden, és vidd tovább a beszélgetést. ⛔ NE kérdezz rá a nevére, felhasználónevére vagy más platformra "
+                 "(Fanvue szabály), és NE találj ki közös emlékeket.")
+TG_FOUND_HINT = ("📨 Most jöttél rá, ki ő: ugyanaz a srác, akivel korábban már beszéltél (lent a közös múltatok). "
+                 "Örülj neki, és utalj vissza EGY konkrét közös emlékre a lenti előzményekből — természetesen, röviden. "
+                 "A Telegramot vagy más oldalt magadtól ne nevezd meg.")
+
+def _norm_name(s):
+    import unicodedata
+    s = "".join(c for c in unicodedata.normalize("NFKD", (s or "").lower()) if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9_ ]", " ", s)).strip()
+
+def find_tg_candidates(text, only_told=False):
+    """Score Telegram fans against what he wrote ('Kovács Péter', '@peti97', 'Peti'). Best first."""
+    import difflib
+    t = _norm_name(text)
+    if not t: return [], {}
+    words = set(t.split())
+    handles = {h.lower() for h in re.findall(r"@([A-Za-z0-9_]{4,32})", text or "")}
+    if looks_like_handle((text or "").strip()): handles.add((text or "").strip().lstrip('@').lower())
     try:
-        row = db_query("SELECT user_id FROM tg_fans WHERE lower(username)=?", (h,), fetch_one=True)
-        if not row:
-            row = db_query("SELECT user_id FROM tg_fans WHERE lower(first_name)=?", (h,), fetch_one=True)
-        if not row: return ""
-        msgs = db_query("SELECT is_mine, text FROM tg_messages WHERE user_id=? ORDER BY id ASC LIMIT ?",
-                        (row['user_id'], limit)) or []
-        return "\n".join(("Jázmin" if m['is_mine'] else "ő") + ": " + (m['text'] or "")
-                         for m in msgs if (m.get('text') or '').strip())
+        taken = {r['tg_user_id'] for r in (db_query("SELECT tg_user_id FROM fan_profiles WHERE tg_user_id IS NOT NULL") or [])}
+        rows = db_query("SELECT * FROM tg_fans") or []
+    except Exception as e:
+        print(f"[tglink] tg tables not readable: {e}"); return [], {}
+    out = []
+    for f in rows:
+        uid = str(f.get('user_id'))
+        if uid in taken: continue
+        if only_told and not f.get('link_sent_at'): continue      # only fans who were told to open with their name
+        un = (f.get('username') or '').lower().lstrip('@')
+        fn, ln = _norm_name(f.get('first_name')), _norm_name(f.get('last_name'))
+        full, rev = (f"{fn} {ln}".strip(), f"{ln} {fn}".strip())
+        sc = 0
+        if un and un in handles: sc = 100
+        elif full and len(full) >= 5 and (ln or ' ' in full) and (full in t or rev in t): sc = 95
+        elif full and len(t) <= 40 and max(difflib.SequenceMatcher(None, t, full).ratio(),
+                                             difflib.SequenceMatcher(None, t, rev).ratio()) >= 0.85: sc = 80
+        elif fn and len(fn) >= 3 and fn in words and (not ln or ln in words): sc = 60 if not ln else 90
+        elif fn and len(fn) >= 3 and fn in words: sc = 45
+        if not sc: continue
+        bonus = (15 if (f.get('link_sent_at') or f.get('state') == 'DONE') else 0) + (5 if (f.get('msg_count') or 0) >= 10 else 0)
+        out.append((sc + bonus, sc, f))      # (rank score, name-match score, fan) — bonus only ranks, never links
+    out.sort(key=lambda x: -x[0])
+    return [(r, f) for r, b, f in out], {id(f): b for r, b, f in out}
+
+def pick_tg_match(found):
+    """Return the tg_fans row if the NAME match alone is clear enough to link automatically, else None."""
+    cands, base = found if isinstance(found, tuple) else (found, {})
+    if not cands: return None
+    b0 = base.get(id(cands[0][1]), cands[0][0])
+    b1 = base.get(id(cands[1][1]), cands[1][0]) if len(cands) > 1 else 0
+    if b0 >= 95 and b0 - b1 >= 20: return cands[0][1]
+    if b0 >= 80 and len(cands) == 1: return cands[0][1]
+    return None
+
+def tg_display(f):
+    nm = f"{f.get('first_name') or ''} {f.get('last_name') or ''}".strip() or '?'
+    return nm + (f" (@{f['username']})" if f.get('username') else "")
+
+def get_tg_messages(tg_uid, limit=None):
+    sql = "SELECT is_mine, text FROM tg_messages WHERE user_id=? ORDER BY id DESC"
+    rows = db_query(sql + (f" LIMIT {int(limit)}" if limit else ""), (str(tg_uid),)) or []
+    return [r for r in reversed(rows) if (r.get('text') or '').strip()]
+
+def get_tg_history(tg_uid, limit=25):
+    """The LATEST `limit` Telegram messages, oldest→newest (v12 bug: it took the OLDEST ones)."""
+    try:
+        return "\n".join(("Jázmin" if m['is_mine'] else "ő") + ": " + m['text'] for m in get_tg_messages(tg_uid, limit))
     except Exception:
         return ""
+
+def build_tg_summary(tg_uid):
+    msgs = get_tg_messages(tg_uid, 600)
+    if not msgs: return ""
+    convo = "\n".join(("Jázmin" if m['is_mine'] else "Fan") + ": " + m['text'] for m in msgs)
+    try:
+        r = llm_create(model=UTIL_MODEL, max_tokens=500, temperature=0.2,
+            system=("Ez Jázmin és egy fan TELJES Telegramos beszélgetése. Készíts Jázminnak egy tömör, magyar "
+                    "emlékeztetőt pontokba szedve, hogy később folytatni tudja a kapcsolatot: a fan neve/becenév, kora, "
+                    "lakhelye, munkája, hobbijai, fontos dolgok amiket mesélt, közös poénok/témák, mire válaszolt "
+                    "Jázmin hangüzeneteire, a hangulat és mennyire kötődik Jázminhoz, mit ígért vagy mondott Jázmin. "
+                    "Csak tények, semmi kitalált. Max 12 pont."),
+            messages=[{"role": "user", "content": convo[-14000:]}])
+        return "".join(b.text for b in r.content if b.type == "text").strip()
+    except Exception as e:
+        print(f"[tglink] summary failed: {e}"); return ""
+
+def link_tg_fan(chat_id, tg_uid, fan_name='', how='auto'):
+    f = db_query("SELECT * FROM tg_fans WHERE user_id=?", (str(tg_uid),), fetch_one=True)
+    if not f: return False
+    summary = build_tg_summary(tg_uid)
+    n = len(get_tg_messages(tg_uid, 2000))
+    db_query("UPDATE fan_profiles SET tg_user_id=?, tg_handle=?, tg_summary=?, awaiting_tg=0, tg_linked_at=? WHERE chat_id=?",
+             (str(tg_uid), tg_display(f), summary, datetime.now(timezone.utc).isoformat(), chat_id))
+    send_telegram_alert(f"🔗 Összekötve ({how}): Fanvue „{fan_name or chat_id}” ↔ Telegram {tg_display(f)} — {n} üzenet beimportálva.",
+                        buttons=[[("↩️ Visszavonás", f"unlink:{chat_id}"), ("⏸ Fan megállítása", f"fvp:{chat_id}")]])
+    return True
+
+def unlink_tg_fan(chat_id):
+    db_query("UPDATE fan_profiles SET tg_user_id=NULL, tg_handle=NULL, tg_summary=NULL, tg_linked_at=NULL WHERE chat_id=?", (chat_id,))
+
+def tg_memory_block(prof):
+    """Prompt block with the imported Telegram memory (summary of everything + latest messages)."""
+    uid = (prof.get('tg_user_id') or '').strip()
+    if not uid and (prof.get('tg_handle') or '').strip():          # links made by v12 (handle only)
+        h = prof['tg_handle'].lstrip('@').split(' ')[0].lower()
+        row = db_query("SELECT user_id FROM tg_fans WHERE lower(username)=?", (h,), fetch_one=True)
+        uid = row['user_id'] if row else ''
+    if not uid: return ""
+    hist = get_tg_history(uid, 25)
+    if not hist and not prof.get('tg_summary'): return ""
+    out = "📨 EZ A FAN KORÁBBAN TELEGRAMON ÍRT NEKED (ugyanaz a személy, átjött ide Fanvue-ra). Ez a TE emléked:\n"
+    if prof.get('tg_summary'): out += "Amit tudsz róla a Telegramról:\n" + prof['tg_summary'].strip() + "\n"
+    if hist: out += "A Telegramos beszélgetés vége:\n" + hist[-3500:] + "\n"
+    return out + "(Itt a Fanvue szabályai érvényesek: itt nem találkozol senkivel.)\n\n"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CHARACTER ENGINE — emotional state machine + re-engagement
@@ -716,7 +1058,7 @@ def maybe_update_summary(chat_id, history):
     if len(convo) < 80:
         return
     try:
-        resp = client.messages.create(
+        resp = llm_create(
             model=UTIL_MODEL, max_tokens=160,
             system=(
                 "Írd le 2-3 mondatban magyarul: mit tud már Jázmin erről a fanról, "
@@ -725,7 +1067,7 @@ def maybe_update_summary(chat_id, history):
             ),
             messages=[{"role": "user", "content": f"Beszélgetés:\n{convo[-2500:]}"}]
         )
-        summary = resp.content[0].text.strip()
+        summary = resp.text
         if summary:
             db_query(
                 "UPDATE fan_profiles SET relationship_summary=?, summary_msg_count=? WHERE chat_id=?",
@@ -828,10 +1170,9 @@ def get_time_context():
     now = get_budapest_now(); h, wd = now.hour, now.weekday()
     names = ["hétfő","kedd","szerda","csütörtök","péntek","szombat","vasárnap"]
     t = now.strftime("%H:%M")
-    if wd == 6: return "Ma vasárnap — szabadnap, pihensz, lazítasz."
-    if 8 <= h < 16: return f"Most {names[wd]} van, {t} — épp a menhelyen dolgozol (8-16h)."
-    if h < 8: return f"Most {names[wd]} van, {t} — még nem indultál munkába, reggel."
-    return f"Most {names[wd]} van, {t} — már hazaértél, este van."
+    part = ("késő éjjel" if h < 5 else "reggel" if h < 10 else "délelőtt" if h < 12 else "délután" if h < 18
+            else "este" if h < 23 else "késő éjjel")
+    return f"Most {names[wd]} van, {t} ({part}) — otthon vagy, ráérsz."
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STORAGE
@@ -871,7 +1212,7 @@ def extract_facts(msg_id, chat_id, fan_text):
     if not fan_text or len(fan_text.strip()) < 10:
         db_query('UPDATE messages SET facts_done=1 WHERE msg_id=?', (msg_id,)); return
     try:
-        resp = client.messages.create(model=UTIL_MODEL, max_tokens=200,
+        resp = llm_create(model=UTIL_MODEL, max_tokens=200,
             system=("You extract facts the FAN (the man writing) states ABOUT HIMSELF. "
                     "CRITICAL: IGNORE anything about Jázmin / the girl / 'you' (te/téged) — ONLY the fan's OWN facts. "
                     "Only REAL, explicitly-stated facts about himself: an actual NAME, a real AGE number, a real JOB title, "
@@ -879,7 +1220,7 @@ def extract_facts(msg_id, chat_id, fan_text):
                     "Output ONLY a raw JSON array of {\"fact_type\",\"fact_value\"}; [] if none. "
                     "fact_type in: name, job, location, age, relationship, hobby, family, stress, interest, language, pet."),
             messages=[{"role": "user", "content": fan_text}])
-        raw = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+        raw = resp.text.replace("```json", "").replace("```", "").strip()
         m = re.search(r'\[.*\]', raw, re.DOTALL)
         if m: raw = m.group(0)
         facts_list = json.loads(raw)
@@ -924,31 +1265,36 @@ def get_real_name(chat_id):
 
 def describe_image(media_type, b64):
     try:
-        resp = client.messages.create(model=UTIL_MODEL, max_tokens=120,
+        resp = llm_create(model=UTIL_MODEL, max_tokens=120,
             messages=[{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
                 {"type": "text", "text": "Írd le 1 rövid mondatban magyarul, mi van ezen a képen, amit egy fan küldött (arc, póz, hangulat, tárgy)."}]}])
-        return resp.content[0].text.strip()
+        return resp.text
     except Exception as e:
         print(f"[vision] {e}"); return ""
 
-def get_or_create_fan(chat_id, fan_name, handle):
+def get_or_create_fan(chat_id, fan_name, handle, new_fan_msgs=0):
+    """v13 fix: counters only move when the fan actually sent NEW messages (v12 bumped them on every 5s poll)."""
     p = db_query('SELECT * FROM fan_profiles WHERE chat_id=?', (chat_id,), fetch_one=True)
     if not p:
         elig = 1 if AUTO_PPV_ON else 0
-        db_query('INSERT INTO fan_profiles (chat_id, fan_name, handle, total_messages, last_interaction, auto_eligible) VALUES (?,?,?,0,?,?)',
-                 (chat_id, fan_name, handle, datetime.now().isoformat(), elig))
-    else:
+        db_query('INSERT INTO fan_profiles (chat_id, fan_name, handle, total_messages, last_interaction, auto_eligible) VALUES (?,?,?,?,?,?)',
+                 (chat_id, fan_name, handle, int(new_fan_msgs or 0), datetime.now().isoformat(), elig))
+    elif new_fan_msgs:
         db_query('UPDATE fan_profiles SET total_messages=?, last_interaction=?, fan_name=?, handle=? WHERE chat_id=?',
-                 ((p.get('total_messages') or 0) + 1, datetime.now().isoformat(), fan_name, handle, chat_id))
-        add_warmth(chat_id, 1)  # +1 warmth per fan message
+                 ((p.get('total_messages') or 0) + int(new_fan_msgs), datetime.now().isoformat(), fan_name, handle, chat_id))
+        add_warmth(chat_id, int(new_fan_msgs))  # +1 warmth per new fan message
 
 def is_paused(chat_id):
     r = db_query("SELECT is_paused FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True)
     return bool(r and r.get('is_paused'))
 
-def set_takeover(chat_id):
-    until = (datetime.now(timezone.utc) + timedelta(seconds=MANUAL_TAKEOVER_SECS)).isoformat()
+def set_takeover(chat_id, from_dt=None):
+    until_dt = (from_dt or datetime.now(timezone.utc)) + timedelta(seconds=MANUAL_TAKEOVER_SECS)
+    cur = db_query("SELECT manual_takeover_until FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}
+    cur_dt = parse_timestamp(cur.get('manual_takeover_until') or '')
+    if cur_dt and cur_dt >= until_dt: return           # an older message never shortens a newer pause
+    until = until_dt.isoformat()
     db_query("INSERT OR IGNORE INTO fan_profiles (chat_id, fan_name, total_messages, last_interaction) VALUES (?, 'unknown', 0, ?)",
              (chat_id, datetime.now().isoformat()))
     db_query("UPDATE fan_profiles SET manual_takeover_until=? WHERE chat_id=?", (until, chat_id))
@@ -961,6 +1307,7 @@ def in_takeover(chat_id):
 
 def should_skip(chat_id): return is_paused(chat_id) or in_takeover(chat_id)
 
+_manual_seen = set()
 def check_manual_and_ppv(chat_id, fan_name, api_messages):
     if not api_messages: return
     now = datetime.now(timezone.utc)
@@ -968,16 +1315,22 @@ def check_manual_and_ppv(chat_id, fan_name, api_messages):
         if (msg.get('sender') or {}).get('uuid', '') != MY_UUID: continue
         if msg.get('type', '') == 'AUTOMATED_NEW_FOLLOWER': continue
         dt = parse_timestamp(msg.get('sentAt') or msg.get('createdAt') or msg.get('timestamp') or '')
-        if not dt or dt <= BOOT_TIME_UTC or (now - dt) > timedelta(minutes=5): continue
+        if not dt or dt <= BOOT_TIME_UTC or (now - dt) > timedelta(seconds=MANUAL_TAKEOVER_SECS): continue
         mtext = (msg.get('text') or '').strip()
         is_own_reply = bool(mtext and db_query(
             "SELECT 1 FROM messages WHERE chat_id=? AND text=? AND msg_id LIKE 'bot%'",
             (chat_id, mtext), fetch_one=True))
         save_message_to_db(msg.get('uuid') or '', chat_id, fan_name, MY_UUID,
-                           mtext, msg.get('sentAt') or '', is_mine=True, facts_done=1, vision_done=1)
+                           mtext or my_media_tag(msg), msg.get('sentAt') or '', is_mine=True, facts_done=1, vision_done=1)
+        if not is_own_reply and (msg.get('hasMedia') or msg.get('mediaUuids')):
+            _t = parse_timestamp(load_token(f"botmedia_{chat_id}") or '')
+            is_own_reply = bool(_t and abs((dt - _t).total_seconds()) < 120)     # the bot's own auto-PPV / free media
         if is_own_reply:
             continue
-        set_takeover(chat_id)
+        set_takeover(chat_id, dt)
+        if msg.get('uuid') not in _manual_seen:
+            _manual_seen.add(msg.get('uuid'))
+            print(f"[manual] you wrote to {fan_name or chat_id} → bot paused for this fan for {MANUAL_TAKEOVER_SECS // 60} min", flush=True)
         if msg_has_price(msg):
             db_query("UPDATE fan_profiles SET ppv_pending=1 WHERE chat_id=?", (chat_id,))
 
@@ -1022,7 +1375,7 @@ def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx,
     p = f"KONTEXTUS:\n- {time_ctx}\n\n"
 
     prof = db_query(
-        "SELECT fan_note, ppv_pending, warmth, tg_handle, warmth_points, relationship_summary FROM fan_profiles WHERE chat_id=?",
+        "SELECT fan_note, ppv_pending, warmth, tg_handle, tg_user_id, tg_summary, warmth_points, relationship_summary, ai_confirmed FROM fan_profiles WHERE chat_id=?",
         (chat_id,), fetch_one=True
     ) or {}
 
@@ -1042,13 +1395,12 @@ def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx,
     if note:
         p += f"⭐ SPECIÁLIS UTASÍTÁS ERRE A FANRA (mindent felülír):\n{note}\n\n"
 
-    tg = (prof.get('tg_handle') or '').strip()
-    if tg:
-        tg_hist = get_tg_history(tg)
-        if tg_hist:
-            p += ("📨 EZ A FAN KORÁBBAN TELEGRAMON ÍRT NEKED (ugyanaz a személy, átjött ide Fanvue-ra). "
-                  "Emlékezz erre, és természetesen hivatkozz vissza arra amit ott mondott:\n"
-                  + tg_hist[-1600:] + "\n\n")
+    try:
+        p += tg_memory_block(prof)
+    except Exception as e:
+        print(f"[tglink] memory block: {e}")
+    if prof.get('ai_confirmed'):
+        p += "⚖️ Ebben a beszélgetésben már egyértelműen megmondtad, hogy AI vagy — ennek SOHA ne mondj ellent.\n\n"
 
     if prof.get('ppv_pending'):
         p += ("🔓 PPV KÜLDVE: épp küldtem ennek a fannak egy ZÁROLT tartalmat. Lazán, izgatóan keltsd fel "
@@ -1084,18 +1436,18 @@ def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx,
     else:
         p += f"\nEZ FOLYTATÁS. NE köszönj újra! Kezdj '{random.choice(CONTINUATIONS)}'-szerűen vagy egyből a lényegre.\n"
 
-    p += ("\nEGYETLEN rövid, természetes üzenetet írj vissza, 1-2 mondat. NYELV: a FAN nyelvén válaszolj — ha a fan ANGOLUL (vagy más nyelven) "
-          "írt, ANGOLUL válaszolj; alapból magyarul. Ha a fan szomorú/nehéz dolgot ír — ELŐSZÖR arra reagálj.")
+    p += ("\nEGYETLEN rövid, természetes üzenetet írj vissza, 1-2 mondat, MAGYARUL. "
+          "Ha a fan szomorú/nehéz dolgot ír — ELŐSZÖR arra reagálj.")
     return p
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLAUDE REPLY
 # ─────────────────────────────────────────────────────────────────────────────
-def ask_claude(dynamic_prompt, user_text):
-    model = REPLY_MODEL
+def ask_claude(dynamic_prompt, user_text, smart=True):
+    model = REPLY_MODEL if smart else CHEAP_MODEL
     for attempt in range(3):
         try:
-            resp = client.messages.create(
+            resp = llm_create(
                 model=model, max_tokens=220, temperature=0.75,
                 system=[
                     {"type": "text", "text": JAZMIN_PERSONALITY, "cache_control": {"type": "ephemeral"}},
@@ -1108,7 +1460,7 @@ def ask_claude(dynamic_prompt, user_text):
             reply = re.sub(r"  +", " ", reply).strip()
             if _BANNED_PHRASE.search(reply):
                 try:
-                    resp2 = client.messages.create(model=model, max_tokens=220, temperature=0.75,
+                    resp2 = llm_create(model=model, max_tokens=220, temperature=0.75,
                         system=[{"type": "text", "text": JAZMIN_PERSONALITY, "cache_control": {"type": "ephemeral"}},
                                 {"type": "text", "text": dynamic_prompt},
                                 {"type": "text", "text": "FONTOS: az előző válaszod tiltott fordulatot tartalmazott (attól függ / mit értesz X alatt / menj a privát oldalamra). EZ ITT a Fanvue = a privát oldalad; írd újra TERMÉSZETESEN, e nélkül."}],
@@ -1126,9 +1478,10 @@ def ask_claude(dynamic_prompt, user_text):
         except anthropic.RateLimitError:
             time.sleep(8 * (attempt + 1))
         except Exception as e:
-            if model != REPLY_MODEL_FALLBACK:
-                send_telegram_error(f"claude err on {model} ({e}); falling back to {REPLY_MODEL_FALLBACK}")
-                model = REPLY_MODEL_FALLBACK; continue
+            other = REPLY_MODEL_FALLBACK if model == REPLY_MODEL else REPLY_MODEL
+            if attempt < 2 and other != model:
+                send_telegram_error(f"claude err on {model} ({e}); falling back to {other}")
+                model = other; continue
             send_telegram_error(f"claude err: {e}"); return ""
     return ""
 
@@ -1147,9 +1500,14 @@ def process_new_messages():
             if not chat_id: continue
             fan_name = user.get('displayName', 'ismeretlen') or 'ismeretlen'
             handle = user.get('handle', '') or ''
-            get_or_create_fan(chat_id, fan_name, handle)
             api_messages = get_messages(chat_id)
-            if not api_messages: continue
+            if not api_messages:
+                get_or_create_fan(chat_id, fan_name, handle, 0); continue
+            new_n = 0
+            for _m in api_messages:
+                if (_m.get('sender') or {}).get('uuid') == MY_UUID: continue
+                if not db_query('SELECT 1 FROM messages WHERE msg_id=?', (_m.get('uuid') or '',), fetch_one=True): new_n += 1
+            get_or_create_fan(chat_id, fan_name, handle, new_n)
 
             for msg in api_messages:
                 msg_id = msg.get('uuid') or ''
@@ -1167,6 +1525,8 @@ def process_new_messages():
                             desc = describe_image(*dl)
                             if desc: text_raw = f"[fotót küldött: {desc}]"
 
+                if is_mine and not text_raw:
+                    text_raw = my_media_tag(msg)
                 save_message_to_db(msg_id, chat_id, fan_name, sender, text_raw, mtime,
                                    is_mine=is_mine, facts_done=0 if not already else (already.get('facts_done') or 0),
                                    vision_done=1)
@@ -1178,6 +1538,15 @@ def process_new_messages():
 
             fan_msgs = [m for m in api_messages if (m.get('sender') or {}).get('uuid') != MY_UUID]
             if not fan_msgs: continue
+            # If the newest message in the chat is YOURS (manual reply / PPV), the fan has been answered → don't reply.
+            _ts = lambda m: parse_timestamp(m.get('createdAt') or m.get('sentAt') or m.get('timestamp') or '') or datetime.min.replace(tzinfo=timezone.utc)
+            newest = max(api_messages, key=_ts)
+            if (newest.get('sender') or {}).get('uuid') == MY_UUID:
+                nmt = (newest.get('text') or '').strip()
+                if not (nmt and db_query("SELECT 1 FROM messages WHERE chat_id=? AND text=? AND msg_id LIKE 'bot%'", (chat_id, nmt), fetch_one=True)):
+                    for fm in fan_msgs:
+                        if fm.get('uuid'): db_query('UPDATE messages SET was_replied=1 WHERE msg_id=?', (fm['uuid'],))
+                continue
             fan_msgs.sort(key=lambda m: parse_timestamp(m.get('createdAt') or m.get('sentAt') or m.get('timestamp') or '') or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
             last = fan_msgs[0]
             msg_id = last.get('uuid') or ''
@@ -1237,36 +1606,95 @@ def send_due_batches():
 
             fan_text_all = item['fan_text'] or ''
             last_line = (seen[-1] if seen else fan_text_all).strip()
-            prof2 = db_query("SELECT ai_strikes, awaiting_tg, tg_handle, ppv_pending FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}
+            prof2 = db_query("SELECT ai_strikes, ai_confirmed, awaiting_tg, tg_handle, tg_user_id, tg_ask_count, ppv_pending "
+                             "FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}
             override = None
+            ai_mode = None          # 'confirm' | 'already' | None
+            tg_hint_used = None
             if is_minor_fan(fan_text_all):
                 db_query("UPDATE fan_profiles SET is_paused=1 WHERE chat_id=?", (chat_id,))
                 try: send_telegram_alert(f"⛔ MINOR claim from {item.get('fan_name') or chat_id} -> auto-refused + paused.")
                 except Exception: pass
                 override = MINOR_MSG_F
-            elif mentions_ai(fan_text_all):
-                strikes = (prof2.get('ai_strikes') or 0) + 1
-                db_query("UPDATE fan_profiles SET ai_strikes=? WHERE chat_id=?", (strikes, chat_id))
-                override = AI_DENY_1 if strikes == 1 else AI_DENY_2
-            elif prof2.get('awaiting_tg') and looks_like_handle(last_line):
-                db_query("UPDATE fan_profiles SET tg_handle=?, awaiting_tg=0 WHERE chat_id=?", (last_line, chat_id))
-                dyn = build_dynamic_prompt(chat_id, item['fan_name'] or 'unknown', real_name, facts, history, get_time_context(), fan_msg_time)
-            elif came_from_telegram(fan_text_all) and not (prof2.get('tg_handle')):
-                db_query("UPDATE fan_profiles SET awaiting_tg=1 WHERE chat_id=?", (chat_id,))
-                override = "jaaa te onnan jöttél? 🙈 mi a telegram neved? hadd nézzem meg ki vagy 🥰"
+            else:
+                # ⚖️ Fanvue rule: a DIRECT "are you AI / real?" always gets a clear yes (once), then "already told you".
+                if is_direct_ai_question(fan_text_all):
+                    db_query("UPDATE fan_profiles SET ai_strikes=COALESCE(ai_strikes,0)+1 WHERE chat_id=?", (chat_id,))
+                    ai_mode = 'already' if prof2.get('ai_confirmed') else 'confirm'
+                    dyn += "\n\n" + (AI_ALREADY_HINT if ai_mode == 'already' else AI_CONFIRM_HINT)
+                if _MEETUP_Q.search(fan_text_all):
+                    dyn += "\n\n" + MEETUP_HINT
+                # 📨 Telegram memory link — PASSIVE only (Fanvue forbids asking for off-platform names).
+                # On Telegram she told him to open with his Telegram name; tracking links match the rest automatically.
+                if not (prof2.get('tg_user_id') or prof2.get('tg_handle')):
+                    try:
+                        tg_hint = None
+                        early = len(fan_msgs) <= 4
+                        knows = came_from_telegram(fan_text_all) or bool(_KNOWS_ME.search(fan_text_all))
+                        if early or knows:
+                            found = find_tg_candidates(fan_text_all, only_told=True)
+                            cands = found[0]
+                            match = pick_tg_match(found)
+                            if match:
+                                if link_tg_fan(chat_id, match['user_id'], item.get('fan_name'), 'név alapján'):
+                                    dyn = build_dynamic_prompt(chat_id, item['fan_name'] or 'unknown', real_name, facts, history, get_time_context(), fan_msg_time)
+                                    if ai_mode: dyn += "\n\n" + (AI_ALREADY_HINT if ai_mode == 'already' else AI_CONFIRM_HINT)
+                                    if _MEETUP_Q.search(fan_text_all): dyn += "\n\n" + MEETUP_HINT
+                                    tg_hint = TG_FOUND_HINT
+                            elif (cands or knows) and not (prof2.get('tg_ask_count') or 0):
+                                # not sure who he is → ask YOU (buttons), she just stays warm and doesn't ask anything
+                                db_query("UPDATE fan_profiles SET tg_ask_count=1 WHERE chat_id=?", (chat_id,))
+                                if not cands:
+                                    cands = [(0, f) for f in (db_query("SELECT * FROM tg_fans WHERE link_sent_at IS NOT NULL "
+                                                                       "ORDER BY link_sent_at DESC LIMIT 5") or [])]
+                                if cands:
+                                    send_telegram_alert(
+                                        f"❓ Új Fanvue fan „{item.get('fan_name') or chat_id}”: „{last_line[:80]}”. Melyik Telegramos fan lehet?",
+                                        buttons=[[(tg_display(f)[:40], f"link:{chat_id}:{f['user_id']}")] for _, f in cands[:5]]
+                                                + [[("❌ Egyik sem", f"nolink:{chat_id}")]])
+                                if knows: tg_hint = TG_NOASK_HINT
+                        if tg_hint: dyn += "\n\n" + tg_hint; tg_hint_used = tg_hint
+                    except Exception as e:
+                        print(f"[tglink] {e}")
 
             if override is None and _ADVANCE.search(fan_text_all):
                 dyn = dyn + "\n\n" + ADVANCE_HINT
-            if override is None and fan_is_english(fan_text_all):
-                dyn = dyn + "\n\n" + EN_DIRECTIVE
             # PPV objection brain — override generic PPV prompt with context-aware version
             if override is None and prof2.get('ppv_pending') and fan_text_all.strip():
                 ppv_dir = ppv_objection_directive(fan_text_all)
                 dyn = re.sub(r"🔓 PPV KÜLDVE:.*?\n\n", "", dyn, flags=re.DOTALL)
                 dyn = dyn + "\n\n" + ppv_dir
-            reply = override if override is not None else ask_claude(dyn, user_msg)
+            # 💸 smart model only where it matters (money, compliance, first impression, memory reunion)
+            smart = any([
+                bool(ai_mode), bool(prof2.get('ppv_pending')),
+                bool(_ADVANCE.search(fan_text_all)), bool(_MEETUP_Q.search(fan_text_all)),
+                tg_hint_used == TG_FOUND_HINT,
+                len(fan_msgs) <= 3, len(fan_text_all) > 220,
+                bool(re.search(r"dr[áa]ga|nincs p[ée]nz|megveszem|mennyibe|\b[áa]r[a]?\b|feloldom|unlock|fizet", fan_text_all, re.I)),
+            ])
+            reply = override if override is not None else ask_claude(dyn, user_msg, smart=smart)
 
-            if reply and not prof2.get('ppv_pending'):
+            # ⚖️ Fanvue compliance safety net: never claim to be human; a direct question must get a clear "AI vagyok".
+            if override is None and reply:
+                need_confirm = (ai_mode == 'confirm') and not confirms_ai(reply)
+                if _CLAIM_HUMAN.search(reply) or need_confirm:
+                    print(f"[compliance] regenerating (claim_human={bool(_CLAIM_HUMAN.search(reply))}, need_confirm={need_confirm})", flush=True)
+                    fix = AI_CONFIRM_HINT if (ai_mode == 'confirm' or need_confirm) else AI_ALREADY_HINT if prof2.get('ai_confirmed') else \
+                        "⚖️ FONTOS: SOHA ne állítsd, hogy ember vagy vagy hogy nem vagy AI. Írd újra e nélkül."
+                    r2 = ask_claude(dyn + "\n\n" + fix, user_msg, smart=True)
+                    if r2 and not _CLAIM_HUMAN.search(r2) and (ai_mode != 'confirm' or confirms_ai(r2)):
+                        reply = r2
+                    else:
+                        reply = AI_FALLBACK_CONFIRM if (ai_mode == 'confirm' or not prof2.get('ai_confirmed')) else AI_FALLBACK_ALREADY
+                if ai_mode == 'already' and not (confirms_ai(reply) or re.search(r"m[áa]r mondtam|tudod a v[áa]laszt|m[áa]r megbesz[ée]lt", reply, re.I)):
+                    reply = AI_FALLBACK_ALREADY
+                if _MEETUP_Q.search(fan_text_all) and re.search(
+                        r"m[ée]g nem|majd egyszer|egyszer majd|tal[áa]n (k[ée]s[őo]bb|egyszer|majd)|ha (m[áa]r )?jobban megismer|el[őo]bb ismerj",
+                        reply, re.I):
+                    print("[compliance] soft meetup promise replaced", flush=True)
+                    reply = random.choice(ADDRESS_DEFLECT)
+
+            if reply and not prof2.get('ppv_pending') and not ai_mode:
                 _claimed = bool(_FAKE_SEND.search(reply)); _promised = bool(_PROMISE_SEND.search(reply))
                 if _claimed:
                     reply = random.choice(FAKE_SEND_TEASE)
@@ -1284,11 +1712,16 @@ def send_due_batches():
                 now_iso = datetime.now().isoformat()
                 save_message_to_db(f"bot_{now_iso}_{chat_id}", chat_id, item['fan_name'], MY_UUID, reply, now_iso, is_mine=True, facts_done=1, vision_done=1)
                 db_query("UPDATE fan_profiles SET ppv_pending=0 WHERE chat_id=? AND ppv_pending=1", (chat_id,))
+                if confirms_ai(reply):
+                    db_query("UPDATE fan_profiles SET ai_confirmed=1 WHERE chat_id=?", (chat_id,))
                 threading.Thread(target=maybe_update_summary, args=(chat_id, history), daemon=True).start()
                 maybe_run_auto_ppv(chat_id, item['fan_name'])
                 sent += 1
             else:
-                db_claim("UPDATE scheduled_replies SET status='pending' WHERE id=?", (batch_id,))
+                # retry at most 2 more times, a minute apart (v12 re-asked Claude every 4s forever)
+                retry_at = (datetime.now() + timedelta(seconds=60)).isoformat()
+                db_claim("UPDATE scheduled_replies SET status=CASE WHEN COALESCE(attempts,0)>=2 THEN 'failed' ELSE 'pending' END, "
+                         "attempts=COALESCE(attempts,0)+1, scheduled_time=? WHERE id=?", (retry_at, batch_id))
         except Exception as e:
             print(f"[send {chat_id}] {e}"); send_telegram_error(f"send {chat_id}: {e}")
     return sent
@@ -1300,14 +1733,18 @@ polling_active = False
 polling_thread = None
 send_thread    = None
 reng_thread    = None
+ctrl_thread    = None
+track_thread   = None
 _is_leader     = False
+_has_poll_lock = False   # holds the poll lock (even when the Fanvue token is dead) → runs the control panel
 
 def poll_loop():
-    global _is_leader
+    global _is_leader, _has_poll_lock
     errs = 0
     while polling_active:
         try:
-            if acquire_poll_lock() and get_fanvue_token():
+            lock = acquire_poll_lock(); _has_poll_lock = lock
+            if lock and get_fanvue_token():
                 _is_leader = True
                 sc, _ = process_new_messages()
                 if sc: print(f"[{datetime.now()}] w={WORKER_ID} scan sched={sc}")
@@ -1340,7 +1777,262 @@ def start_polling():
         send_thread = threading.Thread(target=send_loop, daemon=True); send_thread.start(); started = True
     if reng_thread is None or not reng_thread.is_alive():
         reng_thread = threading.Thread(target=run_reengagement_loop, daemon=True); reng_thread.start(); started = True
+    global ctrl_thread, track_thread
+    if ctrl_thread is None or not ctrl_thread.is_alive():
+        ctrl_thread = threading.Thread(target=control_bot_loop, daemon=True); ctrl_thread.start(); started = True
+    if track_thread is None or not track_thread.is_alive():
+        track_thread = threading.Thread(target=tracking_loop, daemon=True); track_thread.start(); started = True
     return started
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FANVUE TRACKING LINKS — one personal link per Telegram fan (created when he nears the link moment).
+# Telegram bot writes a row (status='requested') into tg_tracking; we create the link here (we have the
+# Fanvue login), and later read who signed up through it → his Telegram memory is linked automatically.
+# Field names of Fanvue's tracking-link API aren't fully documented, so parsing is defensive + logged.
+# ─────────────────────────────────────────────────────────────────────────────
+def _ensure_tracking_table():
+    db_query("""CREATE TABLE IF NOT EXISTS tg_tracking (tg_user_id TEXT PRIMARY KEY, status TEXT, link_uuid TEXT,
+        url TEXT, requested_at TEXT, created_at TEXT, matched INTEGER DEFAULT 0, error TEXT)""")
+
+def _pick(d, *keys):
+    for k in keys:
+        cur = d
+        for part in k.split('.'):
+            cur = cur.get(part) if isinstance(cur, dict) else None
+        if cur: return cur
+    return None
+
+def create_tracking_link(tg_uid):
+    name = f"tg{tg_uid}"[:40]
+    for body in ({"name": name, "externalSocialPlatform": "telegram"}, {"name": name, "externalSocialPlatform": "other"}, {"name": name}):
+        try:
+            r = requests.post("https://api.fanvue.com/tracking-links", headers=get_headers(), json=body, timeout=15)
+        except Exception as e:
+            return None, None, f"err {e}"
+        if r.status_code in (200, 201):
+            d = r.json() if r.text else {}
+            d = d.get('data', d) if isinstance(d, dict) else {}
+            uuid_ = _pick(d, 'uuid', 'id', 'trackingLink.uuid')
+            url = _pick(d, 'url', 'link', 'trackingUrl', 'shareUrl', 'fullUrl', 'trackingLink.url')
+            if url and not str(url).startswith('http'): url = 'https://www.fanvue.com/' + str(url).lstrip('/')
+            print(f"[tracking] created for {tg_uid}: uuid={uuid_} url={url} keys={list(d.keys())[:12]}", flush=True)
+            return uuid_, url, None if (uuid_ and url) else f"unexpected response: {r.text[:200]}"
+        last = f"{r.status_code} {r.text[:200]}"
+        if r.status_code not in (400, 422): break
+    return None, None, last
+
+_tracking_alerted = [False]
+def tracking_links_tick():
+    """Create requested links; then check which Fanvue users came through each link."""
+    _ensure_tracking_table()
+    for row in (db_query("SELECT tg_user_id FROM tg_tracking WHERE status='requested' LIMIT 10") or []):
+        uuid_, url, err = create_tracking_link(row['tg_user_id'])
+        if uuid_ and url:
+            db_query("UPDATE tg_tracking SET status='ready', link_uuid=?, url=?, created_at=?, error=NULL WHERE tg_user_id=?",
+                     (uuid_, url, datetime.now(timezone.utc).isoformat(), row['tg_user_id']))
+            save_token('tracking_fail_alerted', '')
+        else:
+            db_query("UPDATE tg_tracking SET status='failed', error=? WHERE tg_user_id=?", (err, row['tg_user_id']))
+            if not _tracking_alerted[0] and load_token('tracking_fail_alerted') != 'yes':
+                _tracking_alerted[0] = True; save_token('tracking_fail_alerted', 'yes')
+                send_telegram_alert(f"⚠️ Nem sikerült Fanvue tracking linket létrehozni ({(err or '')[:150]}). "
+                                    f"A Telegram bot addig a sima linket küldi — szólj Claude-nak.")
+    for row in (db_query("SELECT tg_user_id, link_uuid FROM tg_tracking WHERE status='ready' AND COALESCE(matched,0)=0 "
+                           "ORDER BY created_at DESC LIMIT 30") or []):
+        try:
+            r = requests.get(f"https://api.fanvue.com/tracking-links/{row['link_uuid']}/users?limit=50", headers=get_headers(), timeout=15)
+            if r.status_code != 200: continue
+            for u in (r.json().get('data') or []):
+                fv_uuid = _pick(u, 'uuid', 'userUuid', 'user.uuid', 'fan.uuid')
+                if not fv_uuid: continue
+                db_query("INSERT OR IGNORE INTO fan_profiles (chat_id, fan_name, total_messages, last_interaction) VALUES (?, ?, 0, ?)",
+                         (fv_uuid, _pick(u, 'displayName', 'user.displayName', 'handle') or 'unknown', datetime.now().isoformat()))
+                prof = db_query("SELECT tg_user_id, fan_name FROM fan_profiles WHERE chat_id=?", (fv_uuid,), fetch_one=True) or {}
+                if not prof.get('tg_user_id'):
+                    link_tg_fan(fv_uuid, row['tg_user_id'], prof.get('fan_name'), 'tracking link ✅')
+                db_query("UPDATE tg_tracking SET matched=1 WHERE tg_user_id=?", (row['tg_user_id'],))
+                break
+        except Exception as e:
+            print(f"[tracking] users {row.get('link_uuid')}: {e}")
+
+def tracking_loop():
+    time.sleep(60)
+    while polling_active:
+        try:
+            if _is_leader: tracking_links_tick()
+        except Exception as e:
+            print(f"[tracking loop] {e}")
+        time.sleep(180)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTROL PANEL — your Telegram alert bot doubles as the on/off switch for BOTH bots.
+#   Fanvue bot:  safe_mode on = reads but does NOT send.     Telegram bot: tokens.tg_enabled = 'off'
+# ─────────────────────────────────────────────────────────────────────────────
+def tg_bot_enabled():  return (load_token('tg_enabled') or 'on') != 'off'
+def set_tg_bot(on):    save_token('tg_enabled', 'on' if on else 'off')
+def fanvue_enabled():  return not get_safe_mode()
+def set_fanvue(on):    set_safe_mode(not on)
+
+MENU_BUTTONS = [[("▶️ Mindkettő BE", "all:on"), ("⏸ Mindkettő KI", "all:off")],
+                [("Fanvue BE", "fv:on"), ("Fanvue KI", "fv:off")],
+                [("Telegram BE", "tg:on"), ("Telegram KI", "tg:off")],
+                [("👥 Fanvue fanok", "fvlist"), ("👥 Telegram fanok", "tglist")],
+                [("📊 Állapot", "status"), ("🔗 Fanvue újracsatl.", "reconnect")]]
+
+def _fan_rows_fv(search=None, limit=8):
+    if search:
+        qn = _norm_name(search)
+        rows = db_query("SELECT chat_id, fan_name, is_paused FROM fan_profiles ORDER BY last_interaction DESC LIMIT 2000") or []
+        return [r for r in rows if qn in _norm_name(r.get('fan_name'))][:limit]
+    return db_query("SELECT chat_id, fan_name, is_paused FROM fan_profiles ORDER BY last_interaction DESC LIMIT ?", (limit,)) or []
+
+def _fan_rows_tg(search=None, limit=8):
+    try:
+        if search:
+            qn = _norm_name(search)
+            rows = db_query("SELECT user_id, first_name, last_name, username, paused, msg_count FROM tg_fans ORDER BY created_at DESC LIMIT 5000") or []
+            return [r for r in rows if qn in _norm_name(f"{r.get('first_name') or ''} {r.get('last_name') or ''} {r.get('username') or ''}")][:limit]
+        return db_query("SELECT t.user_id, t.first_name, t.last_name, t.username, t.paused, t.msg_count FROM tg_fans t "
+                        "LEFT JOIN (SELECT user_id, MAX(id) mid FROM tg_messages GROUP BY user_id) m ON m.user_id=t.user_id "
+                        "ORDER BY m.mid DESC LIMIT ?", (limit,)) or []
+    except Exception as e:
+        print(f"[control] tg fans: {e}"); return []
+
+def send_fan_list(kind, search=None):
+    """Each fan = one button; tap toggles ⏸/▶️. Saved in the DB, so it survives restarts."""
+    if kind == 'fv':
+        rows = _fan_rows_fv(search)
+        btns = [[(("⏸ " if r.get('is_paused') else "▶️ ") + (r.get('fan_name') or r['chat_id'][:8])[:30], f"fvp:{r['chat_id']}")] for r in rows]
+        title = "👥 Fanvue fanok (▶️ = bot válaszol, ⏸ = megállítva). Koppints a váltáshoz:"
+    else:
+        rows = _fan_rows_tg(search)
+        btns = [[(("⏸ " if r.get('paused') else "▶️ ") + tg_display(r)[:30] + f" · {r.get('msg_count') or 0}", f"tgp:{r['user_id']}")] for r in rows]
+        title = "👥 Telegram fanok (▶️ = bot válaszol, ⏸ = megállítva). Koppints a váltáshoz:"
+    if not rows:
+        send_telegram_alert("Nem találtam ilyen fant." if search else "Még nincs fan."); return
+    send_telegram_alert(title + ("\nKeresés: " + search if search else "\nTipp: /fan Péter — keresés név szerint"), buttons=btns)
+
+def status_text():
+    tok = load_token('token_status') or 'ok'
+    exp = load_token('expires_at') or ''
+    hb = load_token('tg_heartbeat') or ''
+    try: tg_alive = (datetime.now(timezone.utc) - datetime.fromisoformat(hb)).total_seconds() < 600
+    except Exception: tg_alive = False
+    pend = db_query("SELECT COUNT(*) c FROM scheduled_replies WHERE status='pending'", fetch_one=True) or {}
+    sent = db_query("SELECT COUNT(*) c FROM scheduled_replies WHERE status='sent' AND created_at >= date('now')", fetch_one=True) or {}
+    linked = db_query("SELECT COUNT(*) c FROM fan_profiles WHERE tg_user_id IS NOT NULL", fetch_one=True) or {}
+    return ("📊 ÁLLAPOT\n"
+            f"Fanvue bot: {'🟢 BE (válaszol)' if fanvue_enabled() else '⏸ KI (csak olvas)'}\n"
+            f"Fanvue kapcsolat: {'🟢 rendben' if tok != 'dead' and (load_token('refresh_token') or '') else '🔴 újracsatlakoztatás kell'}\n"
+            f"Telegram bot: {'🟢 BE' if tg_bot_enabled() else '⏸ KI'} · {'él ✅' if tg_alive else 'nem jelentkezik ⚠️ (Railway-en fut?)'}\n"
+            f"Függő válaszok: {pend.get('c', 0)} · ma elküldve: {sent.get('c', 0)} · összekötött TG fanok: {linked.get('c', 0)}")
+
+def handle_control(data):
+    """Run one control action; returns a short confirmation text."""
+    if data in ("all:on", "all:off"):
+        on = data.endswith("on"); set_fanvue(on); set_tg_bot(on)
+        return "▶️ Mindkét bot BEKAPCSOLVA." if on else "⏸ Mindkét bot KIKAPCSOLVA (az üzeneteket elmentik, de nem válaszolnak)."
+    if data in ("fv:on", "fv:off"):
+        set_fanvue(data.endswith("on")); return "Fanvue bot: " + ("🟢 BE" if data.endswith("on") else "⏸ KI")
+    if data in ("tg:on", "tg:off"):
+        set_tg_bot(data.endswith("on")); return "Telegram bot: " + ("🟢 BE" if data.endswith("on") else "⏸ KI")
+    if data == "status": return status_text()
+    if data in ("fvlist", "tglist"):
+        send_fan_list(data[:2]); return ""
+    if data.startswith("fvp:"):
+        cid = data.split(":", 1)[1]
+        r = db_query("SELECT fan_name, is_paused FROM fan_profiles WHERE chat_id=?", (cid,), fetch_one=True) or {}
+        new = 0 if r.get('is_paused') else 1
+        db_query("UPDATE fan_profiles SET is_paused=? WHERE chat_id=?", (new, cid))
+        if new: db_query("UPDATE scheduled_replies SET status='cancelled' WHERE chat_id=? AND status='pending'", (cid,))
+        return f"{'⏸ Megállítva' if new else '▶️ Újra válaszol'}: Fanvue „{r.get('fan_name') or cid}”"
+    if data.startswith("tgp:"):
+        tid = data.split(":", 1)[1]
+        r = db_query("SELECT * FROM tg_fans WHERE user_id=?", (tid,), fetch_one=True) or {}
+        new = 0 if r.get('paused') else 1
+        db_query("UPDATE tg_fans SET paused=? WHERE user_id=?", (new, tid))
+        return f"{'⏸ Megállítva' if new else '▶️ Újra válaszol'}: Telegram {tg_display(r)}"
+    if data == "reconnect":
+        send_telegram_alert("Koppints, lépj be a Fanvue-ba, és kész:", buttons=[[("🔗 Fanvue újracsatlakoztatása", make_reconnect_link())]])
+        return ""
+    if data.startswith("link:"):
+        _, fv, tg = data.split(":", 2)
+        name = (db_query("SELECT fan_name FROM fan_profiles WHERE chat_id=?", (fv,), fetch_one=True) or {}).get('fan_name')
+        return "" if link_tg_fan(fv, tg, name, 'kézzel') else "Nem találom ezt a Telegramos fant."
+    if data.startswith("unlink:"):
+        unlink_tg_fan(data.split(":", 1)[1]); return "↩️ Visszavonva — nincs összekötve."
+    if data.startswith("nolink:"):
+        return "Rendben, nem kötöm össze."
+    return ""
+
+_CMD_MAP = {"/start": "menu", "/menu": "menu", "/status": "status", "/allapot": "status",
+            "/be": "all:on", "/ki": "all:off", "/startall": "all:on", "/stopall": "all:off",
+            "/fanvue_be": "fv:on", "/fanvue_ki": "fv:off", "/telegram_be": "tg:on", "/telegram_ki": "tg:off",
+            "/reconnect": "reconnect", "/ujracsatlakozas": "reconnect",
+            "/fans": "fvlist", "/fanok": "fvlist", "/tgfans": "tglist", "/tgfanok": "tglist", "/fan": "search"}
+
+def control_bot_loop():
+    """Long-polls the alert bot for your commands / button taps. Only accepts YOUR chat id."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[control] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing — control panel off"); return
+    api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    try: requests.post(f"{api}/deleteWebhook", timeout=10)
+    except Exception: pass
+    try:
+        requests.post(f"{api}/setMyCommands", json={"commands": [
+            {"command": "menu", "description": "Vezérlőpult (be/ki, állapot)"},
+            {"command": "status", "description": "Állapot"},
+            {"command": "be", "description": "Mindkét bot BE"},
+            {"command": "ki", "description": "Mindkét bot KI"},
+            {"command": "reconnect", "description": "Fanvue újracsatlakoztatása"},
+            {"command": "fans", "description": "Fanvue fanok — megállítás / indítás"},
+            {"command": "tgfans", "description": "Telegram fanok — megállítás / indítás"},
+            {"command": "fan", "description": "Fan keresése név szerint: /fan Péter"}]}, timeout=10)
+    except Exception: pass
+    offset = int(load_token('tg_ctrl_offset') or 0)
+    if not offset:
+        # first boot: skip old commands (an old "/ki" must not switch everything off)
+        try:
+            res = requests.get(f"{api}/getUpdates", params={"offset": -1}, timeout=15).json().get('result') or []
+            if res: offset = res[-1]['update_id'] + 1; save_token('tg_ctrl_offset', str(offset))
+        except Exception: pass
+    while polling_active:
+        if not (_has_poll_lock or _is_leader):
+            time.sleep(5); continue
+        try:
+            r = requests.get(f"{api}/getUpdates", params={"offset": offset, "timeout": 25,
+                             "allowed_updates": json.dumps(["message", "callback_query"])}, timeout=35)
+            j = r.json()
+            if not j.get('ok'):
+                time.sleep(int((j.get('parameters') or {}).get('retry_after', 5))); continue
+            for u in (j.get('result') or []):
+                offset = u['update_id'] + 1; save_token('tg_ctrl_offset', str(offset))
+                try:
+                    if 'callback_query' in u:
+                        cq = u['callback_query']
+                        if str((cq.get('message') or {}).get('chat', {}).get('id')) != str(TELEGRAM_CHAT_ID): continue
+                        requests.post(f"{api}/answerCallbackQuery", json={"callback_query_id": cq['id']}, timeout=10)
+                        out = handle_control(cq.get('data') or '')
+                        if out: send_telegram_alert(out, buttons=MENU_BUTTONS if cq.get('data') == 'status' else None)
+                    elif 'message' in u:
+                        m = u['message']
+                        if str(m.get('chat', {}).get('id')) != str(TELEGRAM_CHAT_ID): continue
+                        cmd = (m.get('text') or '').strip().split()[0].split('@')[0].lower() if (m.get('text') or '').strip() else ''
+                        act = _CMD_MAP.get(cmd)
+                        if act == "search":
+                            q_ = " ".join((m.get('text') or '').split()[1:]).strip()
+                            if not q_: send_telegram_alert("Írd mögé a nevet, pl.: /fan Péter")
+                            else: send_fan_list('fv', q_); send_fan_list('tg', q_)
+                            continue
+                        if act == "menu":
+                            send_telegram_alert(status_text() + "\n\nMit csináljak?", buttons=MENU_BUTTONS)
+                        elif act:
+                            out = handle_control(act)
+                            if out: send_telegram_alert(out, buttons=MENU_BUTTONS if act == 'status' else None)
+                except Exception as e:
+                    print(f"[control] update err: {e}")
+        except Exception as e:
+            print(f"[control] {e}"); time.sleep(5)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AUTH
@@ -1358,7 +2050,7 @@ def require_auth(f):
 # ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route('/')
-def home(): return "Jazmin Bot v12 ✅", 200
+def home(): return "Jazmin Bot v13 ✅", 200
 
 @app.route('/status')
 @require_auth
@@ -1405,8 +2097,28 @@ def set_note(chat_id):
 @require_auth
 def link_tg(chat_id):
     h = (request.json or {}).get('tg_handle', '') if request.is_json else request.args.get('tg_handle', '')
-    db_query("UPDATE fan_profiles SET tg_handle=? WHERE chat_id=?", (h, chat_id))
-    return {"ok": True, "tg_handle": h}, 200
+    tg_uid = (request.json or {}).get('tg_user_id', '') if request.is_json else request.args.get('tg_user_id', '')
+    if not tg_uid and h:
+        found = find_tg_candidates(h)
+        best = pick_tg_match(found) or (found[0][0][1] if found[0] else None)
+        tg_uid = best['user_id'] if best else ''
+    if not tg_uid:
+        return {"ok": False, "error": "no matching Telegram fan"}, 404
+    name = (db_query("SELECT fan_name FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}).get('fan_name')
+    ok = link_tg_fan(chat_id, tg_uid, name, 'dashboard')
+    return {"ok": ok, "tg_user_id": tg_uid}, 200 if ok else 404
+
+@app.route('/unlink_tg/<chat_id>', methods=['POST', 'GET'])
+@require_auth
+def unlink_tg(chat_id):
+    unlink_tg_fan(chat_id); return {"ok": True}, 200
+
+@app.route('/control/<action>', methods=['POST', 'GET'])
+@require_auth
+def control(action):
+    """Same switches as the Telegram panel: all:on, all:off, fv:on, fv:off, tg:on, tg:off, status."""
+    out = handle_control(action)
+    return {"ok": True, "message": out, "fanvue_on": fanvue_enabled(), "telegram_on": tg_bot_enabled()}, 200
 
 @app.route('/fans')
 @require_auth
@@ -1420,6 +2132,7 @@ def dashboard_data():
     p = db_query("SELECT COUNT(*) c FROM scheduled_replies WHERE status='pending'", fetch_one=True)
     s = db_query("SELECT COUNT(*) c FROM scheduled_replies WHERE status='sent' AND created_at >= date('now')", fetch_one=True)
     return {"safe_mode": get_safe_mode(), "polling_active": polling_active,
+            "telegram_on": tg_bot_enabled(), "token_status": load_token('token_status') or 'ok',
             "pending_batches": p['c'] if p else 0, "sent_today": s['c'] if s else 0,
             "fan_count": len(fans_), "fans": fans_}, 200
 
@@ -1433,10 +2146,19 @@ def dashboard():
     except FileNotFoundError:
         return "dashboard.html not found", 500
 
+def _reconnect_key_ok(rk):
+    v = load_token('reconnect_key') or ''
+    if not rk or ':' not in v: return False
+    key, exp = v.split(':', 1)
+    try: return key == rk and datetime.now(timezone.utc) < datetime.fromisoformat(exp)
+    except Exception: return False
+
 @app.route('/connect')
-@require_auth
 def connect():
     import hashlib
+    if not (_reconnect_key_ok(request.args.get('rk', '')) or
+            (request.args.get('key') or request.args.get('pw') or '') == DASHBOARD_PASSWORD):
+        return ("Ez a link lejárt. Írd a Telegram vezérlő botnak: /reconnect — és kapsz egy újat.", 401)
     state = uuid.uuid4().hex
     verifier = base64.urlsafe_b64encode(os.urandom(40)).decode().rstrip('=')
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
@@ -1457,6 +2179,8 @@ def callback():
     if not code:
         return (f"No code in callback. Full query: {dict(request.args)}", 400)
     granted = request.args.get('scope', '')
+    if not state or state != (load_token('oauth_state') or ''):
+        return ("Ez a bejelentkezés lejárt vagy már fel lett használva. Kérj új linket: /reconnect", 400)
     try:
         r = requests.post("https://auth.fanvue.com/oauth2/token",
             data={"grant_type": "authorization_code", "code": code, "redirect_uri": FANVUE_REDIRECT_URI,
@@ -1469,13 +2193,25 @@ def callback():
         rt = d.get('refresh_token')
         if not rt:
             return (f"No refresh_token returned: {r.text[:400]}", 400)
-        save_token('refresh_token', rt); save_token('oauth_state', '')
-        access, msg = refresh_fanvue_token()
+        save_token('refresh_token', rt); save_token('oauth_state', ''); save_token('reconnect_key', '')
+        if d.get('access_token'):
+            save_token('access_token', d['access_token'])
+            save_token('expires_at', (datetime.now() + timedelta(seconds=int(d.get('expires_in', 3600)) - 300)).isoformat())
+            save_token('refreshed_at', datetime.now(timezone.utc).isoformat())
+            access, msg = d['access_token'], "OK"
+        else:
+            with _token_refresh_lock:
+                access, msg = refresh_fanvue_token(force=True)
         ok = bool(access)
-        has_vault = ('read:media' in granted and 'read:creator' in granted)
-        return (f"<h2>{'✅' if ok else '⚠️'} Fanvue connected. Token test: {msg}.</h2>"
-                f"<p><b>Granted scopes:</b> {granted}</p>"
-                f"<p>{'✅ Vault scopes present.' if has_vault else '⚠️ MISSING read:creator/read:media — vault/PPV will NOT work.'}</p>",
+        if ok:
+            was_dead = load_token('token_status') == 'dead'
+            save_token('token_status', 'ok')
+            send_telegram_alert("🟢 Fanvue csatlakoztatva" + (" — a bot újra működik." if was_dead else "."))
+        has_vault = ('read:media' in granted and 'read:creator' in granted) or not granted
+        return (f"<meta name=viewport content='width=device-width'><div style='font-family:sans-serif;padding:24px'>"
+                f"<h2>{'✅ Kész! A Fanvue bot csatlakoztatva.' if ok else '⚠️ Valami nem sikerült: ' + msg}</h2>"
+                f"<p>Bezárhatod ezt az oldalt.</p>"
+                f"{'' if has_vault else '<p>⚠️ Hiányzó jogosultság (read:creator/read:media) — a PPV nem fog működni.</p>'}</div>",
                 200 if ok else 500)
     except Exception as e:
         return (f"Error: {e}", 500)
@@ -1485,7 +2221,9 @@ def callback():
 def set_token():
     rt = (request.json or {}).get('refresh_token')
     if not rt: return {"error": "no refresh_token"}, 400
-    save_token('refresh_token', rt); access, msg = refresh_fanvue_token()
+    with _token_refresh_lock:
+        save_token('refresh_token', rt); save_token('expires_at', '')
+        access, msg = refresh_fanvue_token(force=True)
     return {"saved": True, "test": msg}, 200
 
 @app.route('/webhook', methods=['POST'])
@@ -1530,9 +2268,19 @@ def fanvue_webhook():
 # BOOT
 # ─────────────────────────────────────────────────────────────────────────────
 try:
-    init_db(); print("[OK] DB ready")
+    init_db(); _ensure_tracking_table(); print("[OK] DB ready")
 except Exception as e:
     print(f"[ERR] init_db {e}")
+
+# First launch of v13 → start with the Fanvue bot SWITCHED OFF (reads, doesn't reply). You switch it on
+# from the dashboard or the Telegram control panel (/be). After that, restarts keep whatever you chose.
+try:
+    if load_token('v13_first_boot_done') != 'yes':
+        set_safe_mode(True); save_token('v13_first_boot_done', 'yes')
+        print("[boot] v13 first launch → Fanvue bot starts OFF (switch on from the control panel)")
+    print(f"[boot] Fanvue bot is {'ON' if not get_safe_mode() else 'OFF'} · Telegram bot is {'ON' if (load_token('tg_enabled') or 'on') != 'off' else 'OFF'}")
+except Exception as e:
+    print(f"[ERR] boot state {e}")
 
 try:
     env_rt = os.environ.get('FANVUE_REFRESH_TOKEN', '').strip()
