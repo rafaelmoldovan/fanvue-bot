@@ -241,6 +241,7 @@ def init_db():
                 'reengagement_count INTEGER DEFAULT 0',
                 'ai_confirmed INTEGER DEFAULT 0', 'tg_user_id TEXT', 'tg_summary TEXT',
                 'tg_ask_count INTEGER DEFAULT 0', 'tg_linked_at TEXT',
+                'memory_notes TEXT', 'memory_at INTEGER DEFAULT 0', 'backfilled INTEGER DEFAULT 0',
             ):
                 c.execute(f'ALTER TABLE fan_profiles ADD COLUMN IF NOT EXISTS {col}')
             c.execute('ALTER TABLE scheduled_replies ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0')
@@ -290,6 +291,9 @@ def init_db():
         'ALTER TABLE fan_profiles ADD COLUMN tg_summary TEXT',
         'ALTER TABLE fan_profiles ADD COLUMN tg_ask_count INTEGER DEFAULT 0',
         'ALTER TABLE fan_profiles ADD COLUMN tg_linked_at TEXT',
+        'ALTER TABLE fan_profiles ADD COLUMN memory_notes TEXT',
+        'ALTER TABLE fan_profiles ADD COLUMN memory_at INTEGER DEFAULT 0',
+        'ALTER TABLE fan_profiles ADD COLUMN backfilled INTEGER DEFAULT 0',
         'ALTER TABLE scheduled_replies ADD COLUMN attempts INTEGER DEFAULT 0',
         "UPDATE fan_profiles SET awaiting_tg=0 WHERE awaiting_tg=1",
     ]:
@@ -632,12 +636,19 @@ JAZMIN_PERSONALITY = """Te Jázmin vagy: egy AI persona, egy 19 éves budapesti 
 - Ha a fan TELEGRAMOS előzményeiben találkozóról volt szó, itt akkor is a fenti szabály él: itt egyértelműen nem találkozol senkivel.
 
 ━━━ KI VAGY ━━━
-- 19 éves, budapesti lány. Idén végeztél Turisztikai Vendéglátás szakon. Gondolkodsz hogy pincérnő legyél valahol, de még keresed magad.
+- 19 éves, budapesti lány. Idén végeztél Turisztikai Vendéglátás szakon — az iskolát BEFEJEZTED, már NEM jársz suliba (nincs óra, vizsga, tanár, dolgozat). ⛔ Soha ne beszélj úgy, mintha még diák lennél. Most NEM dolgozol (pincérként sem) — csak gondolkodsz rajta, hogy majd pincérnő legyél valahol, még keresed magad. ⛔ Soha ne mondd, hogy pincérnő vagy.
 - Eddig egy állatmenhelyen dolgoztál és IMÁDTAD a kutyákat — de mostanában nagyon csendes ott minden, alig van munka, ezért most inkább otthon pihensz. Tudsz mesélni mini sztorikat a menhelyről (egy félénk kutya aki végre megbízott benned, egy kiskutya akit örökbe adtak), de ez már a múlt, nem a mindennapjaid.
 - IMÁDSZ FŐZNI — ez most a nagy szerelmed. Szívesen kísérletezel új receptekkel, és szereted ha valaki megdicséri a főztöd. Ha passzol, mesélhetsz mit főztél, vagy megkérdezheted ő mit szeret enni.
 - Alapvetően otthonülős vagy: a legtöbb időt otthon töltöd, kényelmesen — pléd, sorozat, főzés. Néha elmész edzeni a konditerembe, de nem vagy edzésmániás. Nem bulizós típus.
-- Áprilisban (2026) költöztél el otthonról. A szüleid elváltak de egy házban éltek — állandó veszekedés, kiabálás, gyerekkori traumák. Nem bírtad tovább, összespóroltál egy kis pénzt és elköltöztél. Most egyedül élsz, közelebb a sulihoz, nyugodtabb — de nehéz a lakbért előteremteni, ezért csinálod ezt mellékesként.
+- Áprilisban (2026) költöztél el otthonról. A szüleid elváltak de egy házban éltek — állandó veszekedés, kiabálás, gyerekkori traumák. Nem bírtad tovább, összespóroltál egy kis pénzt és elköltöztél. Most egyedül élsz egy kis albérletben, nyugodtabb — de nehéz a lakbért előteremteni, ezért csinálod ezt mellékesként.
 - Volt egy komoly kapcsolatod, de a srác megcsalt. Azóta óvatos vagy, nehezen bízol — de MÉLYEN vágysz egy hűséges, törődő srácra, aki tisztel, vigyáz rád, és ott van neked. Ez a titkos reményed.
+
+━━━ SZEMÉLYISÉG (ettől leszel élő, nem unalmas) ━━━
+- Van saját véleményed, hangulatod és humorod: ugratsz, cukkolsz, néha szemtelen vagy, néha bújós. Nem bólogatsz mindenre.
+- Van saját életed: mesélj apróságokat a napodról (mit főztél, mit néztél, edzés, egy vicces kis eset, hogy épp a plédben fekszel) — rövid, konkrét részletekkel, nem általánosságokkal.
+- KÍVÁNCSI vagy RÁ: időnként (nem minden üzenetben) kérdezz rá valamire, amit még NEM tudsz róla — milyen napja volt, mit dolgozik, mit szeret csinálni, mit eszik szívesen, mire vágyik, milyen lány tetszik neki. A „MÉG NEM TUDOD RÓLA” lista segít. Amit már tudsz, arra NE kérdezz rá újra — hivatkozz rá.
+- Reagálj KONKRÉTAN arra, amit írt (ismételd vissza a lényegét a saját szavaiddal, vagy kapcsolj hozzá valamit magadról) — ne általános „jaj de aranyos” válaszokkal.
+- Ha unalmas lenne a beszélgetés, TE hozz bele életet: egy játékos kérdés, egy kis ugratás, egy vallomás.
 
 ━━━ STÍLUS (a legfontosabb) ━━━
 - Írj úgy mint egy igazi 19 éves lány üzenetben: kisbetűk, hétköznapi szavak. NEM irodalmi.
@@ -648,7 +659,9 @@ JAZMIN_PERSONALITY = """Te Jázmin vagy: egy AI persona, egy 19 éves budapesti 
 - NYELV: MINDIG magyarul írsz, akkor is ha a fan más nyelven ír.
 - Írd EGYBE, egy folyamatos üzenetként — NE tördeld külön sorokba.
 - Variálj: nézd át a saját korábbi üzeneteidet, és SOSEM kezdesz ugyanúgy.
-- Egyszerre EGY kérdés, soha kettő. Ha az előző üzeneted kérdés volt és még nem válaszolt — ne kérdezz újat, reagálj.
+- Egyszerre max EGY kérdés, soha kettő. Ha az előző üzeneted kérdés volt és még nem válaszolt — ne kérdezz újat, reagálj.
+- ⛔ NE kezdd az üzeneteidet mindig ugyanazzal a szóval („jaj”, „jaaj”, „hmm”, „na”, „aww”) — a saját előző üzeneteid elejét NE ismételd.
+- ⛔ Ha nem érted, legfeljebb EGYSZER kérdezz vissza — ne írd újra meg újra, hogy „nem értem mire gondolsz”; inkább tippelj játékosan vagy vidd tovább.
 - Kövesd a fan energiáját és tempóját.
 - HA NEM ÉRTED a fan üzenetét — NE TALÁLGASS. Kérdezz vissza természetesen: „várj, ezt hogy érted? 😄".
 - ⛔⛔ MARADJ A FONÁLNÁL: SOHA ne találj ki új témát amit a fan NEM hozott fel. Ha a fan üzenete rövid/homályos → MARADJ a saját előző témádnál, VAGY kérdezz vissza.
@@ -759,14 +772,18 @@ def is_minor_fan(t):
     t = (t or "").strip()
     if re.search(r"kisk[oó]r[uú]|nem vagyok nagykor|m[ée]g iskol[áa]s\s+vagyok|[áa]ltal[áa]nos\w*\s+iskol", t, re.I): return True
     return bool(_AGE_TEEN_F.search(t)) and not bool(_KID_SUBJECT_F.search(t))
+_SCHOOL_F = re.compile(
+    r"\b\d{1,2}\.?\s*oszt[áa]ly(ba|os)\s+(j[áa]rok|vagyok)|\b\d{1,2}[-\s]?(be|ba|ik|edik)\s+j[áa]rok(?!\s+(dolgoz|melóz|edz))"
+    r"|\bgimis\s+vagyok|\bgimibe\s+j[áa]rok|\bgimn[áa]zista\s+vagyok|k[öo]z[ée]piskol[áa]s\s+vagyok|k[öo]z[ée]piskol[áa]ba\s+j[áa]rok"
+    r"|[ée]retts[ée]gi\s+el[őo]tt\s+(vagyok|[áa]llok)|j[öo]v[őo]re\s+[ée]retts[ée]gizek|\boszt[áa]lyf[őo]n[öo]k(öm|ünk)\b", re.I)
 def looks_like_handle(t):
     t = (t or "").strip()
     return bool(re.fullmatch(r"@?[A-Za-z0-9_]{3,32}", t))
 
 _URL_RE      = re.compile(r"\b(?:https?://|www\.)\S+|\b[\w-]+\.(?:com|net|org|me|tv|io|hu|co|app|xyz|info|gg)\b(?:/\S*)?|(?<![\w@])@[A-Za-z0-9_.]{2,}", re.I)
 _STREET_RE   = re.compile(r"\b[A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]{3,}\s*(?:utca|utc[aá]ja|[úu]t|[úu]tja|t[ée]r|tere|t[ée]ren|k[öo]r[úu]t|s[ée]t[áa]ny|rakpart|k[öo]z)\s*\.?\s*\d{1,4}\b", re.I)
-_DISTRICT_RE = re.compile(r"\b[IVX]{1,5}\.?\s*ker[üu]let|\bker[üu]let\b.{0,18}\d|\bzugl[óo]\w*", re.I)
-_ADDR_PROMISE= re.compile(r"\b(?:c[íi]m|lakc[íi]m)\w*\b.{0,25}(k[üu]ld|megadom|megkapod|elk[üu]ld|megmondom|meg[íi]rom)|(k[üu]ld|megadom|elk[üu]ld|megmondom|meg[íi]rom)\w*.{0,15}\b(?:c[íi]m|lakc[íi]m)|pontos\s+c[íi]m|\bh[áa]zsz[áa]m|\bhol\s+lak", re.I)
+_DISTRICT_RE = re.compile(r"\b(?:[IVX]{1,5}|\d{1,2})\.?\s*ker[üu]let(?:ben|be)\b|\bzugl[óo]ban\s+lakom", re.I)
+_ADDR_PROMISE= re.compile(r"\b(?:c[íi]m|lakc[íi]m)\w*\b.{0,25}(k[üu]ld|megadom|megkapod|elk[üu]ld|megmondom|meg[íi]rom)|(k[üu]ld|megadom|elk[üu]ld|megmondom|meg[íi]rom)\w*.{0,15}\b(?:c[íi]m|lakc[íi]m)|\bh[áa]zsz[áa]m(om|ot)\b", re.I)
 _TIME_MEET   = re.compile(r"\d{1,2}(?:[:.]\d{2})?\s*-?\s*(?:[óo]rakor|kor)\b.{0,40}(tal[áa]lkoz|v[áa]rlak|ott leszek|j[öo]v[öo]k|megyek)|(egy|k[ée]t|h[áa]rom|n[ée]gy|[öo]t|hat|h[ée]t|nyolc|kilenc|t[íi]z)(kor|\s+[óo]rakor).{0,40}(ott leszek|v[áa]rlak|tal[áa]lkoz)|\bv[áa]rlak\b.{0,30}(t[ée]ren|n[áa]l\b|n[ée]l\b|utc)|majd\s+egyszer.{0,30}tal[áa]lkoz|tal[áa]n\s+(k[ée]s[őo]bb|egyszer|majd).{0,30}tal[áa]lkoz|\b\d{1,2}\s*(?:[óo]rakor|[óo]ra|kor)\b.{0,30}(tal[áa]lkoz|j[öo]v[öo]k|megyek|ott\s+vagyok|n[áa]lad|sarkon)|(tal[áa]lkoz\w*|j[öo]v[öo]k|megyek)\b.{0,20}\b\d{1,2}\s*(?:[óo]rakor|kor)\b", re.I)
 ADDRESS_DEFLECT = [
     "nem találkozom senkivel, de itt teljesen a tiéd vagyok 😘",
@@ -860,6 +877,8 @@ _KNOWS_ME = re.compile(
     r"^\W*(szia\w*|hell?o\w*|hey\w*|na)?\W*[ée]n vagyok\b|\b[ée]n vagyok az\b|nem eml[ée]kszel|nem ismersz (meg|fel)|m[áa]r besz[ée]lt[üu]nk|besz[ée]lt[üu]nk m[áa]r|"
     r"ismerj[üu]k egym[áa]st|te [íi]rt[áa]l (nekem|r[áa]m)|onnan ismer|"
     r"elfelejtett[ée]l|nem tudod ki vagyok|eml[ée]kszel r[áa]m", re.I)
+_TG_NAME_SAY = re.compile(r"telegram\w*\s+(nevem|n[ée]v|nickem|n[ée]ven)|telegramon\s+(vagyok|[íi]rtam|[íi]rt[áa]l|besz[ée]lt)|\btg\s*(nevem|n[ée]v)|"
+                          r"(nevem|n[ée]v)\w*\s+(a\s+)?telegramon|telegram\s*:", re.I)
 TG_NOASK_HINT = ("📨 A fan arra utal, hogy már ismeritek egymást, de a közös múltatok most nincs előtted. Örülj neki kedvesen, "
                  "röviden, és vidd tovább a beszélgetést. ⛔ NE kérdezz rá a nevére, felhasználónevére vagy más platformra "
                  "(Fanvue szabály), és NE találj ki közös emlékeket.")
@@ -1086,67 +1105,136 @@ def _pick_reeng_hook(warmth_points, days_silent):
     return None
 
 
+REENG_DAILY_MAX = int(os.environ.get('REENG_DAILY_MAX', '8'))
+REENG_MIN_DAYS  = float(os.environ.get('REENG_MIN_DAYS', '2'))
+REENG_MAX_DAYS  = float(os.environ.get('REENG_MAX_DAYS', '30'))
+REENG_HINT = ("💌 A fan {days} napja nem írt. Most TE írsz neki magadtól, egy rövid (1-2 mondat), természetes, SZEMÉLYES "
+              "üzenetet: kapcsolódj valamihez, amiről utoljára beszéltetek vagy amit mesélt magáról (lásd emlékek/beszélgetés), "
+              "vagy mesélj egy apróságot a napodról ami eszedbe juttatta őt. ⛔ NE írd hogy „eltűntél”, „minden oké?”, „hát eltűntél” — "
+              "ne legyél szemrehányó, és ne kérj semmit. Ne ajánlj tartalmat. Magyarul, laza kisbetűs stílusban.")
+
+def _reng_count_today():
+    day = datetime.now(BUDAPEST_TZ).strftime('%Y-%m-%d')
+    v = (load_token('reng_day') or '')
+    return (int(v.split('|')[1]) if v.startswith(day + '|') else 0), day
+
 def run_reengagement_loop():
-    """Background thread: pings fans who've gone cold with stage-appropriate hooks."""
-    time.sleep(120)
+    """v14: at most REENG_DAILY_MAX personal, Claude-written check-ins a day, spread out (one every ~45-120 min),
+    only to fans silent 2-30 days whose last message was HERS, never twice within 10 days."""
+    time.sleep(300)
     while polling_active:
-        time.sleep(1800)
+        time.sleep(random.randint(2700, 7200))
         if get_safe_mode() or not _is_leader:
             continue
-        # Don't ping fans during Jázmin's "sleep" hours (11pm–7am Budapest)
-        h_now = datetime.now(BUDAPEST_TZ).hour
-        if not (7 <= h_now < 23):
+        if not (10 <= datetime.now(BUDAPEST_TZ).hour < 22):
             continue
         try:
+            cnt, day = _reng_count_today()
+            if cnt >= REENG_DAILY_MAX: continue
             now = datetime.now(timezone.utc)
-            fans_ = db_query(
-                """SELECT chat_id, fan_name, warmth_points, last_reengagement_at,
-                          last_interaction, total_messages
-                   FROM fan_profiles
-                   WHERE is_paused=0 AND total_messages > 2"""
-            ) or []
+            fans_ = db_query("""SELECT chat_id, fan_name, warmth_points, last_reengagement_at, last_interaction, total_messages
+                               FROM fan_profiles WHERE COALESCE(is_paused,0)=0 AND total_messages > 3""") or []
+            cands = []
             for fan in fans_:
                 chat_id = fan['chat_id']
-                try:
-                    if in_takeover(chat_id):
-                        continue
-                    if db_query("SELECT 1 FROM scheduled_replies WHERE chat_id=? AND status='pending'",
-                                (chat_id,), fetch_one=True):
-                        continue
-                    last_int = parse_timestamp(fan.get('last_interaction') or '')
-                    if not last_int:
-                        continue
-                    if not last_int.tzinfo:
-                        last_int = last_int.replace(tzinfo=timezone.utc)
-                    days_silent = (now - last_int).total_seconds() / 86400
-                    if days_silent < 2:
-                        continue
-                    last_reng = parse_timestamp(fan.get('last_reengagement_at') or '')
-                    if last_reng:
-                        if not last_reng.tzinfo:
-                            last_reng = last_reng.replace(tzinfo=timezone.utc)
-                        if (now - last_reng).total_seconds() / 86400 < 3:
-                            continue
-                    hook = _pick_reeng_hook(fan.get('warmth_points') or 0, days_silent)
-                    if not hook:
-                        continue
-                    if send_fanvue_message(chat_id, hook):
-                        now_iso = now.isoformat()
-                        db_query(
-                            "UPDATE fan_profiles SET last_reengagement_at=?, "
-                            "reengagement_count=COALESCE(reengagement_count,0)+1 WHERE chat_id=?",
-                            (now_iso, chat_id)
-                        )
-                        save_message_to_db(
-                            f"bot_reng_{now_iso}_{chat_id}", chat_id,
-                            fan.get('fan_name', ''), MY_UUID, hook, now_iso,
-                            is_mine=True, facts_done=1, vision_done=1
-                        )
-                        print(f"[reng] {fan.get('fan_name')} silent={days_silent:.0f}d → {hook[:60]}")
-                except Exception as e:
-                    print(f"[reng {chat_id}] {e}")
+                last_int = parse_timestamp(fan.get('last_interaction') or '')
+                if not last_int: continue
+                days = (now - last_int).total_seconds() / 86400
+                if not (REENG_MIN_DAYS <= days <= REENG_MAX_DAYS): continue
+                lr = parse_timestamp(fan.get('last_reengagement_at') or '')
+                if lr and (now - lr).total_seconds() / 86400 < 10: continue
+                if in_takeover(chat_id): continue
+                if db_query("SELECT 1 FROM scheduled_replies WHERE chat_id=? AND status IN ('pending','sending')", (chat_id,), fetch_one=True): continue
+                last = db_query("SELECT is_mine, timestamp FROM messages WHERE chat_id=? ORDER BY timestamp DESC LIMIT 1", (chat_id,), fetch_one=True)
+                if not last or not last.get('is_mine'): continue       # he wrote last → that's a normal reply case, not a ping
+                lt = parse_timestamp(last.get('timestamp') or '')
+                if lt and (now - lt).total_seconds() < 86400 * REENG_MIN_DAYS: continue
+                cands.append((fan.get('warmth_points') or 0, days, fan))
+            if not cands: continue
+            cands.sort(key=lambda x: (-x[0], x[1]))
+            _, days, fan = cands[0] if random.random() < 0.6 else random.choice(cands[:10])
+            chat_id = fan['chat_id']
+            history = get_history(chat_id, 80)
+            dyn = build_dynamic_prompt(chat_id, fan.get('fan_name') or '', get_real_name(chat_id), get_facts(chat_id),
+                                       history, get_time_context(), '')
+            dyn += "\n\n" + REENG_HINT.format(days=int(days))
+            convo = build_convo(history, "[a srác napok óta nem írt — most te írsz neki az utasítás szerint]")
+            msg = ask_claude(dyn, "", smart=True, convo=convo, chat_id=chat_id)
+            if not msg or re.search(r"t[űu]nt[ée]l|hova lett[ée]l|merre (vagy|j[áa]rsz)|minden ok|minden rendben|mi(ért| az) nem [íi]rsz|r[ée]g nem [íi]rt", msg, re.I): continue
+            if send_fanvue_message(chat_id, msg):
+                now_iso = now.isoformat()
+                db_query("UPDATE fan_profiles SET last_reengagement_at=?, reengagement_count=COALESCE(reengagement_count,0)+1 WHERE chat_id=?",
+                         (now_iso, chat_id))
+                save_message_to_db(f"bot_reng_{now_iso}_{chat_id}", chat_id, fan.get('fan_name', ''), MY_UUID, msg, datetime.now().isoformat(),
+                                   is_mine=True, facts_done=1, vision_done=1)
+                save_token('reng_day', f"{day}|{cnt + 1}")
+                print(f"[reng] {fan.get('fan_name')} silent={days:.0f}d ({cnt + 1}/{REENG_DAILY_MAX}) → {msg[:60]}", flush=True)
         except Exception as e:
             print(f"[reng loop] {e}")
+
+# ── FULL HISTORY BACKFILL ────────────────────────────────────────────────────
+# The Fanvue poll only sees the newest page of each chat. Once per fan, page through the WHOLE chat and store it,
+# so she remembers everything (incl. your manual chats from before the bot), then build her memory notes.
+def get_messages_page(chat_id, page, size=50):
+    url = f"https://api.fanvue.com/chats/{chat_id}/messages?page={page}&size={size}&limit={size}"
+    r = requests.get(url, headers=get_headers(), timeout=15)
+    if r.status_code == 401:
+        refresh_after_401(); r = requests.get(url, headers=get_headers(), timeout=15)
+    if r.status_code != 200: return [], False
+    j = r.json() or {}
+    pg = j.get('pagination') or {}
+    more = pg.get('hasMore', pg.get('has_more', pg.get('hasNextPage')))
+    return (j.get('data') or []), more
+
+def backfill_chat(chat_id, fan_name='', max_pages=40):
+    seen, saved = set(), 0
+    for page in range(1, max_pages + 1):
+        data, more = get_messages_page(chat_id, page)
+        fresh = [m for m in data if (m.get('uuid') or '') and m.get('uuid') not in seen]
+        if not fresh: break                                    # empty page, or the API ignores paging
+        for m in fresh:
+            seen.add(m['uuid'])
+            mine = (m.get('sender') or {}).get('uuid') == MY_UUID
+            if m.get('type') == 'AUTOMATED_NEW_FOLLOWER': continue
+            txt = (m.get('text') or '').strip()
+            if not txt:
+                txt = my_media_tag(m) if mine else ("[képet/videót küldött]" if (m.get('hasMedia') or m.get('mediaUuids')) else "")
+            if not txt: continue
+            ts = m.get('createdAt') or m.get('sentAt') or m.get('timestamp') or ''
+            if not db_query("SELECT 1 FROM messages WHERE msg_id=?", (m['uuid'],), fetch_one=True):
+                save_message_to_db(m['uuid'], chat_id, fan_name, (m.get('sender') or {}).get('uuid', ''), txt, ts,
+                                   is_mine=mine, facts_done=1, vision_done=1)
+                saved += 1
+        if more is False: break
+        time.sleep(0.4)
+    # everything he wrote before her/your latest message has been answered already
+    lm = db_query("SELECT MAX(timestamp) AS t FROM messages WHERE chat_id=? AND is_mine=1", (chat_id,), fetch_one=True) or {}
+    if lm.get('t'):
+        db_query("UPDATE messages SET was_replied=1 WHERE chat_id=? AND is_mine=0 AND timestamp < ?", (chat_id, lm['t']))
+    db_query("UPDATE fan_profiles SET backfilled=1 WHERE chat_id=?", (chat_id,))
+    return saved
+
+def backfill_loop():
+    time.sleep(45)
+    while polling_active:
+        try:
+            if _is_leader and get_fanvue_token():
+                todo = db_query("SELECT chat_id, fan_name FROM fan_profiles WHERE COALESCE(backfilled,0)=0") or []
+                if todo: print(f"[backfill] {len(todo)} chat(s) to import", flush=True)
+                total = 0
+                for f in todo:
+                    if not polling_active: break
+                    try:
+                        n = backfill_chat(f['chat_id'], f.get('fan_name') or '')
+                        total += n
+                        refresh_fan_memory(f['chat_id'], force=True)
+                    except Exception as e:
+                        print(f"[backfill {f['chat_id']}] {e}")
+                    time.sleep(1)
+                if todo: print(f"[backfill] done — {total} older message(s) imported", flush=True)
+        except Exception as e:
+            print(f"[backfill loop] {e}")
+        time.sleep(600)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UTILS
@@ -1186,8 +1274,10 @@ def save_message_to_db(msg_id, chat_id, fan_name, sender_uuid, text, ts, is_mine
         (msg_id, chat_id, fan_name, sender_uuid, text or '', ts, 1 if is_mine else 0, facts_done, vision_done))
 
 def get_history(chat_id, limit=100):
-    return db_query("SELECT text, is_mine, timestamp FROM messages WHERE chat_id=? ORDER BY timestamp ASC LIMIT ?",
+    """The LATEST `limit` messages, oldest→newest (v13 bug: ORDER BY ASC LIMIT returned the OLDEST ones)."""
+    rows = db_query("SELECT text, is_mine, timestamp FROM messages WHERE chat_id=? ORDER BY timestamp DESC LIMIT ?",
                     (chat_id, limit)) or []
+    return list(reversed(rows))
 
 _JUNK_NAMES = {'fáradt','tired','mert','because','jól','rosszul','igen','nem','oké','okay','szia','hello','helló',
                'dolgozik','works','dolgozom','jó','rossz','persze','köszi','köszönöm','semmi','minden','valami','ok'}
@@ -1371,12 +1461,12 @@ def should_greet(history, fan_msg_time):
         except Exception: pass
     return False
 
-def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx, fan_msg_time):
+def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx, fan_msg_time, inline_history=False):
     label = real_name or "ő"
     p = f"KONTEXTUS:\n- {time_ctx}\n\n"
 
     prof = db_query(
-        "SELECT fan_note, ppv_pending, warmth, tg_handle, tg_user_id, tg_summary, warmth_points, relationship_summary, ai_confirmed FROM fan_profiles WHERE chat_id=?",
+        "SELECT fan_note, ppv_pending, warmth, tg_handle, tg_user_id, tg_summary, warmth_points, relationship_summary, ai_confirmed, memory_notes FROM fan_profiles WHERE chat_id=?",
         (chat_id,), fetch_one=True
     ) or {}
 
@@ -1407,12 +1497,16 @@ def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx,
         p += ("🔓 PPV KÜLDVE: épp küldtem ennek a fannak egy ZÁROLT tartalmat. Lazán, izgatóan keltsd fel "
               "az érdeklődését és vedd rá hogy feloldja — csábíts, ne árulj. Csak EGYSZER hozd fel finoman.\n\n")
 
+    mem = (prof.get('memory_notes') or '').strip()
+    if mem:
+        p += ("📒 A TELJES EDDIGI BESZÉLGETÉSETEK ALAPJÁN (a te emlékeid róla — ne kérdezz rá újra arra, amit már tudsz):\n"
+              + mem + "\n\n")
     if facts:
         p += ("AMIT TUDSZ RÓLA (csak akkor említsd, ha TERMÉSZETESEN jön a beszélgetésben — SOHA ne erőltess rá témát "
               "ezekből, és ne kérdezd újra; mindig arra reagálj amit MOST írt):\n"
               + "".join(f"- {f['fact_type']}: {f['fact_value']}\n" for f in facts[:15]) + "\n")
 
-    if history:
+    if history and inline_history:
         p += "EDDIGI BESZÉLGETÉS (legújabb alul — OLVASD EL, ne ismételd magad):\n"
         seen_lines = set()
         for m in history[-40:]:
@@ -1435,17 +1529,113 @@ def build_dynamic_prompt(chat_id, fan_name, real_name, facts, history, time_ctx,
     if should_greet(history, fan_msg_time):
         p += "\nEZ ÚJ/ÚJRAINDULT BESZÉLGETÉS. Kezdj lazán (pl 'heyy', 'szia, mizu') — variálj!\n"
     else:
-        p += f"\nEZ FOLYTATÁS. NE köszönj újra! Kezdj '{random.choice(CONTINUATIONS)}'-szerűen vagy egyből a lényegre.\n"
+        p += "\nEZ FOLYTATÁS. NE köszönj újra — reagálj egyből arra, amit írt. Ne kezdj ugyanúgy, mint az előző üzeneteid.\n"
 
-    p += ("\nEGYETLEN rövid, természetes üzenetet írj vissza, 1-2 mondat, MAGYARUL. "
+    mine_recent = [m for m in history[-6:] if m.get('is_mine')]
+    asked_last = bool(mine_recent and '?' in (mine_recent[-1].get('text') or ''))
+    if not asked_last and random.random() < 0.4:
+        p += ("\n💡 Ha természetesen belefér, most kérdezz rá EGY dologra, amit még nem tudsz róla "
+              "(lásd „MÉG NEM TUDOD RÓLA” fent) — de csak ha passzol a témához.\n")
+    elif asked_last:
+        p += "\nAz előző üzenetedben már kérdeztél — most NE kérdezz, csak reagálj / mesélj / flörtölj.\n"
+    p += ("\nEGYETLEN rövid, természetes, élő üzenetet írj vissza (általában 1-2 mondat), MAGYARUL. "
           "Ha a fan szomorú/nehéz dolgot ír — ELŐSZÖR arra reagálj.")
     return p
+
+def build_convo(history, user_msg, limit=50):
+    """Real multi-turn context: her messages = assistant, his = user. The trailing fan messages are replaced by
+    user_msg (the batch being answered)."""
+    h = [m for m in history if (m.get('text') or '').strip()][-limit:]
+    while h and not h[-1].get('is_mine'):
+        h.pop()
+    msgs, seen = [], set()
+    for m in h:
+        role = "assistant" if m.get('is_mine') else "user"
+        t = (m.get('text') or '').strip()
+        key = (role, t)
+        if key in seen and len(t) > 12: continue          # bot rows are stored twice (bot_… + Fanvue uuid)
+        seen.add(key)
+        if msgs and msgs[-1]["role"] == role:
+            if t in msgs[-1]["content"].split("\n"): continue   # same short line twice in one turn = the duplicate row
+            msgs[-1]["content"] += "\n" + t
+        else:
+            msgs.append({"role": role, "content": t})
+    if msgs and msgs[0]["role"] != "user":
+        msgs.insert(0, {"role": "user", "content": "[a beszélgetés eleje]"})
+    if msgs and msgs[-1]["role"] == "user":
+        msgs[-1]["content"] += "\n" + user_msg
+    else:
+        msgs.append({"role": "user", "content": user_msg})
+    if len(msgs) >= 3:
+        prev = msgs[-2]
+        prev["content"] = [{"type": "text", "text": prev["content"], "cache_control": {"type": "ephemeral"}}]
+    return msgs
+
+MEMORY_PROMPT = ("Ez Jázmin és egy fan Fanvue chatje (Fan = a srác, Jázmin = a lány; [..] = média/rendszer jelzés). "
+                 "Írj Jázminnak tömör, magyar emlékeztetőt pontokba szedve, CSAK abból ami a chatben ténylegesen elhangzott:\n"
+                 "TÉNYEK RÓLA: név/becenév, kor, hol lakik, munka, hobbi, család, kedvencek, fontos sztorik, mit szeret Jázminban, "
+                 "mit vett/oldott fel, mi zavarja (csak amit Ő mondott!)\n"
+                 "KÖZÖS DOLGOK: közös poénok, visszatérő témák, mit ígért Jázmin\n"
+                 "MÁR MEGKÉRDEZTED: témák, amikre Jázmin már rákérdezett\n"
+                 "MÉG NEM TUDOD RÓLA: 4-6 személyes dolog, amire érdemes lenne rákérdezni\n"
+                 "Ne találj ki semmit. Max 900 karakter.")
+
+def refresh_fan_memory(chat_id, force=False):
+    """Haiku reads the WHOLE stored conversation (incl. backfilled history) → memory_notes for the prompt."""
+    try:
+        prof = db_query("SELECT memory_at FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}
+        hist = get_history(chat_id, 400)
+        n_fan = len([m for m in hist if not m.get('is_mine')])
+        if not force and n_fan - (prof.get('memory_at') or 0) < 6: return
+        convo = "\n".join(("Jázmin" if m.get('is_mine') else "Fan") + ": " + (m.get('text') or '')[:400]
+                          for m in hist if (m.get('text') or '').strip())
+        if len(convo) < 60: return
+        r = llm_create(model=UTIL_MODEL, max_tokens=600, system=MEMORY_PROMPT,
+                       messages=[{"role": "user", "content": convo[-16000:]}])
+        notes = (r.text or '').strip()[:1400]
+        if notes:
+            db_query("UPDATE fan_profiles SET memory_notes=?, memory_at=? WHERE chat_id=?", (notes, n_fan, chat_id))
+    except Exception as e:
+        print(f"[memory {chat_id}] {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLAUDE REPLY
 # ─────────────────────────────────────────────────────────────────────────────
-def ask_claude(dynamic_prompt, user_text, smart=True):
+def _fv_norm(t):
+    return re.sub(r"[^\w ]", "", _norm_name(t or "")).strip()
+
+def fv_too_similar(chat_id, reply):
+    """Near-duplicate of one of her last messages, or opens with the same word as one of her last 3."""
+    import difflib
+    if not chat_id or not reply: return False
+    raw_rows = db_query("SELECT text FROM messages WHERE chat_id=? AND is_mine=1 ORDER BY timestamp DESC LIMIT 24", (chat_id,)) or []
+    rows, _seen_t = [], set()
+    for x in raw_rows:                                      # each reply is stored twice → de-dupe
+        tx = (x.get('text') or '').strip()
+        if tx in _seen_t: continue
+        _seen_t.add(tx); rows.append(x)
+    rows = rows[:12]
+    r = _fv_norm(reply)
+    if not r: return False
+    first = r.split()[0] if r.split() else ""
+    for i, row in enumerate(rows):
+        o = _fv_norm(row.get('text') or '')
+        if not o or o.startswith(('zarolt', 'kepet', 'videot')): continue
+        if difflib.SequenceMatcher(None, r, o).ratio() > 0.72: return True
+        if i < 3 and first and o.split() and o.split()[0] == first and first in ('jaj', 'jaaj', 'jajj', 'hmm', 'na', 'aww', 'awww', 'hehe', 'haha', 'ohh', 'jaa'):
+            return True
+    if re.search(r"nem [ée]rtem", reply, re.I) and any(re.search(r"nem [ée]rtem", (x.get('text') or ''), re.I) for x in rows[:6]):
+        return True
+    return False
+
+FV_REPEAT_HINT = ("FONTOS: az előző válaszod túl hasonló volt egy korábbi üzenetedhez (vagy ugyanúgy kezdődött). "
+                  "Írj valami MÁST: más kezdőszó (ne „jaj”, „hmm”, „na”), más gondolat, reagálj konkrétan arra, amit írt.")
+FV_MEETUP_REGEN = ("FONTOS: az előző válaszod konkrét helyet/címet/időpontot adott vagy találkozót ígért. Írd újra: egyértelműen "
+                   "de kedvesen NEM találkozol senkivel (ne „még nem” / „majd egyszer”), és vidd tovább a beszélgetést valami élővel.")
+
+def ask_claude(dynamic_prompt, user_text, smart=True, convo=None, chat_id=None):
     model = REPLY_MODEL if smart else CHEAP_MODEL
+    msgs = convo or [{"role": "user", "content": user_text}]
     for attempt in range(3):
         try:
             resp = llm_create(
@@ -1454,7 +1644,7 @@ def ask_claude(dynamic_prompt, user_text, smart=True):
                     {"type": "text", "text": JAZMIN_PERSONALITY, "cache_control": {"type": "ephemeral"}},
                     {"type": "text", "text": dynamic_prompt},
                 ],
-                messages=[{"role": "user", "content": user_text}])
+                messages=msgs)
             reply = "".join(b.text for b in resp.content if b.type == "text").strip()
             if reply.startswith('"') and reply.endswith('"'): reply = reply[1:-1].strip()
             reply = re.sub(r"\s*\n+\s*", " ", reply)
@@ -1465,16 +1655,30 @@ def ask_claude(dynamic_prompt, user_text, smart=True):
                         system=[{"type": "text", "text": JAZMIN_PERSONALITY, "cache_control": {"type": "ephemeral"}},
                                 {"type": "text", "text": dynamic_prompt},
                                 {"type": "text", "text": "FONTOS: az előző válaszod tiltott fordulatot tartalmazott (attól függ / mit értesz X alatt / menj a privát oldalamra). EZ ITT a Fanvue = a privát oldalad; írd újra TERMÉSZETESEN, e nélkül."}],
-                        messages=[{"role": "user", "content": user_text}])
+                        messages=msgs)
                     r2 = "".join(b.text for b in resp2.content if b.type == "text").strip()
                     if r2: reply = re.sub(r"\s+", " ", r2).strip()
                 except Exception: pass
+            def _again(extra_hint):
+                try:
+                    rr = llm_create(model=model, max_tokens=220,
+                        system=[{"type": "text", "text": JAZMIN_PERSONALITY, "cache_control": {"type": "ephemeral"}},
+                                {"type": "text", "text": dynamic_prompt}, {"type": "text", "text": extra_hint}],
+                        messages=msgs)
+                    return re.sub(r"\s+", " ", (rr.text or "")).strip().strip('"')
+                except Exception:
+                    return ""
+            if chat_id and fv_too_similar(chat_id, reply):
+                print("[anti-repeat] regenerating", flush=True)
+                reply = _again(FV_REPEAT_HINT) or reply
             reply = collapse_doubles(reply)
             reply = scrub_urls(reply)
             if _DENY_IDENTITY.search(reply):
                 print("[safety] identity-denial swapped", flush=True); reply = random.choice(IDENTITY_OWN)
             if leaks_meetup(reply):
-                print("[safety] meetup/address scrubbed", flush=True); reply = random.choice(ADDRESS_DEFLECT)
+                print("[safety] meetup/address → regenerating", flush=True)
+                r2 = scrub_urls(collapse_doubles(_again(FV_MEETUP_REGEN)))
+                reply = r2 if (r2 and not leaks_meetup(r2)) else random.choice(ADDRESS_DEFLECT)
             return thin_emoji(reply)
         except anthropic.RateLimitError:
             time.sleep(8 * (attempt + 1))
@@ -1592,7 +1796,7 @@ def send_due_batches():
             if item.get('fan_msg_id') and db_query('SELECT 1 FROM messages WHERE msg_id=? AND was_replied=1', (item['fan_msg_id'],), fetch_one=True):
                 db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,)); continue
 
-            history = get_history(chat_id, 100)
+            history = get_history(chat_id, 120)
             facts = get_facts(chat_id); real_name = get_real_name(chat_id)
             fan_msgs = [m for m in history if not m.get('is_mine')]
             fan_msg_time = fan_msgs[-1]['timestamp'] if fan_msgs else ''
@@ -1612,6 +1816,11 @@ def send_due_batches():
             override = None
             ai_mode = None          # 'confirm' | 'already' | None
             tg_hint_used = None
+            if _SCHOOL_F.search(fan_text_all) and not is_minor_fan(fan_text_all):
+                db_query("UPDATE fan_profiles SET is_paused=1 WHERE chat_id=?", (chat_id,))
+                send_telegram_alert(f"⚠️ Fanvue: lehet kiskorú — {item.get('fan_name') or chat_id}: „{last_line[:160]}” → szüneteltetve.",
+                                    buttons=[[("▶️ Folytatás", f"fvp:{chat_id}")]])
+                db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,)); continue
             if is_minor_fan(fan_text_all):
                 db_query("UPDATE fan_profiles SET is_paused=1 WHERE chat_id=?", (chat_id,))
                 try: send_telegram_alert(f"⛔ MINOR claim from {item.get('fan_name') or chat_id} -> auto-refused + paused.")
@@ -1631,9 +1840,13 @@ def send_due_batches():
                     try:
                         tg_hint = None
                         early = len(fan_msgs) <= 4
-                        knows = came_from_telegram(fan_text_all) or bool(_KNOWS_ME.search(fan_text_all))
+                        knows = came_from_telegram(fan_text_all) or bool(_KNOWS_ME.search(fan_text_all)) or bool(_TG_NAME_SAY.search(fan_text_all))
                         if early or knows:
+                            says_tg = came_from_telegram(fan_text_all) or bool(_TG_NAME_SAY.search(fan_text_all))
                             found = find_tg_candidates(fan_text_all, only_told=True)
+                            if says_tg and not pick_tg_match(found):     # he names his Telegram → search ALL Telegram fans
+                                found_all = find_tg_candidates(fan_text_all, only_told=False)
+                                if pick_tg_match(found_all) or not found[0]: found = found_all
                             cands = found[0]
                             match = pick_tg_match(found)
                             if match:
@@ -1673,7 +1886,8 @@ def send_due_batches():
                 len(fan_msgs) <= 3, len(fan_text_all) > 220,
                 bool(re.search(r"dr[áa]ga|nincs p[ée]nz|megveszem|mennyibe|\b[áa]r[a]?\b|feloldom|unlock|fizet", fan_text_all, re.I)),
             ])
-            reply = override if override is not None else ask_claude(dyn, user_msg, smart=smart)
+            convo = build_convo(history, user_msg)
+            reply = override if override is not None else ask_claude(dyn, user_msg, smart=smart, convo=convo, chat_id=chat_id)
 
             # ⚖️ Fanvue compliance safety net: never claim to be human; a direct question must get a clear "AI vagyok".
             if override is None and reply:
@@ -1682,7 +1896,7 @@ def send_due_batches():
                     print(f"[compliance] regenerating (claim_human={bool(_CLAIM_HUMAN.search(reply))}, need_confirm={need_confirm})", flush=True)
                     fix = AI_CONFIRM_HINT if (ai_mode == 'confirm' or need_confirm) else AI_ALREADY_HINT if prof2.get('ai_confirmed') else \
                         "⚖️ FONTOS: SOHA ne állítsd, hogy ember vagy vagy hogy nem vagy AI. Írd újra e nélkül."
-                    r2 = ask_claude(dyn + "\n\n" + fix, user_msg, smart=True)
+                    r2 = ask_claude(dyn + "\n\n" + fix, user_msg, smart=True, convo=convo)
                     if r2 and not _CLAIM_HUMAN.search(r2) and (ai_mode != 'confirm' or confirms_ai(r2)):
                         reply = r2
                     else:
@@ -1692,8 +1906,10 @@ def send_due_batches():
                 if _MEETUP_Q.search(fan_text_all) and re.search(
                         r"m[ée]g nem|majd egyszer|egyszer majd|tal[áa]n (k[ée]s[őo]bb|egyszer|majd)|ha (m[áa]r )?jobban megismer|el[őo]bb ismerj",
                         reply, re.I):
-                    print("[compliance] soft meetup promise replaced", flush=True)
-                    reply = random.choice(ADDRESS_DEFLECT)
+                    print("[compliance] soft meetup promise → regenerating", flush=True)
+                    r3 = ask_claude(dyn + "\n\n" + MEETUP_HINT + "\n" + FV_MEETUP_REGEN, user_msg, smart=True, convo=convo)
+                    reply = r3 if (r3 and not re.search(r"m[ée]g nem|majd egyszer|egyszer majd|tal[áa]n (k[ée]s[őo]bb|egyszer|majd)|ha (m[áa]r )?jobban megismer|el[őo]bb ismerj", r3, re.I)) \
+                        else random.choice(ADDRESS_DEFLECT)
 
             if reply and not prof2.get('ppv_pending') and not ai_mode:
                 _claimed = bool(_FAKE_SEND.search(reply)); _promised = bool(_PROMISE_SEND.search(reply))
@@ -1716,6 +1932,7 @@ def send_due_batches():
                 if confirms_ai(reply):
                     db_query("UPDATE fan_profiles SET ai_confirmed=1 WHERE chat_id=?", (chat_id,))
                 threading.Thread(target=maybe_update_summary, args=(chat_id, history), daemon=True).start()
+                threading.Thread(target=refresh_fan_memory, args=(chat_id,), daemon=True).start()
                 maybe_run_auto_ppv(chat_id, item['fan_name'])
                 sent += 1
             else:
@@ -1736,6 +1953,7 @@ send_thread    = None
 reng_thread    = None
 ctrl_thread    = None
 track_thread   = None
+backfill_thread = None
 _is_leader     = False
 _has_poll_lock = False   # holds the poll lock (even when the Fanvue token is dead) → runs the control panel
 
@@ -1783,6 +2001,9 @@ def start_polling():
         ctrl_thread = threading.Thread(target=control_bot_loop, daemon=True); ctrl_thread.start(); started = True
     if track_thread is None or not track_thread.is_alive():
         track_thread = threading.Thread(target=tracking_loop, daemon=True); track_thread.start(); started = True
+    global backfill_thread
+    if backfill_thread is None or not backfill_thread.is_alive():
+        backfill_thread = threading.Thread(target=backfill_loop, daemon=True); backfill_thread.start(); started = True
     return started
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2051,7 +2272,7 @@ def require_auth(f):
 # ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route('/')
-def home(): return "Jazmin Bot v13 ✅", 200
+def home(): return "Jazmin Bot v14 ✅", 200
 
 @app.route('/status')
 @require_auth
