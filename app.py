@@ -1252,12 +1252,12 @@ def backfill_loop():
     time.sleep(45)
     while polling_active:
         try:
-            if _is_leader and get_fanvue_token():
+            if _is_leader and not get_safe_mode() and get_fanvue_token():
                 todo = db_query("SELECT chat_id, fan_name FROM fan_profiles WHERE COALESCE(backfilled,0)=0") or []
                 if todo: print(f"[backfill] {len(todo)} chat(s) to import", flush=True)
                 total = 0
                 for f in todo:
-                    if not polling_active: break
+                    if not polling_active or get_safe_mode(): break
                     try:
                         n = backfill_chat(f['chat_id'], f.get('fan_name') or '')
                         total += n
@@ -2038,6 +2038,8 @@ def poll_loop():
             lock = acquire_poll_lock(); _has_poll_lock = lock
             if lock and get_fanvue_token():
                 _is_leader = True
+                if get_safe_mode():          # OFF = hands off: don't even fetch chats, so messages stay UNREAD for you
+                    time.sleep(POLL_INTERVAL); continue
                 sc, _ = process_new_messages()
                 if sc: print(f"[{datetime.now()}] w={WORKER_ID} scan sched={sc}")
             else:
