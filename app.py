@@ -2097,6 +2097,9 @@ _tracking_repaired = [False]
 def tracking_links_tick():
     """Create requested links; then check which Fanvue users came through each link."""
     _ensure_tracking_table()
+    if os.environ.get('USE_TRACKING_LINKS', '0') != '1':
+        db_query("UPDATE tg_tracking SET status='off' WHERE status IN ('requested','failed')")
+        return
     if not _tracking_repaired[0]:
         _tracking_repaired[0] = True
         try: _repair_failed_tracking()
