@@ -3164,6 +3164,12 @@ try:
     if load_token('v13_first_boot_done') != 'yes':
         set_safe_mode(True); save_token('v13_first_boot_done', 'yes')
         print("[boot] v13 first launch → Fanvue bot starts OFF (switch on from the control panel)")
+    try:   # ONLY_FAN=off → Fanvue bot fully OFF (safe mode, keep-warm off); 'off' also matches no chat (fail-closed)
+        if only_fan() == 'off':
+            set_away(False); set_fanvue(False); save_token('lab_started', '')
+            db_query("UPDATE scheduled_replies SET status='cancelled' WHERE status IN ('pending','sending')")
+            print("[boot] ONLY_FAN=off → Fanvue bot OFF", flush=True)
+    except Exception as e: print(f"[boot off] {e}")
     try:   # v15.3: one-time switch-on for single-fan lab mode (only when ONLY_FAN + LAB_START are set; /back still turns it off)
         if only_fan() and os.environ.get('LAB_START') == '1' and load_token('lab_started') != only_fan():
             cancel_stale_pending(0); set_away(True); set_fanvue(True); save_token('lab_started', only_fan())
