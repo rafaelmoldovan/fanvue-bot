@@ -516,6 +516,7 @@ def send_fanvue_message(chat_id, text):
     try:
         r = requests.post(f"https://api.fanvue.com/chats/{chat_id}/message",
             headers=get_headers(), json={"text": text}, timeout=10)
+        if only_fan(): print(f"[lab] BOT → {text}", flush=True)
         return r.status_code in (200, 201)
     except Exception as e:
         send_telegram_error(f"send failed {chat_id}: {e}"); return False
@@ -1776,6 +1777,7 @@ def schedule_or_extend_batch(chat_id, fan_name, fan_msg_id, fan_text):
     now = datetime.now(); fan_text = fan_text or ''
     # human pace: she isn't glued to the phone — ~40s-2.5min, longer for long messages, sometimes a few minutes
     window = int(random.uniform(40, 150) + min(len(fan_text) * 0.25, 60) + (random.uniform(120, 420) if random.random() < 0.15 else 0))
+    if only_fan(): print(f"[lab] FAN ← {fan_text}", flush=True)
     if away_mode():
         window = int(random.uniform(15, 30))     # chat is opened ~70-95s after his message → reply lands at ~1.5-2 min
     if existing and existing.get('status') == 'sending':
