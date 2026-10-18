@@ -48,7 +48,7 @@ import anthropic
 BUDAPEST_TZ   = ZoneInfo('Europe/Budapest')
 BOOT_TIME_UTC = datetime.now(timezone.utc)
 WORKER_ID     = uuid.uuid4().hex[:8]
-print(f"[{datetime.now()}] BOT v14 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
+print(f"[{datetime.now()}] BOT v15 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
 
 def get_budapest_now():
     return datetime.now(BUDAPEST_TZ).replace(tzinfo=None)
@@ -244,6 +244,8 @@ def init_db():
                 'memory_notes TEXT', 'memory_at INTEGER DEFAULT 0', 'backfilled INTEGER DEFAULT 0',
             ):
                 c.execute(f'ALTER TABLE fan_profiles ADD COLUMN IF NOT EXISTS {col}')
+            c.execute('ALTER TABLE messages ADD COLUMN IF NOT EXISTS author TEXT')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_id, timestamp)')
             c.execute('ALTER TABLE scheduled_replies ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0')
             # v12 fans left "waiting for a Telegram name" would be asked weeks later → reset once
             c.execute("UPDATE fan_profiles SET awaiting_tg=0 WHERE awaiting_tg=1")   # v13: she never asks for names any more
@@ -294,6 +296,7 @@ def init_db():
         'ALTER TABLE fan_profiles ADD COLUMN memory_notes TEXT',
         'ALTER TABLE fan_profiles ADD COLUMN memory_at INTEGER DEFAULT 0',
         'ALTER TABLE fan_profiles ADD COLUMN backfilled INTEGER DEFAULT 0',
+        'ALTER TABLE messages ADD COLUMN author TEXT',
         'ALTER TABLE scheduled_replies ADD COLUMN attempts INTEGER DEFAULT 0',
         "UPDATE fan_profiles SET awaiting_tg=0 WHERE awaiting_tg=1",
     ]:
@@ -1158,7 +1161,7 @@ def run_reengagement_loop():
     time.sleep(300)
     while polling_active:
         time.sleep(random.randint(2700, 7200))
-        if get_safe_mode() or not _is_leader:
+        if get_safe_mode() or not _is_leader or away_mode():
             continue
         if not (10 <= datetime.now(BUDAPEST_TZ).hour < 22):
             continue
@@ -1247,6 +1250,213 @@ def backfill_chat(chat_id, fan_name='', max_pages=40):
         db_query("UPDATE messages SET was_replied=1 WHERE chat_id=? AND is_mine=0 AND timestamp < ?", (chat_id, lm['t']))
     db_query("UPDATE fan_profiles SET backfilled=1 WHERE chat_id=?", (chat_id,))
     return saved
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LEARN MODE + AWAY MODE (v15)
+# /learn  → downloads EVERY Fanvue chat (all pages), splits your own messages from the bot's, builds a memory
+#           note for every fan and learns YOUR texting style (guide + real examples). Never sends anything.
+# /away   → bot answers in YOUR style to keep fans warm (no selling); /back → bot off, you take over.
+# ─────────────────────────────────────────────────────────────────────────────
+_learn_thread = None
+
+def away_mode(): return (load_token('away_mode') or 'off') == 'on'
+def set_away(on): save_token('away_mode', 'on' if on else 'off')
+
+def tag_authors():
+    """messages.author: 'fan' | 'bot' | 'rafael' (your own manual messages). 3 set-based updates, fast."""
+    fixed = [h[2] for h in REENG_HOOKS] + [AUTO_FREE_TEXT, AUTO_PPV_TEXT]
+    marks = ",".join("?" for _ in fixed)
+    db_query("UPDATE messages SET author='fan' WHERE author IS NULL AND COALESCE(is_mine,0)=0")
+    db_query(f"""UPDATE messages SET author='bot' WHERE author IS NULL AND is_mine=1 AND (
+                   msg_id LIKE 'bot%' OR text IN ({marks}) OR EXISTS (
+                     SELECT 1 FROM messages b WHERE b.chat_id=messages.chat_id AND b.msg_id LIKE 'bot%' AND b.text=messages.text))""",
+             tuple(fixed))
+    db_query("UPDATE messages SET author='rafael' WHERE author IS NULL AND is_mine=1")
+
+def style_pairs(chat_id=None, limit=None):
+    """(fan said …, you replied …) pairs from your manual messages."""
+    q_ = "SELECT chat_id, text, author, timestamp FROM messages WHERE author IN ('fan','rafael')"
+    args = ()
+    if chat_id: q_ += " AND chat_id=?"; args = (chat_id,)
+    rows = db_query(q_ + " ORDER BY chat_id, timestamp", args) or []
+    pairs, cur, fan_buf, my_buf = [], None, [], []
+    def flush():
+        if fan_buf and my_buf:
+            pairs.append({"chat": cur, "fan": " / ".join(fan_buf)[-400:], "me": " / ".join(my_buf)[:500]})
+    for r in rows:
+        t = (r.get('text') or '').strip()
+        if not t: continue
+        if r['chat_id'] != cur:
+            flush(); cur, fan_buf, my_buf = r['chat_id'], [], []
+        if r['author'] == 'fan':
+            if my_buf: flush(); fan_buf, my_buf = [], []
+            fan_buf.append(t)
+        else:
+            if t.startswith('[') and t.endswith(']'): continue          # media / PPV tag, not style
+            my_buf.append(t)
+    flush()
+    return pairs[-limit:] if limit else pairs
+
+def _style_stats(texts):
+    import collections, statistics
+    texts = [t for t in texts if t and not (t.startswith('[') and t.endswith(']'))]
+    if not texts: return {}
+    emo = collections.Counter(e for t in texts for e in _EMOJI_RE.findall(t))
+    first = collections.Counter((_fv_norm(t).split() or [''])[0] for t in texts)
+    ends = collections.Counter((t.strip()[-1:] if t.strip() else '') for t in texts)
+    words = [len(t.split()) for t in texts]
+    return {
+        "messages": len(texts),
+        "median_words": statistics.median(words), "avg_chars": round(sum(len(t) for t in texts) / len(texts)),
+        "lowercase_start_pct": round(100 * sum(1 for t in texts if t[:1].islower()) / len(texts)),
+        "with_emoji_pct": round(100 * sum(1 for t in texts if _EMOJI_RE.search(t)) / len(texts)),
+        "top_emojis": emo.most_common(12), "top_first_words": first.most_common(20), "top_endings": ends.most_common(8),
+        "accents_pct": round(100 * sum(1 for t in texts if re.search(r"[áéíóöőúüű]", t)) / len(texts)),
+        "laugh_forms": collections.Counter(m.lower() for t in texts for m in re.findall(r"\b(?:ha){2,}\w*|:D+|xd+|hehe\w*|hihi\w*|lol", t, re.I)).most_common(8),
+    }
+
+STYLE_MAP_PROMPT = ("Valódi chat-részleteket kapsz egy Fanvue creator fiókból: a „FAN” a rajongó, az „ÉN” a fiók kezelője (Rafael), aki "
+                    "Jázminként ír a rajongóknak. Elemezd NAGYON részletesen az „ÉN” írásstílusát magyarul, hogy egy másik író tökéletesen "
+                    "le tudja utánozni: hangnem, humor típusa (példákkal), tipikus szavak/fordulatok/becézések, mondathossz, kis/nagybetű, "
+                    "írásjelek, ékezetek, emoji-használat, elírások/szleng, hogyan reagál bókra, flörtre, szexuális közeledésre, panaszra, "
+                    "kérdésekre, hogyan kezd és zár beszélgetést, mennyit kérdez, hogyan tartja életben a beszélgetést, mit SOHA nem csinál. "
+                    "Idézz rövid valódi példákat. Pontokba szedve.")
+STYLE_REDUCE_PROMPT = ("Több részelemzést kapsz ugyanannak a személynek (Rafael, aki Jázminként ír) a chat-stílusáról. Fésüld össze EGY "
+                       "végleges, tömör, gyakorlatias STÍLUS-ÚTMUTATÓVÁ magyarul (max 3500 karakter), amit egy chatbot követni tud: "
+                       "1) Összkép 2) Formai szabályok (hossz, betűk, írásjelek, emoji, ékezet) 3) Humor és tipikus fordulatok (szó szerinti "
+                       "példákkal) 4) Helyzetek: bók, flört, szexuális közeledés, kérdés, unalmas válasz, panasz, elköszönés 5) SOHA ne. "
+                       "Csak azt írd, ami tényleg kiderül az anyagból.")
+
+def learn_style(alert=True):
+    """Map-reduce over your real replies → style guide + example bank (stored in tokens)."""
+    pairs = style_pairs()
+    texts = [p['me'] for p in pairs]
+    stats = _style_stats([x for p in pairs for x in p['me'].split(' / ')])
+    save_token('style_stats', json.dumps(stats, ensure_ascii=False))
+    if len(pairs) < 20:
+        save_token('learn_status', f"kevés saját üzenet ({len(pairs)}) — stílus nem tanulható még"); return
+    random.seed(7)
+    sample = pairs if len(pairs) <= 900 else random.sample(pairs, 900)
+    chunks = [sample[i:i + 150] for i in range(0, len(sample), 150)]
+    partials = []
+    for ch in chunks:
+        txt = "\n\n".join(f"FAN: {p['fan']}\nÉN: {p['me']}" for p in ch)
+        try:
+            r = llm_create(model=REPLY_MODEL, max_tokens=1800, system=STYLE_MAP_PROMPT, messages=[{"role": "user", "content": txt[:60000]}])
+            if r.text: partials.append(r.text.strip())
+        except Exception as e:
+            print(f"[learn] style map: {e}")
+    if not partials: return
+    try:
+        r = llm_create(model=REPLY_MODEL, max_tokens=2500, system=STYLE_REDUCE_PROMPT,
+                       messages=[{"role": "user", "content": ("STATISZTIKA: " + json.dumps(stats, ensure_ascii=False) + "\n\n" +
+                                                              "\n\n=====\n\n".join(partials))[:90000]}])
+        guide = (r.text or '').strip()
+    except Exception as e:
+        print(f"[learn] style reduce: {e}"); guide = partials[0]
+    save_token('style_guide', guide)
+    # example bank: varied, normal-length replies
+    good = [p for p in pairs if 6 <= len(p['me']) <= 260 and len(p['fan']) <= 400]
+    random.shuffle(good)
+    seen, bank = set(), []
+    for p in good:
+        k = (_fv_norm(p['me']).split() or [''])[0]
+        if k in seen and len(bank) > 40: continue
+        seen.add(k); bank.append({"fan": p['fan'], "me": p['me']})
+        if len(bank) >= 150: break
+    save_token('style_examples', json.dumps(bank, ensure_ascii=False))
+
+def learn_everything():
+    """Fetch ALL chats (all pages), tag authors, build per-fan memory, learn style. Sends NOTHING to fans."""
+    try:
+        save_token('learn_status', 'fut: chatek letöltése…')
+        chats, status = get_chats()
+        total_new, n = 0, 0
+        for chat in chats:
+            user = chat.get('user', {}) or {}
+            chat_id = user.get('uuid') or chat.get('uuid') or chat.get('id')
+            if not chat_id: continue
+            fan_name = user.get('displayName', '') or ''
+            get_or_create_fan(chat_id, fan_name, user.get('handle', '') or '', 0)
+            try:
+                total_new += backfill_chat(chat_id, fan_name, max_pages=400)
+            except Exception as e:
+                print(f"[learn] backfill {chat_id}: {e}")
+            n += 1
+            if n % 20 == 0: save_token('learn_status', f'fut: {n}/{len(chats)} chat letöltve…')
+            time.sleep(0.3)
+        save_token('learn_status', 'fut: üzenetek szétválogatása (te / bot / fan)…')
+        db_query("UPDATE messages SET author=NULL WHERE author='rafael'")   # re-check (bot echoes may have arrived since)
+        tag_authors()
+        ids = [r['chat_id'] for r in (db_query("SELECT DISTINCT chat_id FROM messages") or [])]
+        save_token('learn_status', 'fut: emlékek írása minden fanról…')
+        for i, cid in enumerate(ids):
+            cnt = db_query("SELECT COUNT(*) c FROM messages WHERE chat_id=?", (cid,), fetch_one=True) or {}
+            if (cnt.get('c') or 0) >= 4:
+                refresh_fan_memory(cid, force=True)
+            if i % 25 == 0: save_token('learn_status', f'fut: emlékek {i}/{len(ids)}…')
+        save_token('learn_status', 'fut: a stílusod tanulása…')
+        learn_style()
+        mine = db_query("SELECT COUNT(*) c FROM messages WHERE author='rafael'", fetch_one=True) or {}
+        allm = db_query("SELECT COUNT(*) c FROM messages", fetch_one=True) or {}
+        done = (f"kész ✅ {len(chats)} chat, {allm.get('c', 0)} üzenet (ebből {mine.get('c', 0)} a te saját üzeneted), "
+                f"{total_new} új letöltve. Frissítve: {datetime.now(BUDAPEST_TZ).strftime('%m-%d %H:%M')}")
+        save_token('learn_status', done)
+        send_telegram_alert(f"🧠 Tanulás {done}\nNézd meg mit tanult: {PUBLIC_URL}/style_report?pw={DASHBOARD_PASSWORD}\n"
+                            f"(A Fanvue bot továbbra is KI van kapcsolva, senkinek nem írt.)")
+    except Exception as e:
+        save_token('learn_status', f'hiba: {e}'); print(f"[learn] {e}")
+
+def start_learning():
+    global _learn_thread
+    if _learn_thread and _learn_thread.is_alive(): return "🧠 A tanulás már fut — " + (load_token('learn_status') or '')
+    _learn_thread = threading.Thread(target=learn_everything, daemon=True); _learn_thread.start()
+    return "🧠 Tanulás elindult: letöltöm az összes Fanvue chatet és megtanulom a stílusodat. A bot NEM ír senkinek. Szólok ha kész."
+
+def _overlap(a, b):
+    wa, wb = set(_fv_norm(a).split()), set(_fv_norm(b).split())
+    return len(wa & wb) / (1 + len(wa))
+
+AWAY_RULES = ("🏝️ KEEP-WARM MÓD: Rafael (aki ezt a fiókot kezeli) most nincs gépnél; a feladatod, hogy a beszélgetés életben "
+              "maradjon, PONTOSAN az ő stílusában. ⛔ NE adj el semmit, NE ajánlj és NE küldj fizetős tartalmat, NE beszélj árakról, "
+              "NE ígérj konkrét képet/videót — ha ilyet kér, maradj játékos és hagyd nyitva (majd később). A lenti STÍLUS-ÚTMUTATÓ és "
+              "a valódi példák felülírják a fenti általános stílusszabályokat (hossz, emoji, humor). A Fanvue szabályok (AI-kérdés, "
+              "találkozó) továbbra is kötelezőek. Ne ismételd a példákat szó szerint — csak a hangnemet, humort, formát vedd át.")
+
+def away_block(chat_id, fan_text):
+    guide = (load_token('style_guide') or '').strip()
+    try: bank = json.loads(load_token('style_examples') or '[]')
+    except Exception: bank = []
+    own = style_pairs(chat_id)[-6:]                     # how YOU talked with THIS fan
+    bank.sort(key=lambda p: -_overlap(fan_text, p['fan']))
+    ex = own + [p for p in bank[:8] if p not in own]
+    out = "\n\n" + AWAY_RULES
+    if guide: out += "\n\n✍️ RAFAEL STÍLUS-ÚTMUTATÓJA (így ír ő):\n" + guide[:3800]
+    if ex:
+        out += "\n\n📚 VALÓDI PÉLDÁK, ahogy Rafael válaszolt (a hangnemet vedd át, ne másold):\n" + \
+               "\n".join(f"FAN: {p['fan'][:200]}\nRAFAEL: {p['me'][:260]}" for p in ex[:14])
+    return out
+
+def style_preview(n=6):
+    """What the bot WOULD answer in away mode to the latest fan message in a few chats — nothing is sent."""
+    out = []
+    rows = db_query("""SELECT chat_id, MAX(timestamp) mt FROM messages WHERE author='fan' GROUP BY chat_id ORDER BY mt DESC LIMIT ?""", (n,)) or []
+    for r in rows:
+        cid = r['chat_id']
+        history = get_history(cid, 120)
+        fan_msgs = [m for m in history if not m.get('is_mine')]
+        if not fan_msgs: continue
+        last = (fan_msgs[-1].get('text') or '').strip()
+        prof = db_query("SELECT fan_name FROM fan_profiles WHERE chat_id=?", (cid,), fetch_one=True) or {}
+        dyn = build_dynamic_prompt(cid, prof.get('fan_name') or '', get_real_name(cid), get_facts(cid), history, get_time_context(), '')
+        dyn += away_block(cid, last)
+        convo = build_convo(history, last)
+        try:
+            reply = ask_claude(dyn, last, smart=True, convo=convo, chat_id=cid)
+        except Exception as e:
+            reply = f"(hiba: {e})"
+        out.append((prof.get('fan_name') or cid[:8], last, reply))
+    return out
 
 def backfill_loop():
     time.sleep(45)
@@ -1615,7 +1825,8 @@ MEMORY_PROMPT = ("Ez Jázmin és egy fan Fanvue chatje (Fan = a srác, Jázmin =
                  "KÖZÖS DOLGOK: közös poénok, visszatérő témák, mit ígért Jázmin\n"
                  "MÁR MEGKÉRDEZTED: témák, amikre Jázmin már rákérdezett\n"
                  "MÉG NEM TUDOD RÓLA: 4-6 személyes dolog, amire érdemes lenne rákérdezni\n"
-                 "Ne találj ki semmit. Max 900 karakter.")
+                 "HOGYAN BESZÉLTEK: becenevek, közös poénok, hangulat, mit szeret hallani, mire reagált rosszul (KERÜLENDŐ)\n"
+                 "Ne találj ki semmit. Max 1200 karakter.")
 
 def refresh_fan_memory(chat_id, force=False):
     """Haiku reads the WHOLE stored conversation (incl. backfilled history) → memory_notes for the prompt."""
@@ -1629,7 +1840,7 @@ def refresh_fan_memory(chat_id, force=False):
         if len(convo) < 60: return
         r = llm_create(model=UTIL_MODEL, max_tokens=600, system=MEMORY_PROMPT,
                        messages=[{"role": "user", "content": convo[-16000:]}])
-        notes = (r.text or '').strip()[:1400]
+        notes = (r.text or '').strip()[:1800]
         if notes:
             db_query("UPDATE fan_profiles SET memory_notes=?, memory_at=? WHERE chat_id=?", (notes, n_fan, chat_id))
     except Exception as e:
@@ -1951,6 +2162,9 @@ def send_due_batches():
                 len(fan_text_all.strip()) >= 25,          # v14: real conversation → smart model (Haiku felt "dead")
                 bool(re.search(r"dr[áa]ga|nincs p[ée]nz|megveszem|mennyibe|\b[áa]r[a]?\b|feloldom|unlock|fizet", fan_text_all, re.I)),
             ])
+            if away_mode() and override is None:
+                dyn += away_block(chat_id, fan_text_all)
+                smart = True
             convo = build_convo(history, user_msg)
             reply = override if override is not None else ask_claude(dyn, user_msg, smart=smart, convo=convo, chat_id=chat_id)
 
@@ -2006,7 +2220,7 @@ def send_due_batches():
                     db_query("UPDATE fan_profiles SET ai_confirmed=1 WHERE chat_id=?", (chat_id,))
                 threading.Thread(target=maybe_update_summary, args=(chat_id, history), daemon=True).start()
                 threading.Thread(target=refresh_fan_memory, args=(chat_id,), daemon=True).start()
-                maybe_run_auto_ppv(chat_id, item['fan_name'])
+                if not away_mode(): maybe_run_auto_ppv(chat_id, item['fan_name'])
                 sent += 1
             else:
                 # retry at most 2 more times, a minute apart (v12 re-asked Claude every 4s forever)
@@ -2211,7 +2425,9 @@ MENU_BUTTONS = [[("▶️ Mindkettő BE", "all:on"), ("⏸ Mindkettő KI", "all:
                 [("Fanvue BE", "fv:on"), ("Fanvue KI", "fv:off")],
                 [("Telegram BE", "tg:on"), ("Telegram KI", "tg:off")],
                 [("👥 Fanvue fanok", "fvlist"), ("👥 Telegram fanok", "tglist")],
-                [("📊 Állapot", "status"), ("🔗 Fanvue újracsatl.", "reconnect")]]
+                [("📊 Állapot", "status"), ("🔗 Fanvue újracsatl.", "reconnect")],
+                [("🏝️ Távol (keep-warm)", "away:on"), ("🧑‍💻 Itt vagyok", "away:off")],
+                [("🧠 Tanulás (letöltés + stílus)", "learn")]]
 
 def _fan_rows_fv(search=None, limit=8):
     if search:
@@ -2259,7 +2475,8 @@ def status_text():
             f"Fanvue bot: {'🟢 BE (válaszol)' if fanvue_enabled() else '⏸ KI (csak olvas)'}\n"
             f"Fanvue kapcsolat: {'🟢 rendben' if tok != 'dead' and (load_token('refresh_token') or '') else '🔴 újracsatlakoztatás kell'}\n"
             f"Telegram bot: {'🟢 BE' if tg_bot_enabled() else '⏸ KI'} · {'él ✅' if tg_alive else 'nem jelentkezik ⚠️ (Railway-en fut?)'}\n"
-            f"Függő válaszok: {pend.get('c', 0)} · ma elküldve: {sent.get('c', 0)} · összekötött TG fanok: {linked.get('c', 0)}")
+            f"Függő válaszok: {pend.get('c', 0)} · ma elküldve: {sent.get('c', 0)} · összekötött TG fanok: {linked.get('c', 0)}\n"
+            f"Keep-warm mód: {'🏝️ BE' if away_mode() else 'KI'} · Tanulás: {load_token('learn_status') or 'még nem futott'}")
 
 def handle_control(data):
     """Run one control action; returns a short confirmation text."""
@@ -2271,6 +2488,15 @@ def handle_control(data):
     if data in ("tg:on", "tg:off"):
         set_tg_bot(data.endswith("on")); return "Telegram bot: " + ("🟢 BE" if data.endswith("on") else "⏸ KI")
     if data == "status": return status_text()
+    if data == "learn": return start_learning()
+    if data == "away:on":
+        if not (load_token('style_guide') or ''):
+            return "⚠️ Még nincs megtanult stílus — előbb /learn (tanulás)."
+        set_away(True); set_fanvue(True)
+        return "🏝️ KEEP-WARM mód BE: a bot a TE stílusodban válaszol, nem ad el semmit. Ha te írsz egy fannak, nála 5 percre félreáll. /back = vissza."
+    if data == "away:off":
+        set_away(False); set_fanvue(False)
+        return "🧑‍💻 Visszajöttél: a Fanvue bot KI, te viszed a beszélgetéseket."
     if data in ("fvlist", "tglist"):
         send_fan_list(data[:2]); return ""
     if data.startswith("fvp:"):
@@ -2303,6 +2529,7 @@ _CMD_MAP = {"/start": "menu", "/menu": "menu", "/status": "status", "/allapot": 
             "/be": "all:on", "/ki": "all:off", "/startall": "all:on", "/stopall": "all:off",
             "/fanvue_be": "fv:on", "/fanvue_ki": "fv:off", "/telegram_be": "tg:on", "/telegram_ki": "tg:off",
             "/reconnect": "reconnect", "/ujracsatlakozas": "reconnect",
+            "/learn": "learn", "/tanulj": "learn", "/away": "away:on", "/tavol": "away:on", "/back": "away:off", "/vissza": "away:off",
             "/fans": "fvlist", "/fanok": "fvlist", "/tgfans": "tglist", "/tgfanok": "tglist", "/fan": "search"}
 
 def control_bot_loop():
@@ -2384,7 +2611,7 @@ def require_auth(f):
 # ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route('/')
-def home(): return "Jazmin Bot v14 ✅", 200
+def home(): return "Jazmin Bot v15 ✅", 200
 
 @app.route('/status')
 @require_auth
@@ -2478,6 +2705,27 @@ def export_chats():
                 who = ('J' if str(m.get('msg_id', '')).startswith('bot') else 'R') if m['is_mine'] else 'F'
                 out.append(f"{(m.get('timestamp') or '')[5:16]} {who}: {t}")
     return Response("\n".join(out), mimetype='text/plain; charset=utf-8')
+
+@app.route('/style_report')
+@require_auth
+def style_report():
+    from flask import Response
+    import html as _h
+    stats = load_token('style_stats') or '{}'
+    guide = load_token('style_guide') or '(még nincs — futtasd a /learn parancsot)'
+    try: bank = json.loads(load_token('style_examples') or '[]')
+    except Exception: bank = []
+    parts = [f"<h2>Tanulás állapota</h2><p>{_h.escape(load_token('learn_status') or '-')}</p>",
+             f"<h2>Statisztika</h2><pre>{_h.escape(stats)}</pre>",
+             f"<h2>Stílus-útmutató</h2><pre style='white-space:pre-wrap'>{_h.escape(guide)}</pre>",
+             "<h2>Példák (valódi válaszaid)</h2>" + "".join(f"<p><b>FAN:</b> {_h.escape(p['fan'][:200])}<br><b>TE:</b> {_h.escape(p['me'][:260])}</p>" for p in bank[:30])]
+    if request.args.get('preview') == '1':
+        parts.append("<h2>Próba (NEM lett elküldve)</h2>" + "".join(
+            f"<p><b>{_h.escape(n)}</b> — FAN: {_h.escape(f[:200])}<br><b>BOT (a te stílusodban):</b> {_h.escape(r or '')}</p>" for n, f, r in style_preview()))
+    else:
+        parts.append(f"<p><a href='?pw={DASHBOARD_PASSWORD}&preview=1'>▶ Próbaválaszok generálása (semmit nem küld el)</a></p>")
+    return Response("<meta charset='utf-8'><meta name=viewport content='width=device-width,initial-scale=1'>"
+                    "<body style='font-family:sans-serif;max-width:900px;margin:20px auto;padding:0 16px'>" + "".join(parts), mimetype='text/html')
 
 @app.route('/control/<action>', methods=['POST', 'GET'])
 @require_auth
