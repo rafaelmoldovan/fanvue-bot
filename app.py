@@ -1259,6 +1259,11 @@ def backfill_chat(chat_id, fan_name='', max_pages=40):
 # ─────────────────────────────────────────────────────────────────────────────
 _learn_thread = None
 
+def cancel_stale_pending(max_age_min=30):
+    """Replies queued long ago (while the bot was off) must never fire when it's switched on."""
+    cutoff = (datetime.now() - timedelta(minutes=max_age_min)).isoformat()
+    db_query("UPDATE scheduled_replies SET status='cancelled' WHERE status IN ('pending','sending') AND created_at < ?", (cutoff,))
+
 def away_mode(): return (load_token('away_mode') or 'off') == 'on'
 def set_away(on): save_token('away_mode', 'on' if on else 'off')
 
@@ -1829,17 +1834,37 @@ MEMORY_PROMPT = ("Ez Jázmin és egy fan Fanvue chatje (Fan = a srác, Jázmin =
                  "Ne találj ki semmit. Max 1200 karakter.")
 
 def refresh_fan_memory(chat_id, force=False):
-    """Haiku reads the WHOLE stored conversation (incl. backfilled history) → memory_notes for the prompt."""
+    """Haiku reads the WHOLE stored conversation → memory_notes. Long chats are summarised chunk by chunk first,
+    so nothing from the start of the relationship is forgotten."""
     try:
         prof = db_query("SELECT memory_at FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}
-        hist = get_history(chat_id, 400)
+        hist = db_query("SELECT text, is_mine, timestamp FROM messages WHERE chat_id=? ORDER BY timestamp ASC", (chat_id,)) or []
+        hist = [m for m in hist if (m.get('text') or '').strip()]
         n_fan = len([m for m in hist if not m.get('is_mine')])
         if not force and n_fan - (prof.get('memory_at') or 0) < 6: return
-        convo = "\n".join(("Jázmin" if m.get('is_mine') else "Fan") + ": " + (m.get('text') or '')[:400]
-                          for m in hist if (m.get('text') or '').strip())
-        if len(convo) < 60: return
-        r = llm_create(model=UTIL_MODEL, max_tokens=600, system=MEMORY_PROMPT,
-                       messages=[{"role": "user", "content": convo[-16000:]}])
+        lines = [("Jázmin" if m.get('is_mine') else "Fan") + ": " + (m.get('text') or '')[:400] for m in hist]
+        if len("\n".join(lines)) < 60: return
+        convo = "\n".join(lines)
+        if len(convo) > 16000:                      # long relationship → summarise older parts first
+            older, recent = lines[:-250], lines[-250:]
+            parts, buf = [], []
+            for ln in older:
+                buf.append(ln)
+                if sum(len(x) for x in buf) > 14000:
+                    parts.append("\n".join(buf)); buf = []
+            if buf: parts.append("\n".join(buf))
+            summaries = []
+            for part in parts[:12]:
+                try:
+                    r = llm_create(model=UTIL_MODEL, max_tokens=500, system=MEMORY_PROMPT,
+                                   messages=[{"role": "user", "content": part}])
+                    if r.text: summaries.append(r.text.strip())
+                except Exception as e:
+                    print(f"[memory chunk {chat_id}] {e}")
+            convo = ("KORÁBBI IDŐSZAKOK ÖSSZEFOGLALÓI:\n" + "\n---\n".join(summaries) +
+                     "\n\nA LEGUTÓBBI BESZÉLGETÉS:\n" + "\n".join(recent))[-30000:]
+        r = llm_create(model=UTIL_MODEL, max_tokens=700, system=MEMORY_PROMPT,
+                       messages=[{"role": "user", "content": convo[-30000:]}])
         notes = (r.text or '').strip()[:1800]
         if notes:
             db_query("UPDATE fan_profiles SET memory_notes=?, memory_at=? WHERE chat_id=?", (notes, n_fan, chat_id))
@@ -2481,9 +2506,12 @@ def status_text():
 def handle_control(data):
     """Run one control action; returns a short confirmation text."""
     if data in ("all:on", "all:off"):
-        on = data.endswith("on"); set_fanvue(on); set_tg_bot(on)
+        on = data.endswith("on")
+        if on: cancel_stale_pending()
+        set_fanvue(on); set_tg_bot(on)
         return "▶️ Mindkét bot BEKAPCSOLVA." if on else "⏸ Mindkét bot KIKAPCSOLVA (az üzeneteket elmentik, de nem válaszolnak)."
     if data in ("fv:on", "fv:off"):
+        if data.endswith("on"): cancel_stale_pending()
         set_fanvue(data.endswith("on")); return "Fanvue bot: " + ("🟢 BE" if data.endswith("on") else "⏸ KI")
     if data in ("tg:on", "tg:off"):
         set_tg_bot(data.endswith("on")); return "Telegram bot: " + ("🟢 BE" if data.endswith("on") else "⏸ KI")
@@ -2492,6 +2520,7 @@ def handle_control(data):
     if data == "away:on":
         if not (load_token('style_guide') or ''):
             return "⚠️ Még nincs megtanult stílus — előbb /learn (tanulás)."
+        cancel_stale_pending()
         set_away(True); set_fanvue(True)
         return "🏝️ KEEP-WARM mód BE: a bot a TE stílusodban válaszol, nem ad el semmit. Ha te írsz egy fannak, nála 5 percre félreáll. /back = vissza."
     if data == "away:off":
