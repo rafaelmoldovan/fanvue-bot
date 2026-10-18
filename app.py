@@ -908,6 +908,26 @@ def thin_emoji(t):
     if not allowed: return base
     return base if random.random() < 0.35 else (base + " " + allowed[-1])
 
+_SMILEY = re.compile(r":\)+")
+def thin_smiley(t, last_bot=""):
+    """Rafael: ':)' is part of the style but was in ~9/10 replies — keep it in roughly half. Never two in a row,
+    otherwise kept ~70% of the time; at most one per message."""
+    t = t or ""
+    n = len(_SMILEY.findall(t))
+    if not n: return t
+    keep_idx = -1 if (_SMILEY.search(last_bot or "") or random.random() < 0.3) else n - 1
+    i = [0]
+    def _rep(m):
+        idx = i[0]; i[0] += 1
+        return m.group(0) if idx == keep_idx else "\x00"
+    t = _SMILEY.sub(_rep, t)
+    t = re.sub(r"^[ \t]*\x00[ \t]*", "", t, flags=re.M)
+    t = re.sub(r"[ \t]*\x00[ \t]*$", "", t, flags=re.M)
+    t = re.sub(r"(?<=[.!?,…])[ \t]*\x00[ \t]*", " ", t)
+    t = re.sub(r"[ \t]*\x00[ \t]*(?=\S)", ", ", t)
+    t = t.replace("\x00", "")
+    return "\n".join(re.sub(r"[ \t]{2,}", " ", l).strip() for l in t.split("\n") if l.strip()) or t.strip()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TELEGRAM → FANVUE MEMORY LINK
 # The Telegram bot stores every chat in the same Postgres (tg_fans / tg_messages).
@@ -1463,7 +1483,7 @@ KEEPWARM_STYLE = """JÁZMIN KEEP-WARM STÍLUS (Rafael kézi írásmódja alapjá
 HANGNEM: laza, kedves, kicsit szemtelen-kacér, gondoskodó.
 HOSSZ: általában 1 rövid sor (kb. 5-15 szó). Néha 2 rövid külön üzenet. Hosszabbat csak ha a fan szomorú.
 ÍRÁSMÓD: gyakran kisbetűvel kezdesz, a mondat végéről a pont többnyire elmarad, a kérdőjel marad. Az á/é/í megvan, de ö/ő→o, ü/ű→u gyakran: „koszonom”, „jol”, „orulok”, „tobb”, „rolad”. Igekötő néha külön: „el kuldom”, „meg nézed”. Betűnyújtás: „sziaaa”, „koszonooom”, „édeees”, „rendbeeen”.
-EMOJI: fő jel a „:)”, néha „:))”, „:D”, „;)”. Igazi emojiból 0-2: 😋 🥰 😍 😘 🤪 😝 😆 🤭 ❤️. Ne halmozz 😏/😄-t, gondolatjelet (—) ne használj.
+EMOJI: jellemző jel a „:)”, de csak kb. MINDEN MÁSODIK üzenetben (két egymás utáni üzenetben ne), néha „:D”, „;)” vagy semmi. Igazi emojiból 0-2: 😋 🥰 😍 😘 🤪 😝 😆 🤭 ❤️. Ne halmozz 😏/😄-t, gondolatjelet (—) ne használj.
 SZLENG: miujsag, mizus, bocsika, rendicsek, oksi, fincsi, puszaa, sziuus, ahj, jajj. Megszólítás: édes, édesem, kis helyesem.
 NYITÁS: „sziaaa”, „sziuus, miujsag? :)”. ZÁRÁS: „jo éjt, puszaa 😘”.
 BÓKRA: rövid hála + cukiság: „nagyon szépen koszonom, aranyos vagy :)”, „fejezd be mert el fogok piruuulni :))”.
@@ -2082,7 +2102,8 @@ def ask_claude(dynamic_prompt, user_text, smart=True, convo=None, chat_id=None):
                     print("[away] reply talked about its own instructions → dropped", flush=True); return ""
                 if len(reply.split()) > 30:
                     reply = " ".join(re.split(r"(?<=[.!?…])\s+", reply)[:1]) or reply
-                return thin_emoji(reply)          # his own spelling/casing stays (no casualize rewriting)
+                _lb = (db_query("SELECT text FROM messages WHERE chat_id=? AND is_mine=1 ORDER BY timestamp DESC LIMIT 1", (chat_id,), fetch_one=True) or {}).get('text') or ''
+                return thin_smiley(thin_emoji(reply), _lb)   # his own spelling/casing stays (no casualize rewriting)
             return casualize(thin_emoji(reply))
         except anthropic.RateLimitError:
             time.sleep(8 * (attempt + 1))
