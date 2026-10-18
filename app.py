@@ -48,7 +48,7 @@ import anthropic
 BUDAPEST_TZ   = ZoneInfo('Europe/Budapest')
 BOOT_TIME_UTC = datetime.now(timezone.utc)
 WORKER_ID     = uuid.uuid4().hex[:8]
-print(f"[{datetime.now()}] BOT v15 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
+print(f"[{datetime.now()}] BOT v15.3 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
 
 def get_budapest_now():
     return datetime.now(BUDAPEST_TZ).replace(tzinfo=None)
@@ -1163,7 +1163,7 @@ def run_reengagement_loop():
     time.sleep(300)
     while polling_active:
         time.sleep(random.randint(2700, 7200))
-        if get_safe_mode() or not _is_leader or away_mode():
+        if get_safe_mode() or not _is_leader or away_mode() or only_fan():
             continue
         if not (10 <= datetime.now(BUDAPEST_TZ).hour < 22):
             continue
@@ -1278,6 +1278,24 @@ LATER_HINTS = [
 
 def away_mode(): return (load_token('away_mode') or 'off') == 'on'
 def set_away(on): save_token('away_mode', 'on' if on else 'off')
+
+# ── v15.3 SINGLE-FAN (LAB) MODE ──────────────────────────────────────────────
+# ONLY_FAN env (handle like "stiff-magpie-199" or a chat uuid). When set, the bot opens, reads, backfills and answers
+# ONLY that chat — every other chat is never opened, so their messages stay UNREAD. Fails closed: no match = no action.
+def only_fan():
+    return (os.environ.get('ONLY_FAN') or load_token('only_fan') or '').strip().lower().lstrip('@')
+
+def chat_allowed(chat_id, handle=None):
+    t = only_fan()
+    if not t: return True
+    if t == str(chat_id).lower(): return True
+    if handle is None:
+        handle = (db_query("SELECT handle FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}).get('handle') or ''
+    return t == (handle or '').lower().lstrip('@')
+
+LAB_HINT = ("🧪 ISMERKEDÉS: ezzel a sráccal most az a cél, hogy jobban megismerd. Időnként (nem minden üzenetben, max 1 kérdés) "
+            "kérdezz rá lazán valamire, amit még NEM tudsz róla (lásd emlékek) — munka, napja, hobbi, mit csinál hétvégén, mi "
+            "érdekli. Reagálj rendesen arra, amit mond, emlékezz rá, és ne kérdezz rá arra, amit már elmesélt.")
 
 def tag_authors():
     """messages.author: 'fan' | 'bot' | 'rafael' (your own manual messages). 3 set-based updates, fast."""
@@ -1512,6 +1530,7 @@ def away_block(chat_id, fan_text):
     bank is NOT used: it contains sales pressure / meetup lines the bot must never copy."""
     ex = sorted(KEEPWARM_EXAMPLES, key=lambda p: -_overlap(fan_text, p[0]))[:10]
     out = "\n\n" + AWAY_RULES + "\n\n" + KEEPWARM_RULES + "\n\n✍️ STÍLUS:\n" + KEEPWARM_STYLE
+    if only_fan(): out += "\n\n" + LAB_HINT
     out += "\n\n📚 VALÓDI PÉLDÁK a hangnemre (ne másold szó szerint):\n" + "\n".join(f"FAN: {f}\nVÁLASZ: {m}" for f, m in ex)
     return out
 
@@ -1541,7 +1560,8 @@ def backfill_loop():
     while polling_active:
         try:
             if _is_leader and not get_safe_mode() and get_fanvue_token():
-                todo = db_query("SELECT chat_id, fan_name FROM fan_profiles WHERE COALESCE(backfilled,0)=0") or []
+                todo = [f for f in (db_query("SELECT chat_id, fan_name, handle FROM fan_profiles WHERE COALESCE(backfilled,0)=0") or [])
+                        if chat_allowed(f['chat_id'], f.get('handle') or '')]
                 if todo: print(f"[backfill] {len(todo)} chat(s) to import", flush=True)
                 total = 0
                 for f in todo:
@@ -2105,6 +2125,19 @@ def _should_open_chat(chat_id, chat):
     _seen_activity[chat_id] = ts
     return True
 
+_lab_ready = {}
+def _lab_prepare(chat_id, fan_name):
+    """First time we see the lab fan: make sure his WHOLE history is stored and his memory is fresh."""
+    try:
+        r = db_query("SELECT backfilled FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}
+        if not r.get('backfilled'): backfill_chat(chat_id, fan_name)
+        refresh_fan_memory(chat_id, force=True)
+        n = (db_query("SELECT COUNT(*) c FROM messages WHERE chat_id=?", (chat_id,), fetch_one=True) or {}).get('c', 0)
+        print(f"[lab] {fan_name} ready — {n} messages in memory", flush=True)
+        send_telegram_alert(f"🧪 Labor mód: {fan_name} betöltve ({n} üzenet a memóriában). Csak neki válaszolok, más chatet nem nyitok meg.")
+    except Exception as e:
+        print(f"[lab prepare] {e}")
+
 def process_new_messages():
     chats, status = get_chats()
     if not chats: return 0, status
@@ -2117,6 +2150,11 @@ def process_new_messages():
             if not chat_id: continue
             fan_name = user.get('displayName', 'ismeretlen') or 'ismeretlen'
             handle = user.get('handle', '') or ''
+            if not chat_allowed(chat_id, handle): continue          # single-fan mode: never open other chats
+            if only_fan() and not _lab_ready.get(chat_id):
+                get_or_create_fan(chat_id, fan_name, handle, 0)
+                _lab_ready[chat_id] = True
+                threading.Thread(target=_lab_prepare, args=(chat_id, fan_name), daemon=True).start()
             if not _should_open_chat(chat_id, chat): continue
             api_messages = get_messages(chat_id)
             if not api_messages:
@@ -2196,6 +2234,8 @@ def send_due_batches():
     sent = 0; handled = set()
     for item in get_due_batches():
         chat_id = item.get('chat_id'); batch_id = item['id']
+        if not chat_allowed(chat_id):
+            db_query("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,)); continue
         try:
             if chat_id in handled:
                 db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=? AND status='pending'", (batch_id,)); continue
@@ -2624,7 +2664,8 @@ def status_text():
             f"Fanvue kapcsolat: {'🟢 rendben' if tok != 'dead' and (load_token('refresh_token') or '') else '🔴 újracsatlakoztatás kell'}\n"
             f"Telegram bot: {'🟢 BE' if tg_bot_enabled() else '⏸ KI'} · {'él ✅' if tg_alive else 'nem jelentkezik ⚠️ (Railway-en fut?)'}\n"
             f"Függő válaszok: {pend.get('c', 0)} · ma elküldve: {sent.get('c', 0)} · összekötött TG fanok: {linked.get('c', 0)}\n"
-            f"Keep-warm mód: {'🏝️ BE' if away_mode() else 'KI'} · Tanulás: {load_token('learn_status') or 'még nem futott'}")
+            f"Keep-warm mód: {'🏝️ BE' if away_mode() else 'KI'} · Tanulás: {load_token('learn_status') or 'még nem futott'}"
+            + (f"\n🧪 Labor mód: CSAK @{only_fan()} — más chatet nem nyit meg" if only_fan() else ""))
 
 def handle_control(data):
     """Run one control action; returns a short confirmation text."""
@@ -3121,6 +3162,11 @@ try:
     if load_token('v13_first_boot_done') != 'yes':
         set_safe_mode(True); save_token('v13_first_boot_done', 'yes')
         print("[boot] v13 first launch → Fanvue bot starts OFF (switch on from the control panel)")
+    try:   # v15.3: one-time switch-on for single-fan lab mode (only when ONLY_FAN + LAB_START are set; /back still turns it off)
+        if only_fan() and os.environ.get('LAB_START') == '1' and load_token('lab_started') != only_fan():
+            cancel_stale_pending(0); set_away(True); set_fanvue(True); save_token('lab_started', only_fan())
+            print(f"[boot] LAB mode ON for @{only_fan()} only", flush=True)
+    except Exception as e: print(f"[boot lab] {e}")
     print(f"[boot] Fanvue bot is {'ON' if not get_safe_mode() else 'OFF'} · Telegram bot is {'ON' if (load_token('tg_enabled') or 'on') != 'off' else 'OFF'}")
 except Exception as e:
     print(f"[ERR] boot state {e}")
