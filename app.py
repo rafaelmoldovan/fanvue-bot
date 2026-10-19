@@ -2423,7 +2423,8 @@ def send_due_batches():
                 len(fan_text_all.strip()) >= 25,          # v14: real conversation → smart model (Haiku felt "dead")
                 bool(re.search(r"dr[áa]ga|nincs p[ée]nz|megveszem|mennyibe|\b[áa]r[a]?\b|feloldom|unlock|fizet", fan_text_all, re.I)),
             ])
-            if away_mode() and keepwarm_excluded(chat_id):
+            if away_mode() and keepwarm_excluded(chat_id) and not (only_fan() == 'allowlist' and chat_allowed(chat_id)):
+                print(f"[away] {chat_id[:8]} excluded from keep-warm → skipped", flush=True)
                 db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,)); continue
             if away_mode() and override is None:
                 dyn += away_block(chat_id, fan_text_all)
