@@ -928,6 +928,39 @@ def thin_smiley(t, last_bot=""):
     t = t.replace("\x00", "")
     return "\n".join(re.sub(r"[ \t]{2,}", " ", l).strip() for l in t.split("\n") if l.strip()) or t.strip()
 
+# v7.2: time-of-day sanity — no "jó éjt" at 15:48, no "jó reggelt" in the evening.
+_NIGHT_BYE = re.compile(r"\bj[óo]\s*[ée]j(t|szak[áa]t)\b|\bsz[ée]p\s+[áa]lm\w*|\baludj\s+j[óo]l\b|\b[áa]lmodj\s+sz[ée]p\w*|\bj[óo]\s+alv[áa]st\b", re.I)
+_MORNING = re.compile(r"\bj[óo]\s+reggelt\b", re.I)
+_EVENING = re.compile(r"\bsz[ée]p\s+est[ée]t\b", re.I)
+_DAYWISH = re.compile(r"\bsz[ée]p\s+(napot|d[ée]lut[áa]nt)\b", re.I)
+_SLEEP_TALK = re.compile(r"alud|alsz|lefek|f[áa]radt|[áa]gyba|szundi|pihen|[ée]jt|[ée]jszak", re.I)
+
+def daypart_wish(h):
+    if 4 <= h < 12: return "szép napot"
+    if 12 <= h < 17: return "szép délutánt"
+    if 17 <= h < 21: return "szép estét"
+    return "jó éjt"
+
+def fix_daytime(t, h, fan_text=""):
+    """Swap greetings that don't fit the Budapest hour h. Night wishes stay if it's late OR he said he's going to sleep."""
+    t = t or ""
+    night_ok = h >= 21 or h < 4 or bool(_SLEEP_TALK.search(fan_text or ""))
+    if not night_ok and _NIGHT_BYE.search(t):
+        t = _NIGHT_BYE.sub(daypart_wish(h), t, count=1)
+        t = _NIGHT_BYE.sub("", t)
+    if not (4 <= h < 11) and _MORNING.search(t):
+        t = _MORNING.sub("", t).strip(" ,")
+        if not re.search(r"\w", t): t = "szia"
+        elif len(t.split()) <= 1 and not re.match(r"(szi|hel|hey|hali|cs[aá]|mizu)", t, re.I): t = "szia " + t
+    if h < 16 and h >= 4 and _EVENING.search(t):
+        t = _EVENING.sub(daypart_wish(h), t)
+    if (h >= 19 or h < 4) and _DAYWISH.search(t):
+        t = _DAYWISH.sub("szép estét" if h < 21 and h >= 4 else "jó éjt", t)
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    t = re.sub(r"\s+([,.!?])", r"\1", t)
+    t = re.sub(r",\s*,", ",", t)
+    return "\n".join(l.strip(" ,") for l in t.split("\n") if l.strip(" ,")) or t
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TELEGRAM → FANVUE MEMORY LINK
 # The Telegram bot stores every chat in the same Postgres (tg_fans / tg_messages).
@@ -1485,7 +1518,7 @@ HOSSZ: általában 1 rövid sor (kb. 5-15 szó). Néha 2 rövid külön üzenet.
 ÍRÁSMÓD: gyakran kisbetűvel kezdesz, a mondat végéről a pont többnyire elmarad, a kérdőjel marad. Az á/é/í megvan, de ö/ő→o, ü/ű→u gyakran: „koszonom”, „jol”, „orulok”, „tobb”, „rolad”. Igekötő néha külön: „el kuldom”, „meg nézed”. Betűnyújtás: „sziaaa”, „koszonooom”, „édeees”, „rendbeeen”.
 EMOJI: jellemző jel a „:)”, de csak kb. MINDEN MÁSODIK üzenetben (két egymás utáni üzenetben ne), néha „:D”, „;)” vagy semmi. Igazi emojiból 0-2: 😋 🥰 😍 😘 🤪 😝 😆 🤭 ❤️. Ne halmozz 😏/😄-t, gondolatjelet (—) ne használj.
 SZLENG: miujsag, mizus, bocsika, rendicsek, oksi, fincsi, puszaa, sziuus, ahj, jajj. Megszólítás: édes, édesem, kis helyesem.
-NYITÁS: „sziaaa”, „sziuus, miujsag? :)”. ZÁRÁS: „jo éjt, puszaa 😘”.
+NYITÁS: „sziaaa”, „sziuus, miujsag?”. ZÁRÁS a napszakhoz illően: napközben „szép napot, puszaa 😘”, délután „szép délutánt”, este „szép estét”, „jo éjt, puszaa 😘” CSAK késő este (21 után) vagy ha ő megy aludni.
 BÓKRA: rövid hála + cukiság: „nagyon szépen koszonom, aranyos vagy :)”, „fejezd be mert el fogok piruuulni :))”.
 HUMOR: csipkelődő, önironikus: „nekem általában igazam szokott lenni :)”, „Vesziteni is tudni kell 😆”.
 FLÖRT: titokzatos, visszakérdez: „deritsd ki :)”, „Nem ol meg a kivancsisag? 😝”.
@@ -2103,6 +2136,7 @@ def ask_claude(dynamic_prompt, user_text, smart=True, convo=None, chat_id=None):
                 if len(reply.split()) > 30:
                     reply = " ".join(re.split(r"(?<=[.!?…])\s+", reply)[:1]) or reply
                 _lb = (db_query("SELECT text FROM messages WHERE chat_id=? AND is_mine=1 ORDER BY timestamp DESC LIMIT 1", (chat_id,), fetch_one=True) or {}).get('text') or ''
+                reply = fix_daytime(reply, get_budapest_now().hour, user_text or '')
                 return thin_smiley(thin_emoji(reply), _lb)   # his own spelling/casing stays (no casualize rewriting)
             return casualize(thin_emoji(reply))
         except anthropic.RateLimitError:
