@@ -48,7 +48,7 @@ import anthropic
 BUDAPEST_TZ   = ZoneInfo('Europe/Budapest')
 BOOT_TIME_UTC = datetime.now(timezone.utc)
 WORKER_ID     = uuid.uuid4().hex[:8]
-print(f"[{datetime.now()}] BOT v15.6 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
+print(f"[{datetime.now()}] BOT v15.8 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
 
 def get_budapest_now():
     return datetime.now(BUDAPEST_TZ).replace(tzinfo=None)
@@ -2206,13 +2206,74 @@ def _should_open_chat(chat_id, chat):
     return True
 
 _lab_ready = {}
+def _openers():
+    try: return json.loads(load_token('fv_openers') or '{}')
+    except Exception: return {}
+
+def send_opener(chat_id, fan_name, hint):
+    """Rafael asked the bot to write FIRST to this fan with a given idea (e.g. after he bought something)."""
+    history = get_history(chat_id, 80)
+    dyn = build_dynamic_prompt(chat_id, fan_name or '', get_real_name(chat_id), get_facts(chat_id), history, get_time_context(), '')
+    if away_mode(): dyn += away_block(chat_id, hint)
+    dyn += ("\n\n✉️ MOST TE ÍRSZ NEKI ELŐSZÖR (Rafael kérte): " + hint +
+            "\nEgy rövid, természetes üzenet a saját stílusodban. Ha az utolsó üzenete még megválaszolatlan, arra is reagálj benne.")
+    convo = build_convo(history, "[most te írsz neki az utasítás szerint]")
+    msg = ask_claude(dyn, "", smart=True, convo=convo, chat_id=chat_id)
+    if not msg: print(f"[opener] {chat_id[:8]}: empty → not sent", flush=True); return False
+    if send_fanvue_message(chat_id, msg):
+        now_iso = datetime.now().isoformat()
+        save_message_to_db(f"bot_open_{now_iso}_{chat_id}", chat_id, fan_name or '', MY_UUID, msg, now_iso, is_mine=True, facts_done=1, vision_done=1)
+        db_query("UPDATE messages SET was_replied=1 WHERE chat_id=? AND is_mine=0", (chat_id,))
+        db_query("UPDATE scheduled_replies SET status='cancelled' WHERE chat_id=? AND status='pending'", (chat_id,))
+        print(f"[opener] {fan_name}: {msg}", flush=True)
+        return True
+    return False
+
+def _pending_links():
+    try: return json.loads(load_token('fv_pending_links') or '{}')
+    except Exception: return {}
+
+def resolve_tg_link(chat_id, handle, fan_name=''):
+    """A Fanvue fan Rafael told us is X on Telegram: find X in tg_fans, link the memory, and stop the TG bot for him
+    (he's on Fanvue now, the Telegram bot must not keep chatting). Several matches → Rafael picks with a button."""
+    pend = _pending_links(); h = norm_handle(handle)
+    name = pend.get(h)
+    if not name: return
+    rows = _fan_rows_tg(name)
+    if len(rows) == 1:
+        tg = rows[0]['user_id']
+        if link_tg_fan(chat_id, tg, fan_name, 'kérésre'):
+            for sql in ("UPDATE tg_fans SET paused=1, manual_stop=1 WHERE user_id=?", "UPDATE tg_fans SET paused=1 WHERE user_id=?"):
+                try: db_query(sql, (str(tg),)); break
+                except Exception: continue
+            pend.pop(h, None); save_token('fv_pending_links', json.dumps(pend))
+            print(f"[link] @{h} ↔ TG {tg} linked; TG bot paused for him", flush=True)
+    elif rows:
+        send_telegram_alert(f"🔗 Több Telegramos „{name}” van — melyik a Fanvue @{h}?",
+                            buttons=[[(tg_display(r)[:30] + f" · {r.get('msg_count') or 0}", f"link:{chat_id}:{r['user_id']}")] for r in rows[:6]])
+        pend.pop(h, None); save_token('fv_pending_links', json.dumps(pend))
+    else:
+        send_telegram_alert(f"🔗 Nem találok „{name}” nevű Telegramos fant a @{h} összekötéséhez. Írd a pontos Telegram nevét: /fv_link {h} <név>")
+        pend.pop(h, None); save_token('fv_pending_links', json.dumps(pend))
+
 def _lab_prepare(chat_id, fan_name):
     """First time we see an allowed fan: pull his WHOLE history again (catches everything since the last download) and
     rebuild his memory BEFORE the first reply."""
     try:
         backfill_chat(chat_id, fan_name)
         db_query("UPDATE fan_profiles SET backfilled=1 WHERE chat_id=?", (chat_id,))
+        try:
+            h_ = (db_query("SELECT handle FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}).get('handle') or ''
+            if norm_handle(h_) in _pending_links(): resolve_tg_link(chat_id, h_, fan_name)
+        except Exception as e: print(f"[lab link] {e}")
         refresh_fan_memory(chat_id, force=True)
+        try:
+            h2 = norm_handle((db_query("SELECT handle FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}).get('handle') or '')
+            op = _openers()
+            if h2 in op:
+                hint = op.pop(h2); save_token('fv_openers', json.dumps(op))
+                send_opener(chat_id, fan_name, hint)
+        except Exception as e: print(f"[opener] {e}")
         n = (db_query("SELECT COUNT(*) c FROM messages WHERE chat_id=?", (chat_id,), fetch_one=True) or {}).get('c', 0)
         mem = (db_query("SELECT memory_notes FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}).get('memory_notes') or ''
         print(f"[lab] {fan_name} ready — {n} messages in memory, notes={len(mem)} chars", flush=True)
@@ -2757,6 +2818,26 @@ def fv_allow_cmd(act, arg):
     if only_fan() != 'allowlist':
         return "A per-fan mód nincs bekapcsolva a szerveren (ONLY_FAN=allowlist kell). Szólj Claude-nak."
     al = allowed_set()
+    if act == "fvsay":
+        parts = (arg or "").split(None, 1)
+        if len(parts) < 2: return "Így: /fv_say <fanvue név> <mit írjon nagyjából>, pl.: /fv_say zsolti_kovari köszönd meg kedvesen hogy megvette"
+        h, idea = norm_handle(parts[0]), parts[1].strip()
+        op = _openers(); op[h] = idea; save_token('fv_openers', json.dumps(op))
+        set_allowed(al | {h}); cancel_stale_pending(); set_away(True); set_fanvue(True)
+        for cid in chat_ids_for(h): _lab_ready.pop(cid, None)
+        return f"✉️ @{h}: újratöltöm az emlékeit, és írok neki elsőként („{idea[:60]}”). Utána én viszem a beszélgetést. Leállítás: /fv_stop {h}"
+    if act == "fvlink":
+        parts = (arg or "").split(None, 1)
+        if len(parts) < 2: return "Így: /fv_link <fanvue név> <telegram név>, pl.: /fv_link obnoxious-sparrow-446 Krisz Szabo"
+        h, tgname = norm_handle(parts[0]), parts[1].strip()
+        pend = _pending_links(); pend[h] = tgname; save_token('fv_pending_links', json.dumps(pend))
+        set_allowed(al | {h}); cancel_stale_pending(); set_away(True); set_fanvue(True)
+        cids = chat_ids_for(h)
+        for cid in cids:
+            _lab_ready.pop(cid, None)
+            resolve_tg_link(cid, h)
+        return (f"🔗 @{h} ↔ Telegram „{tgname}”: " + ("összekötöm most." if cids else "összekötöm, amint megnyitom a chatjét (pár másodperc).")
+                + f"\n▶️ Fanvue bot BE neki is. Most aktív: " + ", ".join("@" + x for x in sorted(allowed_set())))
     if act == "fvallowlist":
         return ("🟢 Fanvue bot ezeknek válaszol: " + ", ".join("@" + h for h in sorted(al))) if al else "⏸ Senkinek nem válaszol most."
     hs = [norm_handle(x) for x in re.split(r"[\s,]+", arg or "") if norm_handle(x)]
@@ -2836,7 +2917,7 @@ _CMD_MAP = {"/start": "menu", "/menu": "menu", "/status": "status", "/allapot": 
             "/fanvue_be": "fv:on", "/fanvue_ki": "fv:off", "/telegram_be": "tg:on", "/telegram_ki": "tg:off",
             "/reconnect": "reconnect", "/ujracsatlakozas": "reconnect",
             "/learn": "learn", "/tanulj": "learn", "/away": "away:on", "/tavol": "away:on", "/back": "away:off", "/vissza": "away:off",
-            "/fv_start": "fvallow", "/fvstart": "fvallow", "/fv_stop": "fvdeny", "/fvstop": "fvdeny", "/fv_list": "fvallowlist", "/fvlist": "fvallowlist",
+            "/fv_start": "fvallow", "/fvstart": "fvallow", "/fv_stop": "fvdeny", "/fvstop": "fvdeny", "/fv_list": "fvallowlist", "/fvlist": "fvallowlist", "/fv_link": "fvlink", "/fvlink": "fvlink", "/fv_say": "fvsay", "/fvsay": "fvsay",
             "/fans": "fvlist", "/fanok": "fvlist", "/tgfans": "tglist", "/tgfanok": "tglist", "/fan": "search"}
 
 def control_bot_loop():
@@ -2887,7 +2968,7 @@ def control_bot_loop():
                         if str(m.get('chat', {}).get('id')) != str(TELEGRAM_CHAT_ID): continue
                         cmd = (m.get('text') or '').strip().split()[0].split('@')[0].lower() if (m.get('text') or '').strip() else ''
                         act = _CMD_MAP.get(cmd)
-                        if act in ("fvallow", "fvdeny", "fvallowlist"):
+                        if act in ("fvallow", "fvdeny", "fvallowlist", "fvlink", "fvsay"):
                             arg_ = " ".join((m.get('text') or '').split()[1:]).strip()
                             send_telegram_alert(fv_allow_cmd(act, arg_)); continue
                         if act == "search":
@@ -3287,6 +3368,25 @@ try:
             db_query("UPDATE scheduled_replies SET status='cancelled' WHERE status IN ('pending','sending')")
             print("[boot] ONLY_FAN=off → Fanvue bot OFF", flush=True)
     except Exception as e: print(f"[boot off] {e}")
+    try:   # v15.8: opener seed "handle=idea" (once per value) → allowlist + first message after memory reload
+        os_ = (os.environ.get('FV_OPENER_SEED') or '').strip()
+        if only_fan() == 'allowlist' and os_ and '=' in os_ and load_token('fv_opener_seed') != os_:
+            h, idea = os_.split('=', 1)
+            op = _openers(); op[norm_handle(h)] = idea.strip(); save_token('fv_openers', json.dumps(op)); save_token('fv_opener_seed', os_)
+            set_allowed(allowed_set() | {norm_handle(h)}); set_away(True); set_fanvue(True)
+            print(f"[boot] opener queued for @{norm_handle(h)}", flush=True)
+    except Exception as e: print(f"[boot opener] {e}")
+    try:   # v15.7: link seed "fvhandle=Telegram Name;..." (once per value) → pending link + allowlist
+        ls = (os.environ.get('FV_LINK_SEED') or '').strip()
+        if only_fan() == 'allowlist' and ls and load_token('fv_link_seed') != ls:
+            pend = _pending_links()
+            for item in ls.split(';'):
+                if '=' in item:
+                    h, nm = item.split('=', 1); pend[norm_handle(h)] = nm.strip()
+            save_token('fv_pending_links', json.dumps(pend)); save_token('fv_link_seed', ls)
+            set_allowed(allowed_set() | set(pend.keys())); cancel_stale_pending(0); set_away(True); set_fanvue(True)
+            print(f"[boot] pending TG links: {pend}", flush=True)
+    except Exception as e: print(f"[boot link] {e}")
     try:   # v15.6: allowlist seed (once per seed value) + switch on once
         seed = (os.environ.get('FV_ALLOW_SEED') or '').strip()
         if only_fan() == 'allowlist' and seed and load_token('fv_allow_seed') != seed:
