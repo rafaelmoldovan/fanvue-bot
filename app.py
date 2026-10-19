@@ -1757,31 +1757,28 @@ def _kw_examples():
     return out
 KEEPWARM_EXAMPLES_HZ = _kw_examples()
 
-# A few small, concrete things from "her day" (same for every fan on a given day; picked from the date → no DB state).
-KW_DAY_POOL = [
-    "délelőtt kiöntötted a kávét a pólódra", "anyukád hívott, kicsit kiakasztott", "új receptet próbáltál: lecsó, félig sikerült",
-    "elmentél boltba és pont a tejet felejtetted el", "egész délelőtt takarítottál", "lusta napod van, sokáig aludtál",
-    "délután lent voltál edzeni, fáj a lábad", "néztél pár részt a Wednesday-ből", "a szomszéd egész nap fúr valamit",
-    "kifestetted a körmöd pirosra", "elszakadt a fülhallgatód", "barátnőddel beszéltél telefonon egy órát",
-    "rendeltél pizzát, mert nem volt kedved főzni", "sétáltál egyet a Margitszigeten", "mostál, tele a lakás ruhával",
-]
-
-def kw_today_bits(day=None):
-    day = day or get_budapest_now().strftime('%Y-%m-%d')
-    return random.Random("jazmin-day-" + day).sample(KW_DAY_POOL, 3)
+# Her day lives in humanizer.day_story(chat, date) (v16.1: per chat, consistent, no laundry/lusta fillers).
 
 def thin_emoji_kw(t):
-    """Keep-warm emoji: Rafael's palette is allowed (😋🥰😘🤭…); off-palette/topic emoji (🐶🌹) dropped; max 2."""
-    t = t or ""
-    found = _EMOJI_RE.findall(t)
-    if not found or hz is None: return t
-    base = re.sub(r"[ \t]{2,}", " ", _EMOJI_RE.sub("", t)).strip()
-    if not base:                                    # emoji-only reply ("😘😘") stays as it is
-        return t.strip()
-    keep = [e for e in found if e in hz.KEEPWARM_EMOJI]
+    """Keep-warm emoji: Rafael's palette is allowed (😋🥰😘🤭…); off-palette/topic emoji (🐶🌹) dropped; max 2 at the end.
+    v16.1: an emoji BETWEEN two sentences is a sentence boundary — it is never deleted (round 1: 'jo éjt 😘 jo volt a
+    film?' became the garbled 'jo éjt jo volt a film?'); off-palette ones there are swapped for ':)'."""
+    t = (t or "").strip()
+    if not _EMOJI_RE.search(t) or hz is None: return t
+    m = re.search(r"((?:\s*[\U0001F000-\U0001FAFF☀-➿←-⇿⬀-⯿️™ℹ])+)\s*$", t)
+    tail = m.group(1) if m else ""
+    body = t[:m.start()] if m else t
+    def _inner(mm):
+        e = mm.group(0)
+        return e if any(ch in hz.KEEPWARM_EMOJI for ch in e) else " :) "
+    body = re.sub(r"(?:[\U0001F000-\U0001FAFF☀-➿←-⇿⬀-⯿️™ℹ])+", _inner, body)
+    body = re.sub(r"[ \t]{2,}", " ", body).strip()
+    if not body:                                    # emoji-only reply ("😘😘") stays as it is
+        return t
+    keep = [e for e in _EMOJI_RE.findall(tail) if e in hz.KEEPWARM_EMOJI]
     if not keep or random.random() < 0.25:
-        return base
-    return base + " " + "".join(keep[:2])
+        return body
+    return body + " " + "".join(keep[:2])
 
 def style_preview(n=6):
     """What the bot WOULD answer in away mode to the latest fan message in a few chats — nothing is sent."""
@@ -2401,6 +2398,8 @@ _last_sent_at = {}          # chat_id → epoch of her last sent bubble (hot cha
 
 KW_HUMAN_REGEN = ("FONTOS: az előző válaszod chatbotos volt (validálás, összefoglalás, elemzés, tanács). Írd újra úgy, mint egy "
                   "19 éves lány a telefonján: rövid, spontán reakció, kisbetűvel — pontosan a 🎯 MOST sor szerint.")
+KW_INVITE_REGEN = ("FONTOS: az előző válaszod áthívta magadhoz / találkozásra utalt („gyere át”, „aludj nálam”, „meglátogatsz”). "
+                   "Ez tilos (Fanvue szabály). Írd újra úgy, hogy NEM hívod át és nem utalsz személyes találkozásra.")
 KW_BANNED_HINT = ("FONTOS: az előző válaszod tiltott fordulatot tartalmazott (attól függ / mit értesz X alatt / privát oldal). "
                   "EZ ITT a Fanvue = a privát oldalad; írd újra természetesen, e nélkül.")
 
@@ -2463,7 +2462,7 @@ def _kw_profile(chat_id):
     return db_query("SELECT fan_note, ppv_pending, tg_handle, tg_user_id, tg_summary, ai_confirmed, memory_notes "
                     "FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}
 
-def build_keepwarm_prompt(prof, real_name, plan, fan_text, told, now_bp, extra_hints=""):
+def build_keepwarm_prompt(prof, real_name, plan, fan_text, told, now_bp, extra_hints="", chat_key="", facts=()):
     """Dynamic (per-turn) half of the keep-warm system prompt. Short on purpose."""
     names = ["hétfő", "kedd", "szerda", "csütörtök", "péntek", "szombat", "vasárnap"]
     h = now_bp.hour
@@ -2471,7 +2470,14 @@ def build_keepwarm_prompt(prof, real_name, plan, fan_text, told, now_bp, extra_h
             else "este" if h < 23 else "késő éjjel")
     day = now_bp.strftime('%Y-%m-%d')
     p = f"MOST: {names[now_bp.weekday()]}, {now_bp.strftime('%H:%M')} ({part}).\n"
-    p += "MA veled (csak ha szóba kerül, egyszerre max egy): " + "; ".join(kw_today_bits(day)) + ".\n"
+    if plan.turn_type == "initiative" or (plan.he_asked and plan.turn_type not in ("care",)):
+        # her consistent "today" for THIS chat (v16.1): earlier parts of the day + now; only when it can come up
+        story = hz.day_story(chat_key or "x", day)
+        order = ["morning", "day", "evening", "night"]
+        cur = hz.daypart(h)
+        past = [story[d][0][0] for d in order[:order.index(cur)] if d != "night"]
+        p += ("MA veled (csak ha kérdezi vagy a 🎯 MOST kéri; egyszerre max egy, a saját szavaiddal): "
+              + ("korábban: " + "; ".join(past) + ". " if past else "") + "most: " + "; ".join(x[0] for x in story[cur]) + ".\n")
     if real_name:
         p += f"A valódi neve: {real_name} — ritkán, természetesen szólíthatod így.\n"
     else:
@@ -2493,6 +2499,9 @@ def build_keepwarm_prompt(prof, real_name, plan, fan_text, told, now_bp, extra_h
     if told:
         lab = [hz.TOPIC_LABELS_HU.get(t, t) + (" (ma)" if d == day else "") for t, d in sorted(told.items())]
         p += "🗣️ MÁR ELMONDTAD NEKI MAGADRÓL: " + ", ".join(lab) + " — ezt ne meséld el újra (ha ő kérdezi, egy szóval utalj rá).\n"
+    if facts:
+        p += ("🧷 AMIT MÁR MONDTÁL MAGADRÓL NEKI (maradj következetes, ne mondj ellent): "
+              + "; ".join(f for _, f in list(facts)[-10:]) + ".\n")
     if extra_hints:
         p += "\n" + extra_hints.strip() + "\n"
     ex = hz.select_examples(KEEPWARM_EXAMPLES_HZ, plan, fan_text or "", k=6)
@@ -2581,7 +2590,7 @@ def _ask_claude_kw(dynamic_prompt, user_text, convo, plan, her_recent, chat_id=N
     hz.postprocess does that afterwards. Returns text (may contain one newline = two bubbles) or ''."""
     model = REPLY_MODEL
     msgs = _with_most_line(convo or [{"role": "user", "content": user_text or "[…]"}], hz.render_plan_instruction(plan))
-    max_tokens = 40 + 9 * max(int(plan.max_words or 0), 3) + (20 if plan.bubbles == 2 else 0)
+    max_tokens = 50 + 12 * max(int(plan.max_words or 0), 3) + (20 if plan.bubbles == 2 else 0)
     if plan.bypass: max_tokens = 160
     system = [{"type": "text", "text": KEEPWARM_SYSTEM, "cache_control": {"type": "ephemeral"}},
               {"type": "text", "text": dynamic_prompt}]
@@ -2613,6 +2622,10 @@ def _ask_claude_kw(dynamic_prompt, user_text, convo, plan, her_recent, chat_id=N
                 print("[safety] meetup/address → regenerating", flush=True)
                 r2 = scrub_urls(collapse_doubles(_again(FV_MEETUP_REGEN)))
                 reply = r2 if (r2 and not leaks_meetup(r2)) else random.choice(ADDRESS_DEFLECT)
+            if hz.has_invitation(reply):                 # v16.1: "aludnál nálam?", "gyere át" = meetup implication
+                print("[safety] invitation → regenerating", flush=True)
+                r2 = scrub_urls(collapse_doubles(_again(KW_INVITE_REGEN)))
+                reply = r2 if (r2 and not hz.has_invitation(r2) and not leaks_meetup(r2)) else ""
             reply = re.sub(r"^\s*(j[áa]zmin|rafael|v[áa]lasz|bot)\s*:\s*", "", reply, flags=re.I)
             if re.search(r"keep-?warm|utas[íi]t[áa]s|m[óo]dban|\bprompt\b|🎯", reply, re.I):
                 print("[away] reply talked about its own instructions → dropped", flush=True); return ""
@@ -2636,15 +2649,43 @@ def _ask_claude_kw(dynamic_prompt, user_text, convo, plan, her_recent, chat_id=N
 
 def _kw_unsafe(text, ai_turn=False):
     t = text or ""
-    return bool(_CLAIM_HUMAN.search(t) or leaks_meetup(t) or _FAKE_SEND.search(t)
+    return bool(_CLAIM_HUMAN.search(t) or leaks_meetup(t) or _FAKE_SEND.search(t) or (hz is not None and hz.has_invitation(t))
                 or (not ai_turn and _MENTIONS_AI_OUT.search(t)))
 
+HZ_CRITIC_ON = lambda: (os.environ.get('HZ_CRITIC', '1') or '1').strip() != '0'
+
+def run_hz_critic(history, fan_text, reply, plan):
+    """v16.1 Haiku critic: flags specific defects (non_sequitur, doesnt_answer_question, garbled, invitation, curt_or_cold,
+    tease_when_sad, premature_goodbye, repeated_selfshare, too_long). Never blocks on errors."""
+    turns = []
+    h = [m for m in (history or []) if (m.get('text') or '').strip()]
+    while h and not h[-1].get('is_mine'):
+        h.pop()                                         # his latest message(s) are passed separately
+    for m in h[-6:]:
+        turns.append(("HER" if m.get('is_mine') else "HIM", (m.get('text') or '').strip()[:300]))
+    try:
+        r = llm_create(model=UTIL_MODEL, max_tokens=120,
+                       system=hz.CRITIC2_SYSTEM,
+                       messages=[{"role": "user", "content": hz.build_critic2_prompt(turns, fan_text, reply, plan)}])
+        c = hz.parse_critic2(r.text)
+    except Exception as e:
+        print(f"[hz-critic] {e}", flush=True)
+        c = {"flags": [], "fix": ""}
+    if plan.max_words and hz.word_count(reply) > max(22, plan.max_words * 2) and "too_long" not in c["flags"]:
+        c["flags"].append("too_long")
+    if hz.has_invitation(reply) and "invitation" not in c["flags"]:
+        c["flags"].append("invitation")
+    return c
+
+KW_SAFE_FALLBACK = ["hihi 🙈", "jajj :)", "na ne már :D"]
+
 def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_overrides=None, *, lock=None,
-                      extra_hints="", is_followup=False, now_bp=None, rng=None, hot=None):
-    """PURE keep-warm turn: planner → compact prompt → ask_claude → post-filters (+ at most one regeneration).
-    No sending and no DB writes (reads only, and none at all when profile_overrides is given).
+                      extra_hints="", is_followup=False, now_bp=None, rng=None, hot=None, critic=None):
+    """PURE keep-warm turn: planner → compact prompt → ask_claude → post-filters → Haiku critic (+ at most ONE
+    regeneration). No sending and no DB writes (reads only, and none at all when profile_overrides is given).
     history: [{text, is_mine, timestamp}] oldest→newest, INCLUDING the fan message(s) being answered.
-    Returns dict(plan, bubbles, delay_s, followup, read_delay_s, reply_window_s, typing_s, raw, reasons, told)."""
+    Returns dict(plan, bubbles, delay_s, followup, read_delay_s, reply_window_s, typing_s, raw, reasons, told, facts,
+    critic, critic_fix, critic_final)."""
     rng = rng or random.Random()
     state = state or hz.ChatState()
     now_bp = now_bp or get_budapest_now()
@@ -2654,22 +2695,28 @@ def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_
     secs = _secs_since_her_last(history)
     n_fan = len([m for m in (history or []) if not m.get('is_mine')])
     told_today = state.told_on(day) | _told_today_from_history(history, day)
+    chat_key = str(chat_id or "")
+    hh = [m for m in (history or []) if (m.get('text') or '').strip()]
+    while hh and not hh[-1].get('is_mine'):
+        hh.pop()
+    fan_recent = [(m.get('text') or '').strip() for m in hh if not m.get('is_mine')][-3:]
+    ctx = hz.TurnContext(fan_text, her_recent, list(state.turns), hour, n_fan, secs, lock, fan_recent=fan_recent,
+                         chat_key=chat_key, day=day, told_today=told_today)
     if is_followup:
-        dp = hz.daypart(hour)
-        used = hz.recent_topics(her_recent[-6:]) | told_today
-        pool = [x for x in hz.INITIATIVE_SEEDS[dp] if x[1] not in used] or hz.INITIATIVE_SEEDS[dp]
-        seed, topic = rng.choice(pool)
+        seed, topic = hz._seed_for(ctx, her_recent, rng)
         plan = hz.TurnPlan("initiative", hz.sample_length("initiative", rng, hour=hour), False, seed=seed, seed_topic=topic,
                            spelling="plain" if rng.random() < hz.PLAIN_SPELLING_P else "accent", lowercase=rng.random() < 0.85)
     else:
-        plan = hz.plan_turn(hz.TurnContext(fan_text, her_recent, list(state.turns), hour, n_fan, secs, lock), rng)
+        plan = hz.plan_turn(ctx, rng)
     is_hot = hz.is_hot(secs) if hot is None else hot
-    read_delay = 0.0 if is_followup else hz.sample_read_delay(fan_text, hour, is_hot, rng)
+    came_back = secs is None or secs > 1800                    # his first message after a pause: no long gap
+    no_gap = came_back or plan.he_asked or plan.sad
+    read_delay = 0.0 if is_followup else hz.sample_read_delay(fan_text, hour, is_hot, rng, no_gap=no_gap)
     window = 0.0 if is_followup else hz.sample_reply_window(fan_text, 1, rng)
     since_fu = (time.time() - state.last_followup_at) if state.last_followup_at else None
     out = {"plan": plan, "bubbles": [], "delay_s": round(read_delay + window, 1), "followup": None,
            "read_delay_s": round(read_delay, 1), "reply_window_s": round(window, 1), "typing_s": 0.0,
-           "raw": "", "reasons": [], "told": []}
+           "raw": "", "reasons": [], "told": [], "facts": [], "critic": [], "critic_fix": "", "critic_final": None}
     if plan.skip:
         out["followup"] = None if is_followup else hz.maybe_followup_delay(plan, hour, rng, since_fu)
         return out
@@ -2680,33 +2727,53 @@ def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_
         told.setdefault(t, "")
     for t in told_today:
         told[t] = day
-    dyn = build_keepwarm_prompt(prof, real_name, plan, fan_text, told, now_bp, extra_hints)
+    dyn = build_keepwarm_prompt(prof, real_name, plan, fan_text, told, now_bp, extra_hints, chat_key=chat_key,
+                                facts=state.facts)
     user_msg = fan_text if not is_followup else "[pár perce nem írt semmit — most te írsz neki magadtól, a 🎯 MOST sor szerint]"
     convo = build_convo_kw(history, user_msg)
     gen_chat = chat_id if profile_overrides is None else None
+    use_critic = HZ_CRITIC_ON() if critic is None else critic
     r1 = ask_claude(dyn, user_msg, smart=True, convo=convo, chat_id=gen_chat, plan=plan, her_recent=her_recent)
     out["raw"] = r1
     res = hz.postprocess(r1, plan, fan_text, her_recent, told_today) if r1 else None
+    hint = ""
     if res is None or res.needs_regen:
-        hint = res.regen_hint if (res and res.regen_hint) else f"FONTOS: írj egy rövid, természetes választ. Max {plan.max_words} szó."
+        hint = res.regen_hint if (res and res.regen_hint) else f"FONTOS: írj egy természetes választ. Kb. {plan.max_words} szó."
+    elif use_critic:
+        c = run_hz_critic(history, fan_text or user_msg, res.text, plan)
+        out["critic"], out["critic_fix"] = c["flags"], c["fix"]
+        if c["flags"]:
+            print(f"[hz-critic] {str(chat_id)[:8]} {c['flags']} → regenerating: {res.text!r}", flush=True)
+            hint = hz.critic2_hint(c, plan)
+    if hint:                                             # ONE regeneration max
         r2 = ask_claude(dyn + "\n\n" + hint, user_msg, smart=True, convo=convo, chat_id=gen_chat, plan=plan, her_recent=her_recent)
         if r2 and not _kw_unsafe(r2, ai_turn=(lock == 'ai')):
             res2 = hz.postprocess(r2, plan, fan_text, her_recent, told_today)
-            if res2.text and (res is None or not res2.needs_regen or not res.text):
+            if res2.text and (res is None or not res2.needs_regen or not res.text or out["critic"]):
                 res = res2
                 out["raw"] = r2
+                if use_critic and _sim_active():         # sandbox only: show what the critic thinks of the final text
+                    out["critic_final"] = run_hz_critic(history, fan_text or user_msg, res2.text, plan)["flags"]
     bubbles = list(res.bubbles) if (res and res.text) else []
     if res is not None:
         out["reasons"] = list(res.reasons)
-    if not bubbles and plan.he_asked and out["raw"]:
-        bubbles = [hz.clamp_length(out["raw"].replace("\n", " "), max(plan.max_words, 6), [])]   # never ignore a question
-    out["bubbles"] = [b for b in bubbles if b.strip()][:2]
+    if not bubbles and plan.he_asked and out["raw"]:     # never ignore a question
+        raw1 = re.sub(r"\s+", " ", out["raw"]).strip()
+        bubbles = [raw1 if hz.word_count(raw1) <= 25 else hz.hard_clip(raw1, 20)]
+    bubbles = [b for b in bubbles if b.strip()][:2]
+    if bubbles and (hz.has_invitation(" ".join(bubbles)) or _kw_unsafe(" ".join(bubbles), ai_turn=(lock == 'ai'))):
+        out["reasons"].append("unsafe_final→fallback")         # hard safety: never an invitation / meetup implication
+        bubbles = [] if not plan.he_asked else [random.choice(KW_SAFE_FALLBACK)]
+    out["bubbles"] = bubbles
     if not out["bubbles"]:
         out["reasons"].append("empty→skip")
         return out
+    if hz.word_count(out["bubbles"][-1]) > 25:
+        out["bubbles"][-1] = hz.hard_clip(out["bubbles"][-1], 20)
     out["typing_s"] = round(hz.typing_seconds(hz.word_count(out["bubbles"][0]), rng), 1)
     out["delay_s"] = round(read_delay + window + out["typing_s"], 1)
     out["told"] = sorted(hz.topics_in(" ".join(out["bubbles"])))
+    out["facts"] = hz.self_facts(" ".join(out["bubbles"]))
     if not is_followup:
         out["followup"] = hz.maybe_followup_delay(plan, hour, rng, since_fu)
     return out
@@ -2790,7 +2857,7 @@ def _send_extra(item, done):
         text = "\n".join(res["bubbles"])
         if not text or _kw_unsafe(text) or _fan_wrote_since(chat_id, item.get('created_at')):
             db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (bid,)); return 0
-        st.push(res["plan"]); st.mark_told(text, _bp_day()); st.last_followup_at = time.time(); hz_save(chat_id, st)
+        st.push(res["plan"]); st.mark_told(text, _bp_day()); st.add_facts(text, _bp_day()); st.last_followup_at = time.time(); hz_save(chat_id, st)
         _queue_bubbles(chat_id, item.get('fan_name') or '', item.get('fan_msg_id') or '', res["bubbles"], res["typing_s"])
         db_claim("UPDATE scheduled_replies SET status='sent' WHERE id=?", (bid,))
         print(f"[hz] {chat_id[:8]} double-text: {text!r}", flush=True)
@@ -2855,10 +2922,13 @@ def _should_open_chat(chat_id, chat):
                 _read_after[chat_id] = (ts, 0.0); _seen_activity[chat_id] = ts
                 return True
             h = get_budapest_now().hour
-            hot = (time.time() - _last_sent_at.get(chat_id, 0)) < 300
+            since = time.time() - _last_sent_at.get(chat_id, 0)
+            hot = since < 300
             lm = chat.get('lastMessage') or chat.get('latestMessage') or {}
+            ff = hz.fan_features(lm.get('text') or '')
+            no_gap = since > 1800 or ff.asked_question or ff.sad      # he comes back / asks / is sad → no long gap
             busy = _PRESENCE.busy_for(time.time(), h) if _PRESENCE else 0.0
-            wait = (ts, hz.sample_read_delay(lm.get('text') or '', h, hot, busy_for=busy))
+            wait = (ts, hz.sample_read_delay(lm.get('text') or '', h, hot, busy_for=busy, no_gap=no_gap))
             print(f"[hz] {chat_id[:8]} read in ~{int(wait[1])}s{' (hot)' if hot else ''}{' (phone down)' if busy else ''}", flush=True)
         else:
             wait = (ts, random.uniform(70, 95))
@@ -3276,7 +3346,7 @@ def send_due_batches():
                              "AND timestamp<=?", (chat_id, _fm['timestamp']))
                 db_query("UPDATE fan_profiles SET ppv_pending=0 WHERE chat_id=? AND ppv_pending=1", (chat_id,))
                 plan = hz_res['plan']
-                hz_st.push(plan); hz_st.mark_told(reply, _bp_day())
+                hz_st.push(plan); hz_st.mark_told(reply, _bp_day()); hz_st.add_facts(reply, _bp_day())
                 typing = min(60.0, max(2.0, hz_res['typing_s'] - (time.time() - t_gen)))
                 last_t = _queue_bubbles(chat_id, item['fan_name'] or '', item['fan_msg_id'], hz_res['bubbles'], typing)
                 if hz_res['followup']:
@@ -4151,10 +4221,12 @@ def _sim_bot_turn(ctx, fan_text, use_hz):
             bubbles = []
             res["reasons"].append("unsafe→dropped")
         ctx["state"].push(res["plan"] if bubbles or res["plan"].skip else hz.TurnPlan('skip', 0, False, skip=True))
-        ctx["state"].mark_told(" ".join(bubbles), _bp_day())
+        ctx["state"].mark_told(" ".join(bubbles), _bp_day()); ctx["state"].add_facts(" ".join(bubbles), _bp_day())
         p = res["plan"]
         return {"bubbles": bubbles, "plan": p.turn_type, "max_words": p.max_words, "allow_question": p.allow_question,
-                "delay_s": res["delay_s"], "skip": not bubbles, "followup_s": res["followup"], "reasons": res["reasons"]}
+                "delay_s": res["delay_s"], "skip": not bubbles, "followup_s": res["followup"], "reasons": res["reasons"],
+                "critic": res.get("critic") or [], "critic_fix": res.get("critic_fix") or "",
+                "critic_final": res.get("critic_final"), "facts": res.get("facts") or []}
     # legacy keep-warm path (HUMANIZER off, or compliance turn: direct AI question / meetup) — as in send_due_batches
     dyn = build_dynamic_prompt(chat_id, ctx["fan_name"], "", [], history, get_time_context(), history[-1]["timestamp"])
     if prof_over["memory_notes"]:
@@ -4206,7 +4278,9 @@ def _sim_run_scenario(sc, use_hz, deadline, out):
                 ctx["history"].append({"text": b, "is_mine": 1, "timestamp": _sim_iso(clock + timedelta(seconds=8 * j))})
             tr.append({"role": "bot", "text": "\n".join(t["bubbles"]), "bubbles": t["bubbles"], "delay_s": t.get("delay_s"),
                        "plan": t.get("plan"), "skip": t.get("skip"), "max_words": t.get("max_words"),
-                       "followup_s": t.get("followup_s"), "reasons": t.get("reasons")})
+                       "followup_s": t.get("followup_s"), "reasons": t.get("reasons"), "critic": t.get("critic") or [],
+                       "critic_fix": t.get("critic_fix") or "", "critic_final": t.get("critic_final"),
+                       "facts": t.get("facts") or []})
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
     finally:

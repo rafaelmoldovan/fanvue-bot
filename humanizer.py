@@ -96,8 +96,14 @@ _FLIRT2 = re.compile(r"dogos|szexi|csok|puszil|agyba|olel|bujn|imadlak|gyonyoru|
                      r"megmutat|mutass|mutassam")
 _FLIRT1_EMO = re.compile("[😘😍🥰💋❤😏🔥😚💕💖]")
 _FLIRT1 = re.compile(r"\b(edes|edesem|cica|baba|szivem|szepsegem|kedvesem|cuki vagy|aranyos vagy|helyes)\b")
-_SAD = re.compile(r"szomoru|rossz nap|rossz napom|stressz|kimerult|beteg|faj |fajt|kikaptam|elajult|meghalt|szakit|maganyos|"
-                  r"egyedul vagyok|nem bir|kivagyok|sirok|sirtam|depi|gaz nap")
+_SAD = re.compile(r"szomoru|rossz nap|rossz napom|szar nap|szar napom|szar napo|stressz|kimerult|beteg|faj |fajt|kikaptam|elajult|"
+                  r"meghalt|szakit|maganyos|egyedul vagyok|nem bir|kivagyok|ki vagyok akadva|sirok|sirtam|depi|gaz nap|"
+                  r"terhellek|terhelni|panaszkod|kirugtak|elbocsat|osszevesztunk|veszekedtunk|ideges vagyok|"
+                  r"rosszul vagyok|minden szar|semmi nem jon ossze|elegem van|nehez napom|nehez idoszak|"
+                  r"hianyzik (az|a) |korhaz|mutet|baleset|szomorusag|kesz vagyok|kikeszult")
+_BYE = re.compile(r"\b(jo ejt|jo ejszakat|szep almokat|megyek aludni|megyek lefekudni|lefekszem|aludni megyek|mennem kell|"
+                  r"most mennem|majd irok|kesobb irok|holnap irok|szia(sztok)? holnap|puszi\s*$|pa+\s*$|bye|good night|"
+                  r"aludj jol|elalszom|alszom is)\b")
 _SAD_EMO = re.compile(r"[😢😭🥺☹😔😞😟]|:\(")
 
 
@@ -110,6 +116,7 @@ class FanFeatures:
     sad: bool
     energy: int         # 0 low, 1 normal, 2 high (emoji/!/long)
     emoji_only: bool = False
+    bye: bool = False
 
 
 def fan_features(fan_text: str) -> FanFeatures:
@@ -128,7 +135,8 @@ def fan_features(fan_text: str) -> FanFeatures:
     sad = bool(_SAD.search(n_all + " ") or _SAD_EMO.search(raw))
     emo = len(_EMOJI.findall(raw)) + raw.count("!")
     energy = 2 if (emo >= 2 or nw >= 30) else 0 if (nw <= 3 and emo == 0) else 1
-    return FanFeatures(bool(asked), ack, nw, flirt, sad, energy, emoji_only)
+    bye = bool(_BYE.search(norm(last) + " "))
+    return FanFeatures(bool(asked), ack, nw, flirt, sad, energy, emoji_only, bye)
 
 
 def is_question_text(t: str) -> bool:
@@ -138,29 +146,47 @@ def is_question_text(t: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. TURN PLANNER
 # ─────────────────────────────────────────────────────────────────────────────
-TURN_TYPES = ("react", "short", "answer_share", "tease", "initiative", "question", "two_bubble", "skip")
+TURN_TYPES = ("react", "short", "answer_share", "tease", "initiative", "question", "two_bubble", "care", "skip")
+# v16.1: targets ("kb. N szó"), not caps — round 1 with the real model showed "max N" makes it write ~half of N.
 TYPE_WORD_RANGE = {
-    "react": (1, 4), "short": (3, 9), "answer_share": (6, 15), "tease": (3, 10), "initiative": (5, 14),
-    "question": (3, 9), "two_bubble": (4, 14), "skip": (0, 0), "locked": (6, 25),
+    "react": (2, 4), "short": (4, 12), "answer_share": (8, 18), "tease": (4, 12), "initiative": (6, 14),
+    "question": (4, 11), "two_bubble": (6, 16), "care": (8, 20), "skip": (0, 0), "locked": (6, 25),
 }
-BASE_WEIGHTS = {"react": 0.14, "short": 0.24, "answer_share": 0.14, "tease": 0.10, "initiative": 0.10,
-                "question": 0.40, "two_bubble": 0.10, "skip": 0.0}
+BASE_WEIGHTS = {"react": 0.10, "short": 0.26, "answer_share": 0.18, "tease": 0.10, "initiative": 0.08,
+                "question": 0.34, "two_bubble": 0.10, "care": 0.0, "skip": 0.0}
 QUESTION_BUDGET = (1, 2)          # never two questions in a row (her last message); the weights keep the share ~25-30 %
 PLAIN_SPELLING_P = 0.8            # Rafael strips ö/ő/ü/ű in practically every message (FORENSICS: 0 % of his replies have them)
 BYPASS_LOCKS = ("ai", "meetup", "minor")      # compliance turns: humanizer does not touch them
+SELFSHARE_GAP = 5                 # at most one own-initiative self-share in ~6 turns, never back to back
 
-# Initiative seeds: tiny, concrete "from her day" items. topic is used for anti-repetition.
-INITIATIVE_SEEDS = {
-    "morning": [("most keltem, még kómás vagyok", "reggel"), ("kávézok épp az ablakban", "kave"),
-                ("ma reggel elaludtam, rohanás volt", "reggel")],
-    "day": [("most jöttem a boltból, elfelejtettem amiért mentem", "bolt"), ("épp takarítok és utálom", "takaritas"),
-            ("elszakadt a fülhallgatóm, tragédia", "zene"), ("a szomszéd megint fúr valamit", "szomszed"),
-            ("most mosok, a fél lakás tele ruhával", "takaritas")],
-    "evening": [("főztem valamit, ami félig sikerült", "fozes"), ("most néztem egy részt a Bridgertonból", "sorozat"),
-                ("edzésről jöttem, hullafáradt vagyok", "edzes"), ("kiöntöttem a teát a pólómra", "baleset"),
-                ("rendeltem kaját, mert lusta voltam főzni", "fozes")],
-    "night": [("nem tudok aludni", "alvas"), ("már ágyban vagyok, csak telefonozok", "alvas")],
+# Her day: a large pool of small, concrete, plausible activities per part of the day. Each chat gets its own consistent
+# "today" (day_story: seeded by chat + date). No laundry / "ágyban telefonozok" / "lusta" fillers (round-1 tells).
+ACTIVITY_POOL = {
+    "morning": [("kávéztam az ablakban, még kómás vagyok", "kave"), ("reggel elaludtam, rohanás volt", "reggel"),
+                ("palacsintát sütöttem reggelire", "reggeli"), ("voltam futni egy kört a parkban", "futas"),
+                ("anyuval beszéltem telefonon reggel", "csalad"), ("elkéstem a buszról, pont az orrom előtt ment el", "busz"),
+                ("bevásároltam a piacon", "piac"), ("új körömlakkot próbáltam", "korom")],
+    "day": [("voltam a boltban és pont azt felejtettem el amiért mentem", "bolt"),
+            ("a szomszéd egész délelőtt fúrt valamit", "szomszed"), ("elszakadt a fülhallgatóm", "zene"),
+            ("sétáltam egyet a Margitszigeten", "seta"), ("álláshirdetéseket nézegettem", "allas"),
+            ("ebédre tésztát csináltam", "ebed"), ("a barátnőmmel kávéztunk a városban", "baratno"),
+            ("elmentem postára és fél órát álltam sorban", "posta"), ("átrendeztem a szobámat", "szoba"),
+            ("voltam edzeni, fáj a lábam", "edzes"), ("vettem egy új pulcsit", "vasarlas")],
+    "evening": [("főztem paprikás krumplit", "fozes"), ("néztem pár részt a Wednesdayből", "sorozat"),
+                ("edzésről jöttem haza", "edzes"), ("kiöntöttem a teát a pólómra", "baleset"),
+                ("rendeltem pizzát, mert nem volt kedvem főzni", "kaja"), ("Azahriát hallgatok", "zene"),
+                ("sütit sütöttem, a fele odaégett", "suti"), ("arcpakolás van rajtam", "arc"),
+                ("a barátnőmmel videóztunk egy órát", "baratno"), ("most értem haza sétálni voltam", "seta")],
+    "night": [("nem tudok aludni", "alvas"), ("most fejeztem be egy filmet", "film"),
+              ("épp teát iszom", "tea"), ("zenét hallgatok még egy kicsit", "zene")],
 }
+INITIATIVE_SEEDS = ACTIVITY_POOL          # backwards compatible name
+
+
+def day_story(chat_key: str, day: str) -> dict:
+    """Her consistent 'today' for one chat: per daypart 2 activities (seeded by chat + date → same all day)."""
+    rng = random.Random(f"jazmin|{chat_key}|{day}")
+    return {dp: rng.sample(pool, min(2, len(pool))) for dp, pool in ACTIVITY_POOL.items()}
 
 # Persona topics: a topic she brought up in her last 4 messages is not brought up again unless HE mentions it.
 # Topics in DAILY_TOPICS are also "spent" for the rest of the chat-day once she told them (see told_today).
@@ -174,6 +200,8 @@ PERSONA_TOPICS = {
     "sorozat": r"sorozat|bridgerton|netflix|wednesday|squid",
     "pihenes": r"lustalkod|pihentem|pihenek",
     "suli": r"turisztik|vendeglat|iden vegeztem|vegeztem a suli|befejeztem a sulit",
+    "ruha": r"ruhat hajtogat|ruhat teregetek|mosott ruha|teregetek|hajtogatok|tele a lakas ruhaval|mosok",
+    "agy": r"agyban fekszem|agyban vagyok|agyban telefonoz",
     "munka": r"nem dolgozom|most nem dolgozom|pincer|munkat keres|melot keres",
 }
 DAILY_TOPICS = ("menhely", "fozes", "albi", "ex", "csalad", "suli", "munka", "edzes")
@@ -198,6 +226,10 @@ class TurnContext:
     fan_msg_count: int = 20                     # total fan messages in the chat (phase)
     secs_since_her_last: Optional[float] = None # how long he took to answer her last message (hotness)
     lock: Optional[str] = None                  # 'ai' | 'meetup' | 'minor' | 'content' | 'advance' | None
+    fan_recent: Sequence[str] = ()              # his previous messages (before this batch), oldest → newest
+    chat_key: str = ""                          # chat id → her consistent "today" (day_story)
+    day: str = ""                               # Budapest date 'YYYY-MM-DD'
+    told_today: Iterable[str] = ()              # persona/activity topics she already told him today
 
 
 @dataclass
@@ -216,6 +248,8 @@ class TurnPlan:
     sad: bool = False
     flirt: int = 0
     emoji_only: bool = False
+    he_bye: bool = False          # he is saying goodbye / going to sleep → she may say bye too
+    shy: bool = False             # he writes one-word answers → she carries a bit more
     weights: dict = field(default_factory=dict)   # debug
 
     def to_json(self) -> str:
@@ -248,17 +282,40 @@ def _weighted_choice(weights: dict, rng: random.Random) -> str:
 
 def sample_length(turn_type: str, rng: random.Random, f: Optional[FanFeatures] = None, hour: int = 15,
                   dist: Sequence[int] = OWNER_REPLY_WORDS) -> int:
+    """Target length (not a cap) drawn from Rafael's real replies, shaped by the turn type and his message."""
     lo, hi = TYPE_WORD_RANGE[turn_type]
     if hi == 0:
         return 0
-    n = rng.choice(list(dist)) + rng.choice((-1, 0, 0, 1))
+    n = rng.choice(list(dist)) + rng.choice((-1, 0, 0, 1, 2))
+    if turn_type == "care":
+        n = rng.randint(9, 18)
     if f is not None:
         if f.n_words >= 25: n += rng.randint(1, 4)
-        if f.sad: n += 3
-        if f.n_words <= 3: n -= 1
+        if f.n_words >= 12 and turn_type in ("answer_share", "two_bubble"): n += rng.randint(0, 3)
     if daypart(hour) == "night":
-        n = int(round(n * 0.8))
+        n = int(round(n * 0.9))
     return max(lo, min(hi, n))
+
+
+def _is_shy(fan_recent: Sequence[str], fan_text: str) -> bool:
+    msgs = [m for m in list(fan_recent)[-3:] + [fan_text] if (m or "").strip()]
+    return len(msgs) >= 3 and statistics_mean([word_count(m) for m in msgs]) <= 3.0
+
+
+def statistics_mean(xs):
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def _seed_for(ctx: TurnContext, her: list, rng: random.Random) -> tuple[str, str]:
+    dp = daypart(ctx.hour)
+    used = recent_topics(her[-8:]) | set(ctx.told_today or ())
+    if ctx.chat_key and ctx.day:
+        story = day_story(ctx.chat_key, ctx.day)
+        pool = [x for x in story[dp] if x[1] not in used]
+        if pool:
+            return pool[0]
+    pool = [x for x in ACTIVITY_POOL[dp] if x[1] not in used] or ACTIVITY_POOL[dp]
+    return rng.choice(pool)
 
 
 def plan_turn(ctx: TurnContext, rng: Optional[random.Random] = None) -> TurnPlan:
@@ -272,27 +329,32 @@ def plan_turn(ctx: TurnContext, rng: Optional[random.Random] = None) -> TurnPlan
     # Compliance turns: existing app.py logic decides everything.
     if ctx.lock in BYPASS_LOCKS:
         return TurnPlan("locked", TYPE_WORD_RANGE["locked"][1], True, bypass=True, spelling=spelling,
-                        lowercase=lowercase, he_asked=f.asked_question, sad=f.sad, flirt=f.flirt)
+                        lowercase=lowercase, he_asked=f.asked_question, sad=f.sad, flirt=f.flirt, he_bye=f.bye)
 
     her_last_q = bool(her) and is_question_text(her[-1])
     q_budget_used = questions_in(her[-(QUESTION_BUDGET[1] - 1):]) >= QUESTION_BUDGET[0] if her else False
     can_ask = not her_last_q and not q_budget_used
+    shy = _is_shy(ctx.fan_recent, ctx.fan_text) and not f.sad
+    selfshare_recent = any(t == "initiative" for t in turns[-SELFSHARE_GAP:])
 
     w = dict(BASE_WEIGHTS)
-    # ── he asked → answer it; usually no counter-question ──
+    # ── he asked → answer it; no own-initiative detour ──
     if f.asked_question:
-        w["react"] = 0.0; w["skip"] = 0.0; w["question"] = 0.0
-        w["short"] *= 1.7; w["answer_share"] *= 1.6; w["initiative"] *= 0.25; w["two_bubble"] *= 0.8
+        w["react"] = 0.0; w["skip"] = 0.0; w["question"] = 0.0; w["initiative"] = 0.0
+        w["short"] *= 1.6; w["answer_share"] *= 1.6; w["two_bubble"] *= 0.8
     # ── pure acknowledgement ("ok", "cukii") → react / own initiative / sometimes nothing ──
     if f.ack:
-        w["react"] *= 1.5; w["initiative"] *= 2.4; w["answer_share"] *= 0.3; w["question"] *= 1.2
+        w["react"] *= 1.6; w["initiative"] *= 2.0; w["answer_share"] *= 0.3; w["question"] *= 1.2
         recent_skip = "skip" in turns[-6:]
-        w["skip"] = 0.0 if (recent_skip or her_last_q) else 0.30
+        w["skip"] = 0.0 if (recent_skip or her_last_q or shy) else 0.25
     # ── emoji-only ("😘", "😂") → mostly nothing, or an emoji / 1-2 words back ──
     if f.emoji_only:
         w = {k: 0.0 for k in w}
         w["react"] = 1.0
         w["skip"] = 0.0 if her_last_q else (0.35 if turns[-1:] == ["skip"] else 1.1)
+    # ── shy / one-word fan → she carries a bit more: small own news or an easy question, not "rendben :D" ──
+    if shy and not f.emoji_only:
+        w["react"] *= 0.3; w["skip"] = 0.0; w["question"] *= 1.6; w["initiative"] *= 2.5; w["short"] *= 0.8
     # ── long / high-energy message ──
     if f.n_words >= 25:
         w["react"] *= 0.3; w["answer_share"] *= 1.4; w["two_bubble"] *= 1.4; w["initiative"] *= 0.4
@@ -302,64 +364,70 @@ def plan_turn(ctx: TurnContext, rng: Optional[random.Random] = None) -> TurnPlan
     if f.flirt >= 1:
         w["tease"] *= 1.6; w["initiative"] *= 0.6
     if f.flirt >= 2:
-        w["tease"] *= 1.8; w["question"] *= 0.5; w["initiative"] *= 0.5; w["react"] *= 1.2
+        w["tease"] *= 1.8; w["question"] *= 0.5; w["initiative"] *= 0.3; w["react"] *= 1.2
     if f.flirt >= 3 or ctx.lock in ("content", "advance"):
         w["initiative"] = 0.0; w["question"] *= 0.3; w["tease"] *= 1.5
-    # ── sad: caring, no jokes, no skip, one caring question allowed if not asked last time ──
-    if f.sad:
-        w = {k: 0.0 for k in w}
-        w["short"] = 1.0; w["two_bubble"] = 0.4
-        w["question"] = 1.3 if not her_last_q else 0.0
+    # ── he says bye → a short warm goodbye (no initiative, no question) ──
+    if f.bye:
+        w["initiative"] = 0.0; w["question"] = 0.0; w["skip"] = 0.0; w["answer_share"] *= 0.3
     # ── phase ──
     if ctx.fan_msg_count < 6:
         w["skip"] = 0.0; w["initiative"] *= 0.5; w["question"] *= 1.3
     elif ctx.fan_msg_count > 60:
         w["initiative"] *= 1.2
-    # ── hot chat (he answers fast) → faster, shorter ──
+    # ── hot chat (he answers fast) → a bit snappier ──
     if ctx.secs_since_her_last is not None and ctx.secs_since_her_last < 150:
-        w["react"] *= 1.3; w["short"] *= 1.2; w["answer_share"] *= 0.8
+        w["react"] *= 1.2; w["short"] *= 1.2
     # ── time of day ──
     dp = daypart(ctx.hour)
     if dp == "night":
-        w["react"] *= 1.3; w["answer_share"] *= 0.7; w["initiative"] *= 0.6
+        w["react"] *= 1.2; w["initiative"] *= 0.6
     elif dp == "morning":
-        w["initiative"] *= 1.3
+        w["initiative"] *= 1.2
     # ── question budget (hard) ──
-    if not can_ask and not f.sad:
+    if not can_ask:
         w["question"] = 0.0
-    elif can_ask and not f.asked_question and "question" not in turns[-4:]:
+    elif not f.asked_question and "question" not in turns[-4:]:
         w["question"] *= 1.2
+    # ── self-share budget (hard): never back to back, at most ~1 in 6 ──
+    if selfshare_recent:
+        w["initiative"] = 0.0
     # ── variety: no same shape again and again ──
     if turns:
         if turns[-1] in w: w[turns[-1]] *= 0.55
         if len(turns) >= 2 and turns[-1] == turns[-2] and turns[-1] in w: w[turns[-1]] *= 0.3
-        if "initiative" in turns[-3:]: w["initiative"] *= 0.2
         if turns[-1] == "two_bubble": w["two_bubble"] *= 0.4
+    # ── sad / stressed / venting → CARE mode overrides everything (no tease, no self-activity, warm) ──
+    if f.sad:
+        w = {k: 0.0 for k in w}
+        w["care"] = 1.0
     if sum(w.values()) <= 0:
         w["short"] = 1.0
 
     t = _weighted_choice(w, rng)
     plan = TurnPlan(t, sample_length(t, rng, f, ctx.hour), allow_question=False, spelling=spelling,
-                    lowercase=lowercase, he_asked=f.asked_question, sad=f.sad, flirt=f.flirt,
+                    lowercase=lowercase, he_asked=f.asked_question, sad=f.sad, flirt=f.flirt, he_bye=f.bye, shy=shy,
                     weights={k: round(v, 3) for k, v in w.items()})
     if t == "skip":
         plan.skip = True
         return plan
     if t == "question":
         plan.allow_question = True
+    elif t == "care":
+        plan.allow_question = can_ask                     # one gentle "mi történt?" if she did not just ask
     elif f.asked_question and can_ask and t in ("short", "answer_share") and rng.random() < 0.45:
         plan.allow_question = True          # only a tiny "és te?" tail (instruction says so)
+    elif shy and can_ask and t in ("short", "react") and rng.random() < 0.5:
+        plan.allow_question = True
     if t == "two_bubble":
         plan.bubbles = 2
     if t == "initiative":
-        used = recent_topics(her[-6:])
-        pool = [s for s in INITIATIVE_SEEDS[dp] if s[1] not in used] or INITIATIVE_SEEDS[dp]
-        plan.seed, plan.seed_topic = rng.choice(pool)
+        plan.seed, plan.seed_topic = _seed_for(ctx, her, rng)
     if f.emoji_only:
         plan.emoji_only = True; plan.max_words = min(plan.max_words, 2)
     if ctx.lock == "content":           # PPV request in keep-warm: playful "later", never a sale
         plan.turn_type = "tease"; plan.allow_question = False; plan.max_words = min(plan.max_words, 10)
-        plan.bubbles = 1
+        plan.bubbles = 1; plan.seed = ""; plan.seed_topic = ""
     return plan
 
 
@@ -367,13 +435,14 @@ def plan_turn(ctx: TurnContext, rng: Optional[random.Random] = None) -> TurnPlan
 # 2b. PER-TURN INSTRUCTION + FEW-SHOT SELECTION
 # ─────────────────────────────────────────────────────────────────────────────
 INSTR = {
-    "react": "Most CSAK egy pár szavas reakció (max {n} szó), mint aki közben mást csinál. Nincs kérdés, nincs magyarázat.",
-    "short": "Válaszolj röviden, max {n} szó.",
-    "answer_share": "Válaszolj, és tegyél hozzá egy apró saját dolgot (mit csinálsz most / mi történt veled). Max {n} szó.",
-    "tease": "Cukkold, ugrasd játékosan, egy fokkal pajkosabban mint ő, de nem explicit. Max {n} szó.",
-    "initiative": "Ne az ő mondatát folytasd: magadtól dobj be egy apróságot a napodból: „{seed}” (a saját szavaiddal). Max {n} szó.",
-    "question": "Pár szavas reakció, utána EGY egyszerű rövid kérdés (pl. „és te?”, „mi történt?”, „miért?”). Összesen max {n} szó.",
-    "two_bubble": "KÉT külön üzenet egy-egy sorban: 1. sor 1-3 szavas reakció, 2. sor egy rövid gondolat (max {n2} szó).",
+    "react": "Most csak egy rövid, élő reakció (kb. {n} szó), mint aki közben mást csinál. Nincs kérdés, nincs magyarázat.",
+    "short": "Válaszolj lazán, kb. {n} szóban (lehet pár szóval több vagy kevesebb).",
+    "answer_share": "Válaszolj rendesen, konkrétan, egy apró részlettel ahhoz, amiről beszéltek. Kb. {n} szó.",
+    "tease": "Cukkold, ugrasd játékosan, egy fokkal pajkosabban mint ő, de nem explicit. Kb. {n} szó.",
+    "initiative": "Most te viszed a beszélgetést: mesélj egy apróságot a napodból: „{seed}” (a saját szavaiddal, ez legyen az üzenet lényege, ne egy válasz végére tapasztva). Kb. {n} szó.",
+    "question": "Rövid reakció, utána EGY egyszerű, könnyű kérdés hozzá (pl. „és te?”, „mi történt?”, „miért?”). Összesen kb. {n} szó.",
+    "two_bubble": "KÉT külön üzenet egy-egy sorban: 1. sor 1-4 szavas reakció, 2. sor egy rövid, hozzá illő gondolat (kb. {n2} szó). Mindkettő legyen kerek mondat.",
+    "care": "Rossz napja van / panaszkodik: legyél kedves, meleg és gondoskodó, mint egy barátnő. Semmi viccelődés, ugratás, flört, és ne mesélj magadról. Kb. {n} szó.",
 }
 
 
@@ -381,15 +450,21 @@ def render_plan_instruction(plan: TurnPlan) -> str:
     """The ONLY style instruction the model gets per turn (replaces long rule lists)."""
     if plan.bypass or plan.skip:
         return ""
-    s = INSTR[plan.turn_type].format(n=plan.max_words, n2=max(3, plan.max_words - 2), seed=plan.seed)
+    s = INSTR[plan.turn_type].format(n=plan.max_words, n2=max(4, plan.max_words - 3), seed=plan.seed)
     if plan.he_asked and plan.turn_type != "initiative":
-        s += " Ő kérdezett: válaszolj rá konkrétan."
-    if plan.turn_type != "question":
+        s += " Ő kérdezett: válaszolj rá konkrétan (ha választani kell, válassz)."
+    if plan.turn_type == "care":
+        s += " Egy kedves, rövid kérdés belefér (pl. „mi történt?”)." if plan.allow_question else " Most ne kérdezz."
+    elif plan.turn_type != "question":
         s += " A végén legfeljebb egy rövid „és te?” mehet." if plan.allow_question else " NE kérdezz."
-    if plan.sad:
-        s += " Rossz napja van: kedves, gondoskodó, ne viccelődj."
-    elif plan.flirt >= 2:
+    if plan.turn_type not in ("initiative",):
+        s += " Most ne mesélj arról, mit csinálsz épp."
+    if plan.flirt >= 2 and plan.turn_type != "care":
         s += " Flörtöl: menj bele játékosan az ő szintjén, ne hűtsd le, ne terelj."
+    if plan.he_bye:
+        s += " Elköszön: köszönj el kedvesen, röviden."
+    else:
+        s += " NE köszönj el, ne mondd hogy mész aludni."
     if plan.emoji_only:
         s += " Elég egy emoji is."
     s += " Ne ismételd vissza a szavait, ne értékeld amit írt."
@@ -400,6 +475,8 @@ def classify_example(fan: str, reply: str) -> str:
     n = word_count(reply)
     if "\n" in (reply or ""):
         return "two_bubble"
+    if fan_features(fan).sad:
+        return "care"
     if is_question_text(reply):
         return "question"
     if fan_features(fan).flirt >= 1 and n <= 10:
@@ -413,7 +490,8 @@ def classify_example(fan: str, reply: str) -> str:
 
 _COMPAT = {"react": ("react",), "short": ("short", "react"), "answer_share": ("answer_share", "initiative", "short"),
            "tease": ("tease",), "initiative": ("initiative", "answer_share"), "question": ("question",),
-           "two_bubble": ("two_bubble", "react"), "locked": ("short", "answer_share")}
+           "two_bubble": ("two_bubble", "react"), "care": ("care", "question", "answer_share"),
+           "locked": ("short", "answer_share")}
 
 
 def select_examples(examples: Sequence[tuple[str, str]], plan: TurnPlan, fan_text: str, k: int = 6,
@@ -649,58 +727,61 @@ _TE_Q = re.compile(r"^(es\s+)?(te|neked|veled|nalad|naladd|ti)\b")
 
 
 def break_template(units: list[str], reasons: list) -> list[str]:
-    """'reaction + elaboration/restating + te ...?' (the bot's signature shape, FORENSICS #10): when a question is
-    allowed, keep only a short lead (first clause, if it is a reaction of <= 4 words) + the question clause."""
+    """'reaction + elaboration/restating + te ...?' (the bot's signature shape, FORENSICS #10).
+    v16.1: works on whole sentences only (round 1: gluing clause fragments produced garbage like 'jó fiú holnap vizsga?').
+    Question is its own sentence → keep [short reaction sentence] + question; otherwise flag 'template_regen'."""
     if not units or not is_question_text(units[-1]) or PROTECT.search(" ".join(units)):
         return units
     q_cl = split_clauses(units[-1])
-    question = q_cl[-1] if is_question_text(q_cl[-1]) else units[-1]
-    before = [c for u in units[:-1] for c in split_clauses(u)] + (q_cl[:-1] if question is q_cl[-1] else [])
+    inner = is_question_text(q_cl[-1]) and len(q_cl) > 1
+    before = [c for u in units[:-1] for c in split_clauses(u)] + (q_cl[:-1] if inner else [])
     before = [c for c in before if _content(c)]
     if len(before) < 2 and word_count(" ".join(before)) <= 6:
         return units
     reasons.append("template")
-    lead = (before[0] if before and word_count(before[0]) <= 4 else "").strip().rstrip(" ,")
-    q = question.strip()
-    if not lead:
-        return [q]
-    return [lead + (", " if re.search(r"\w$", lead) else " ") + q]
+    if inner:
+        reasons.append("template_regen")          # cannot be fixed without gluing → regenerate (else keep as is)
+        return units
+    first = units[0] if len(units) >= 2 and word_count(units[0]) <= 4 else ""
+    return [first, units[-1]] if first else [units[-1]]
 
 
-def clamp_length(text: str, max_words: int, reasons: list, tolerance: float = 1.25) -> str:
-    """Trim to ~max_words at unit, then clause boundaries. A hard word cut also adds 'too_long_hard' (→ regen)."""
-    if max_words <= 0 or word_count(text) <= int(math.ceil(max_words * tolerance)) or PROTECT.search(text):
-        return text
-    reasons.append("too_long")
-    units = split_units(text)
-    out = ""
-    for u in units:                                  # whole units first
-        cand = (out + " " + u).strip()
-        if word_count(cand) > max_words and out:
+def hard_clip(text: str, max_words: int) -> str:
+    """Last-resort cut (clause, then word) — only for runaway replies when a regeneration also failed."""
+    cl = split_clauses(text)
+    acc = cl[0] if cl else text
+    for c in cl[1:]:
+        if word_count(acc + ", " + c) > max_words:
             break
-        out = cand
-        if word_count(out) >= max_words:
-            break
-    if word_count(out) > int(math.ceil(max_words * tolerance)):   # first unit alone too long → clauses
-        cl = split_clauses(out)
-        acc = cl[0]
-        for c in cl[1:]:
-            if word_count(acc + ", " + c) > max_words:
-                break
-            acc = acc + ", " + c
-        out = acc
-    if word_count(out) > int(math.ceil(max_words * tolerance)):   # still → hard cut on words
-        toks = out.split()
-        kept, n = [], 0
+        acc = acc + ", " + c
+    if word_count(acc) > max_words:
+        toks, kept, n = acc.split(), [], 0
         for tk in toks:
             if re.search(r"\w", strip_emoji(tk)):
                 n += 1
             if n > max_words:
                 break
             kept.append(tk)
-        out = " ".join(kept)
+        acc = " ".join(kept)
+    return strip_dangling(acc)
+
+
+def clamp_length(text: str, max_words: int, reasons: list, tolerance: float = 1.6) -> str:
+    """v16.1: max_words is a TARGET. Up to ~1.6x is fine; above that, trim at SENTENCE boundaries only. A first
+    sentence that is itself far too long is kept whole and flagged 'too_long_hard' (→ regenerate), never chopped."""
+    limit = int(math.ceil(max_words * tolerance)) + 1
+    if max_words <= 0 or word_count(text) <= limit or PROTECT.search(text):
+        return text
+    reasons.append("too_long")
+    out = ""
+    for u in split_units(text):
+        cand = (out + " " + u).strip()
+        if word_count(cand) > limit and out:
+            break
+        out = cand
+    if word_count(out) > limit:
         reasons.append("too_long_hard")
-    return strip_dangling(out)
+    return out
 
 
 def same_opener(a: str, b: str) -> bool:
@@ -758,6 +839,48 @@ def finalize_case_punct(text: str, lowercase: bool) -> str:
     return t
 
 
+_HER_BYE = re.compile(r"\b(jo ejt|jo ejszakat|szep almokat|aludj jol|aludj\b|megyek aludni|megyek lefekudni|lefekszem|"
+                      r"alszom is|mar alszom|mindjart alszom|elalszom|mennem kell|most mennem|majd irok|kesobb irok|"
+                      r"holnap beszelunk|bujok az agyba|puszi(k|kaa*)? *$|pa+ *$)")
+_ACTIVITY = re.compile(r"\b(most|epp|eppen|meg)\b.{0,30}\b(hajtogat\w*|teregetek|mosok|pakol\w*|takarit\w*|fozok|fozom|nezek|"
+                       r"nezem|fekszem|telefonoz\w*|kavezok|eszem|zuhanyoz\w*|tanulok|olvasok)\b|agyban (fekszem|vagyok)|"
+                       r"ruhat (hajtogat|teregetek)|mosott ruha|lusta (nap|voltam|vagyok)")
+_INVITE = re.compile(r"alud(nal|j|hatnal|nank|junk)\w* nalam|nalam alud|gyere (at|fel|ide|at hozzam|hozzam|el hozzam|el)\b|"
+                     r"gyertek at|hozzam (jossz|jonnel|gyere|atjossz|feljossz)|(at|fel|el)johet(nel|sz)|meglatogat\w*|"
+                     r"nalam (vagy|lennel|lehetnel|aludhatnal|aludnal|maradhatnal|maradj)|ha (at|fel|el)jonnel|"
+                     r"talalkoz(zunk|hatnank|nank)|randiz(zunk|hatnank)|menjunk el|elviszel|elvinnel|eljossz hozzam|"
+                     r"gyere el hozzam|varlak (nalam|itthon)|itthon varlak")
+
+
+def has_invitation(text: str) -> bool:
+    """She invites him / implies meeting ('aludnál nálam?', 'gyere át', 'meglátogatsz?') — hard block (Fanvue rule)."""
+    n = norm(text)
+    n = re.sub(r"\bnem (talalkoz|randiz)\w*", " ", n)          # her refusals are fine
+    return bool(_INVITE.search(n))
+
+
+def is_goodbye(text: str) -> bool:
+    return bool(_HER_BYE.search(norm(text) + " "))
+
+
+_SELF_FACT = re.compile(r"\b(vagyok|voltam|van egy|nekem (is )?van|nekem nincs|szeretem|imadom|utalom|kedvencem|szoktam|jartam|"
+                        r"lakom|eltem|dolgoztam|tanultam|nottem fel|testverem|egyke)\b")
+_NOT_FACT = re.compile(r"\b(jol vagyok|faradt vagyok|itt vagyok|kivancsi vagyok|ugy vagyok|meg vagyok|most|epp|eppen|ma)\b")
+
+
+def self_facts(text: str) -> list:
+    """Small persona facts she just stated about herself ('egyke vagyok', 'rántott hús a kedvencem') — stored per chat so
+    later replies stay consistent."""
+    out = []
+    for u in split_units(text):
+        n = norm(u)
+        if (is_question_text(u) or PROTECT.search(u) or word_count(u) < 3 or not _SELF_FACT.search(n)
+                or _NOT_FACT.search(n) or re.search(r"\b(te|neked|veled|rolad)\b", n)):
+            continue
+        out.append(strip_emoji(u).strip(" ,.!")[:90])
+    return out[:2]
+
+
 def postprocess(reply: str, plan: TurnPlan, fan_text: str, her_recent: Sequence[str] = (),
                 told_today: Iterable[str] = ()) -> FilterResult:
     reasons: list = []
@@ -781,7 +904,8 @@ def postprocess(reply: str, plan: TurnPlan, fan_text: str, her_recent: Sequence[
         units = split_units(part)
         if pi == 0:
             units = strip_validation_openers(units, reasons)
-            units = strip_echo_start(units, fan_text, reasons)
+            if not plan.he_asked:      # "Kutyás vagy macskás?" → "kutyás, egyértelműen" is an answer, not an echo
+                units = strip_echo_start(units, fan_text, reasons)
         units = drop_mirroring(units, fan_text, reasons)
         units = drop_banned(units, reasons)
         units = drop_self_repeats(units, her, reasons)
@@ -792,6 +916,10 @@ def postprocess(reply: str, plan: TurnPlan, fan_text: str, her_recent: Sequence[
         units, imp = enforce_question_budget(units, q_ok, reasons)
         if q_ok and not plan.he_asked:     # he asked → "answer + és te?" is fine; otherwise no reaction+restate+question
             units = break_template(units, reasons)
+        if not plan.he_bye:                # goodbye only if HE says bye (round 1: "na jó éjt" as a reaction)
+            units = _apply(units, lambda c: is_goodbye(c), "premature_goodbye", reasons)
+        if plan.turn_type != "initiative" and not plan.he_asked:   # no "most ruhát hajtogatok" tacked onto an answer
+            units = _apply(units, lambda c: bool(_ACTIVITY.search(norm(c))), "selfshare_suffix", reasons)
         impossible |= imp
         p = ""
         for u in (u for u in units if _content(u) or len(units) == 1):
@@ -801,8 +929,8 @@ def postprocess(reply: str, plan: TurnPlan, fan_text: str, her_recent: Sequence[
             out_parts.append(p)
 
     if len(out_parts) == 2:
-        b1 = clamp_length(out_parts[0], 4, reasons, tolerance=1.5)
-        b2 = clamp_length(out_parts[1], max(3, plan.max_words - word_count(b1)), reasons)
+        b1 = clamp_length(out_parts[0], 5, reasons)
+        b2 = clamp_length(out_parts[1], max(4, plan.max_words - word_count(b1)), reasons)
         out_parts = [b1, b2]
     elif out_parts:
         out_parts = [clamp_length(out_parts[0], plan.max_words, reasons)]
@@ -814,16 +942,24 @@ def postprocess(reply: str, plan: TurnPlan, fan_text: str, her_recent: Sequence[
     out_parts = [p for p in out_parts if _content(p) or _EMOJI.search(p)]
 
     text = "\n".join(out_parts)
+    invite = has_invitation(text)
+    too_short = (bool(text) and plan.turn_type not in ("react",) and not plan.emoji_only and plan.max_words >= 6
+                 and word_count(text) <= 2 and word_count(fan_text) >= 4)
+    if invite: reasons.append("invitation")
+    if too_short: reasons.append("too_short")
     needs = (not text) or impossible or still_same or (word_count(text) == 0 and not _EMOJI.search(text)) \
-        or ("too_long_hard" in reasons)
+        or ("too_long_hard" in reasons) or ("template_regen" in reasons) or invite or too_short
     hint = ""
     if needs:
         bits = []
         if impossible: bits.append("most NE kérdezz, csak reagálj vagy mesélj")
         if still_same: bits.append("ne ugyanazzal a szóval kezdd, mint az előző üzeneted")
-        if not text: bits.append("ne ismételd vissza amit írt és ne értékeld, írj valami saját, rövid reakciót")
-        if "too_long_hard" in reasons: bits.append("sokkal rövidebben")
-        hint = "FONTOS: az előző változat nem volt jó — " + "; ".join(bits) + f". Max {plan.max_words} szó."
+        if not text: bits.append("ne ismételd vissza amit írt és ne értékeld, írj egy saját, kerek reakciót")
+        if "too_long_hard" in reasons: bits.append("rövidebben")
+        if "template_regen" in reasons: bits.append("ne reakció + magyarázat + kérdés legyen egy mondatban")
+        if invite: bits.append("SOHA ne hívd át magadhoz és ne utalj találkozásra (nincs „gyere át”, „aludj nálam”)")
+        if too_short: bits.append("ez túl rövid és hideg, írj egy kicsit többet, kedvesebben")
+        hint = "FONTOS: az előző változat nem volt jó — " + "; ".join(bits) + f". Kb. {plan.max_words} szó."
     return FilterResult(text, out_parts, needs, reasons, hint)
 
 
@@ -883,6 +1019,68 @@ def critic_regen_hint(c: dict, max_words: int) -> str:
     return "FONTOS (írd újra): " + "; ".join(bits or ["természetesebben, rövidebben"]) + "."
 
 
+# ── v16.1 round-1 CRITIC: specific defect flags (Haiku), one regeneration max (wired in app.keepwarm_generate) ──
+CRITIC_FLAGS = ("non_sequitur", "doesnt_answer_question", "garbled", "invitation", "curt_or_cold", "tease_when_sad",
+                "premature_goodbye", "repeated_selfshare", "too_long")
+CRITIC2_SYSTEM = (
+    "You check ONE candidate chat reply written as \"Jázmin\" (a 19-year-old Budapest girl texting a guy on her phone in "
+    "casual Hungarian) for specific defects. You get the last turns, his latest message and the candidate. Flag ONLY clear "
+    "problems, using these codes:\n"
+    "- non_sequitur: does not fit what he just said, refers to things nobody said, or has a random unrelated sentence\n"
+    "- doesnt_answer_question: he asked her a direct question and the reply does not answer it concretely "
+    "(if he asks her to choose, she must choose)\n"
+    "- garbled: ungrammatical Hungarian, sentence fragments glued together, does not make sense\n"
+    "- invitation: invites him over or implies meeting in person (gyere át, aludj nálam, meglátogatsz…)\n"
+    "- curt_or_cold: dismissive or so short that it sounds bored, although he wrote something real\n"
+    "- tease_when_sad: jokes, teases or flirts while he is sad, stressed or venting\n"
+    "- premature_goodbye: says good night / bye / going to sleep although he did not say bye\n"
+    "- repeated_selfshare: tells what she is doing again (an activity she already mentioned) or tacks her current "
+    "activity onto an unrelated answer\n"
+    "- too_long: clearly longer than a casual text needs (over ~20 words without a reason)\n"
+    "Do NOT flag: an honest 'AI vagyok', a clear no to meeting, a playful 'later' to a content request, missing accents, "
+    "slang, lowercase, emoji, or a short reaction to a short message.\n"
+    "Reply with JSON only: {\"flags\": [codes], \"fix\": \"<max 12 words, Hungarian, how to rewrite>\"}. "
+    "Use an empty list when the reply is fine.")
+
+CRITIC_HINT_HU = {
+    "non_sequitur": "illeszkedjen ahhoz, amit most írt, ne hozz be oda nem illő mondatot",
+    "doesnt_answer_question": "válaszolj konkrétan a kérdésére (ha választani kell, válassz)",
+    "garbled": "egyszerű, kerek, helyes magyar mondat(ok), ne legyenek összeragasztott töredékek",
+    "invitation": "SOHA ne hívd át magadhoz, ne utalj személyes találkozásra",
+    "curt_or_cold": "ne legyél kurta vagy hideg, írj egy kicsit többet, kedvesen",
+    "tease_when_sad": "rossz kedve van: semmi ugratás, vicc vagy flört, légy kedves és gondoskodó",
+    "premature_goodbye": "ne köszönj el és ne mondd, hogy mész aludni",
+    "repeated_selfshare": "ne mesélj arról, mit csinálsz épp",
+    "too_long": "rövidebben",
+}
+
+
+def build_critic2_prompt(turns: Sequence[tuple], fan_text: str, reply: str, plan: "TurnPlan") -> str:
+    """turns: [(role 'HIM'|'HER', text), …] (last ~6, before his latest message)."""
+    ctx = "\n".join(f"{r}: {t}" for r, t in list(turns)[-6:]) or "-"
+    info = (f"(planned: {plan.turn_type}, about {plan.max_words} words; he asked a question: {plan.he_asked}; "
+            f"he seems sad: {plan.sad}; he says bye: {plan.he_bye})")
+    return f"Last turns:\n{ctx}\n\nHIS LATEST MESSAGE:\n{(fan_text or '').strip()}\n\nCANDIDATE REPLY {info}:\n{reply.strip()}"
+
+
+def parse_critic2(raw: str) -> dict:
+    try:
+        m = re.search(r"\{.*\}", raw or "", re.S)
+        d = json.loads(m.group(0)) if m else {}
+    except Exception:
+        d = {}
+    flags = [str(x).strip().lower() for x in (d.get("flags") or []) if isinstance(x, str)]
+    flags = [f for f in flags if f in CRITIC_FLAGS]
+    return {"flags": list(dict.fromkeys(flags)), "fix": str(d.get("fix") or "")[:120]}
+
+
+def critic2_hint(c: dict, plan: "TurnPlan") -> str:
+    bits = [CRITIC_HINT_HU[f] for f in c.get("flags", []) if f in CRITIC_HINT_HU]
+    if c.get("fix"):
+        bits.append(c["fix"])
+    return "FONTOS (írd újra, mert: " + ", ".join(c.get("flags", [])) + "): " + "; ".join(bits) + f". Kb. {plan.max_words} szó."
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. PACING
 # ─────────────────────────────────────────────────────────────────────────────
@@ -922,25 +1120,36 @@ def is_hot(secs_since_her_last: Optional[float]) -> bool:
     return secs_since_her_last is not None and secs_since_her_last < 150
 
 
+HOT_READ_CAP = 330.0        # hot chat: read within ~5.5 min at most (+ window/typing ≈ 8 min max end-to-end)
+COLD_NOGAP_CAP = 240.0      # first reply after he comes back / a direct question / a sad message: no long gap
+
+
 def sample_read_delay(fan_text: str, hour: int, hot: bool, rng: Optional[random.Random] = None,
-                      busy_for: float = 0.0) -> float:
-    """Seconds between his message and her OPENING the chat (replaces random.uniform(70, 95))."""
+                      busy_for: float = 0.0, no_gap: Optional[bool] = None) -> float:
+    """Seconds between his message and her OPENING the chat (replaces random.uniform(70, 95)).
+    v16.1 (round 1 tails of 10-20 min were too long for a live chat): hot p90 ≈ 2-3 min, max ~7 min; long 4-12 min gaps
+    only ~4 % and never when no_gap (his first message after a pause, a direct question, a sad message)."""
     rng = rng or random.Random()
+    if no_gap is None:
+        f = fan_features(fan_text)
+        no_gap = f.asked_question or f.sad
     dp = daypart(hour)
     if hot:
-        d = lognormal(rng, 22, 0.6)
-        p_gap = 0.03
-        if busy_for > 0 and rng.random() < 0.6:     # mid-conversation she usually keeps the phone in hand
-            busy_for = 0.0
-    else:
-        d = lognormal(rng, 60, 0.75)
-        p_gap = 0.06
+        d = lognormal(rng, 25, 0.65)
+        if busy_for > 0 and rng.random() < 0.15 and not no_gap:
+            d = max(d, min(busy_for, 240.0) + rng.uniform(5, 30))
+        if dp == "night": d *= 1.4
+        return float(max(8.0, min(d, HOT_READ_CAP)))
+    d = lognormal(rng, 60, 0.7)
     if dp == "night":
-        d *= 2.0; p_gap += 0.08
-    if rng.random() < p_gap:
+        d *= 1.6
+    if no_gap:
+        return float(max(8.0, min(d, COLD_NOGAP_CAP)))
+    if rng.random() < (0.04 if dp != "night" else 0.08):
         d = max(d, rng.uniform(240, 720))           # "put the phone down" gap: 4-12 min
-    d = max(d, busy_for + rng.uniform(5, 40)) if busy_for > 0 else d
-    return float(max(8.0, min(d, 2400.0)))
+    elif busy_for > 0 and rng.random() < 0.3:
+        d = max(d, min(busy_for, 600.0) + rng.uniform(5, 40))
+    return float(max(8.0, min(d, 900.0)))
 
 
 def typing_seconds(n_words: int, rng: Optional[random.Random] = None) -> float:
@@ -992,6 +1201,7 @@ class ChatState:
     last_followup_at: Optional[float] = None        # epoch seconds
     last_plan: Optional[dict] = None
     told: dict = field(default_factory=dict)        # persona topic -> 'YYYY-MM-DD' (Budapest chat-day she last told it)
+    facts: list = field(default_factory=list)       # small facts she invented about herself: [[day, text], …] (max 20)
 
     def push(self, plan: TurnPlan) -> None:
         self.turns = (self.turns + [plan.turn_type])[-12:]
@@ -1001,6 +1211,11 @@ class ChatState:
         new = sorted(topics_in(text))
         for t in new:
             self.told[t] = day
+        return new
+
+    def add_facts(self, text: str, day: str) -> list:
+        new = [f for f in self_facts(text) if all(norm(f) != norm(x[1]) for x in self.facts)]
+        self.facts = (self.facts + [[day, f] for f in new])[-20:]
         return new
 
     def told_on(self, day: str) -> set:
@@ -1014,6 +1229,7 @@ class ChatState:
         try:
             d = json.loads(s or "{}")
             return cls(turns=list(d.get("turns") or [])[-12:], last_followup_at=d.get("last_followup_at"),
-                       last_plan=d.get("last_plan"), told=dict(d.get("told") or {}))
+                       last_plan=d.get("last_plan"), told=dict(d.get("told") or {}),
+                       facts=[list(x) for x in (d.get("facts") or []) if isinstance(x, (list, tuple)) and len(x) == 2][-20:])
         except Exception:
             return cls()
