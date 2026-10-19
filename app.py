@@ -48,7 +48,7 @@ import anthropic
 BUDAPEST_TZ   = ZoneInfo('Europe/Budapest')
 BOOT_TIME_UTC = datetime.now(timezone.utc)
 WORKER_ID     = uuid.uuid4().hex[:8]
-print(f"[{datetime.now()}] BOT v15.8 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
+print(f"[{datetime.now()}] BOT v15.9 BOOTED worker={WORKER_ID} at {BOOT_TIME_UTC.isoformat()}")
 
 def get_budapest_now():
     return datetime.now(BUDAPEST_TZ).replace(tzinfo=None)
@@ -2177,6 +2177,7 @@ def ask_claude(dynamic_prompt, user_text, smart=True, convo=None, chat_id=None):
 # ─────────────────────────────────────────────────────────────────────────────
 _seen_activity = {}      # chat_id → last activity timestamp we already opened
 _read_after = {}         # chat_id → (activity ts, seconds to wait before opening)
+_recheck_after_takeover = set()   # chats skipped during YOUR 5-min takeover → reopened once it ends (v15.9 fix)
 _no_ts_warned = [False]
 
 def _chat_activity(chat):
@@ -2190,6 +2191,10 @@ def _chat_activity(chat):
 def _should_open_chat(chat_id, chat):
     """Keep-warm mode: don't open (= mark read) a fan's new message instantly — wait ~70-95s like a busy person."""
     if not away_mode(): return True
+    if chat_id in _recheck_after_takeover and not in_takeover(chat_id):
+        _recheck_after_takeover.discard(chat_id)
+        print(f"[takeover] {chat_id[:8]}: your 5 min are over → bot picks the chat up again", flush=True)
+        return True
     ts, sender = _chat_activity(chat)
     if ts is None:
         if not _no_ts_warned[0]:
@@ -2334,7 +2339,9 @@ def process_new_messages():
                     threading.Thread(target=extract_facts, args=(msg_id, chat_id, text_raw), daemon=True).start()
 
             check_manual_and_ppv(chat_id, fan_name, api_messages)
-            if should_skip(chat_id): continue
+            if should_skip(chat_id):
+                if in_takeover(chat_id): _recheck_after_takeover.add(chat_id)
+                continue
 
             fan_msgs = [m for m in api_messages if (m.get('sender') or {}).get('uuid') != MY_UUID]
             if not fan_msgs: continue
