@@ -4448,7 +4448,8 @@ try:
     try:   # v15.6: allowlist seed (once per seed value) + switch on once
         seed = (os.environ.get('FV_ALLOW_SEED') or '').strip()
         if only_fan() == 'allowlist' and seed and load_token('fv_allow_seed') != seed:
-            set_allowed(allowed_set() | {norm_handle(x) for x in seed.split(',')}); save_token('fv_allow_seed', seed)
+            _base = set() if os.environ.get('FV_ALLOW_REPLACE') == '1' else allowed_set()   # REPLACE=1 → exactly the seed
+            set_allowed(_base | {norm_handle(x) for x in seed.split(',')}); save_token('fv_allow_seed', seed)
             cancel_stale_pending(0); set_away(True); set_fanvue(True)
             print(f"[boot] allowlist seeded: {sorted(allowed_set())} → keep-warm ON for them only", flush=True)
     except Exception as e: print(f"[boot allow] {e}")
