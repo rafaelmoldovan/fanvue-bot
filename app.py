@@ -3211,9 +3211,16 @@ def send_due_batches():
             else:
                 # ⚖️ Fanvue rule: a DIRECT "are you AI / real?" always gets a clear yes (once), then "already told you".
                 if is_direct_ai_question(fan_text_all):
-                    db_query("UPDATE fan_profiles SET ai_strikes=COALESCE(ai_strikes,0)+1 WHERE chat_id=?", (chat_id,))
-                    ai_mode = 'already' if prof2.get('ai_confirmed') else 'confirm'
-                    dyn += "\n\n" + (AI_ALREADY_HINT if ai_mode == 'already' else AI_CONFIRM_HINT)
+                    # v16.3: a direct AI question → bot says nothing, stops for this fan only, Rafael answers himself.
+                    db_query("UPDATE fan_profiles SET ai_strikes=COALESCE(ai_strikes,0)+1, is_paused=1 WHERE chat_id=?", (chat_id,))
+                    db_query("UPDATE scheduled_replies SET status='cancelled' WHERE chat_id=? AND status IN ('pending','sending') AND id<>?", (chat_id, batch_id))
+                    try:
+                        send_telegram_alert(f"🤖❓ Fanvue: {item.get('fan_name') or chat_id} AI-ról kérdezett: „{last_line[:200]}”\n"
+                                            f"→ A bot leállt neki, nem válaszolt. Válaszolj te.",
+                                            buttons=[[("▶️ Bot vissza neki", f"fvp:{chat_id}")]])
+                    except Exception as e: print(f"[ai-stop alert] {e}")
+                    print(f"[ai-stop] {chat_id[:8]} asked about AI → paused, Rafael pinged", flush=True)
+                    db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,)); continue
                 if _MEETUP_Q.search(fan_text_all):
                     dyn += "\n\n" + MEETUP_HINT
                 # 📨 Telegram memory link — PASSIVE only (Fanvue forbids asking for off-platform names).
