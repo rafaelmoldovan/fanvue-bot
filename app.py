@@ -4426,6 +4426,15 @@ try:
             db_query("UPDATE scheduled_replies SET status='cancelled' WHERE status IN ('pending','sending')")
             print("[boot] ONLY_FAN=off → Fanvue bot OFF", flush=True)
     except Exception as e: print(f"[boot off] {e}")
+    try:   # v16.2.2: FV_UNPAUSE="handle,handle" (once per value) → per-fan pause + manual takeover cleared
+        up = (os.environ.get('FV_UNPAUSE') or '').strip()
+        if up and load_token('fv_unpause_seed') != up:
+            for h in up.split(','):
+                for cid in chat_ids_for(h):
+                    db_query("UPDATE fan_profiles SET is_paused=0, manual_takeover_until=NULL WHERE chat_id=?", (cid,))
+                    print(f"[boot] unpaused @{norm_handle(h)} ({cid[:8]})", flush=True)
+            save_token('fv_unpause_seed', up)
+    except Exception as e: print(f"[boot unpause] {e}")
     try:   # v15.8: opener seed "handle=idea" (once per value) → allowlist + first message after memory reload
         os_ = (os.environ.get('FV_OPENER_SEED') or '').strip()
         if only_fan() == 'allowlist' and os_ and '=' in os_ and load_token('fv_opener_seed') != os_:
