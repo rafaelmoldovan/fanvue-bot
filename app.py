@@ -3319,8 +3319,11 @@ def send_due_batches():
                     db_query('UPDATE messages SET was_replied=1 WHERE msg_id=?', (item['fan_msg_id'],))
                     db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,))
                     hz_st.push(plan if plan.skip else hz.TurnPlan('skip', 0, False, skip=True))
-                    if hz_res['followup']:
-                        _queue_followup(chat_id, item['fan_name'] or '', item['fan_msg_id'], datetime.now(), hz_res['followup'], hz_st)
+                    _fu = hz_res['followup']
+                    if not _fu and hz.daypart(get_budapest_now().hour) != "night":
+                        _fu = random.uniform(180, 600)    # v16.4: a dead-end ("Igen") must not end the chat → she picks it up herself
+                    if _fu:
+                        _queue_followup(chat_id, item['fan_name'] or '', item['fan_msg_id'], datetime.now(), _fu, hz_st)
                     hz_save(chat_id, hz_st)
                     print(f"[hz] {chat_id[:8]} skip (no text) for: {fan_text_all[:60]!r} {hz_res['reasons']}", flush=True)
                     continue
