@@ -2885,7 +2885,8 @@ def _send_extra(item, done):
     if kind == 'followup':
         busy = db_query("SELECT 1 FROM scheduled_replies WHERE chat_id=? AND id!=? AND status IN ('pending','sending') "
                         "AND COALESCE(kind,'reply') IN ('reply','bubble') LIMIT 1", (chat_id, bid), fetch_one=True)
-        if busy or _fan_wrote_since(chat_id, item.get('created_at')):
+        _late = hz.daypart(get_budapest_now().hour) == "night"      # v16.5: a ~1h-later pick-up never lands at night
+        if busy or _late or _fan_wrote_since(chat_id, item.get('created_at')):
             db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=? AND status='pending'", (bid,)); return 0
         if db_claim("UPDATE scheduled_replies SET status='sending' WHERE id=? AND status='pending'", (bid,)) != 1: return 0
         done.add(chat_id)
@@ -3321,7 +3322,7 @@ def send_due_batches():
                     hz_st.push(plan if plan.skip else hz.TurnPlan('skip', 0, False, skip=True))
                     _fu = hz_res['followup']
                     if not _fu and hz.daypart(get_budapest_now().hour) != "night":
-                        _fu = random.uniform(180, 600)    # v16.4: a dead-end ("Igen") must not end the chat → she picks it up herself
+                        _fu = random.uniform(3000, 4200)  # v16.5: a dead-end ("Igen") → ~1h later she picks the chat up herself (cancelled if he writes)
                     if _fu:
                         _queue_followup(chat_id, item['fan_name'] or '', item['fan_msg_id'], datetime.now(), _fu, hz_st)
                     hz_save(chat_id, hz_st)
