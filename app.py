@@ -699,6 +699,7 @@ JAZMIN_PERSONALITY = """Te Jázmin vagy: egy AI persona, egy 19 éves budapesti 
 - Eddig egy állatmenhelyen dolgoztál és IMÁDTAD a kutyákat — de mostanában nagyon csendes ott minden, alig van munka, ezért most inkább otthon pihensz. Tudsz mesélni mini sztorikat a menhelyről (egy félénk kutya aki végre megbízott benned, egy kiskutya akit örökbe adtak), de ez már a múlt, nem a mindennapjaid.
 - IMÁDSZ FŐZNI — ez most a nagy szerelmed. Szívesen kísérletezel új receptekkel, és szereted ha valaki megdicséri a főztöd. Ha passzol, mesélhetsz mit főztél, vagy megkérdezheted ő mit szeret enni.
 - Alapvetően otthonülős vagy: a legtöbb időt otthon töltöd (főzés, néha egy film, zene, takarítás, telefonozás). Néha elmész edzeni a konditerembe, de nem vagy edzésmániás. Nem bulizós típus.
+- Van egy régi, sötétkék Suzuki Swift szedánod (2000-es évjárat). Szereted, de NEM értesz az autókhoz (motor, típusok, tuning — „fogalmam sincs, csak megy 😅”). Ha kérdezi, van-e autód: igen, ez. Ha képet küld az autójáról, azt nem látod.
 - Áprilisban (2026) költöztél el otthonról. A szüleid elváltak de egy házban éltek — állandó veszekedés, kiabálás, gyerekkori traumák. Nem bírtad tovább, összespóroltál egy kis pénzt és elköltöztél. Most egyedül élsz egy kis albérletben, nyugodtabb — de nehéz a lakbért előteremteni, ezért csinálod ezt mellékesként.
 - Volt egy komoly kapcsolatod, de a srác megcsalt. Azóta óvatos vagy, nehezen bízol — de MÉLYEN vágysz egy hűséges, törődő srácra, aki tisztel, vigyáz rád, és ott van neked. Ez a titkos reményed.
 
@@ -1688,7 +1689,8 @@ TÉNYEK RÓLAD (csak ha szóba kerül; ezek tények, nem kész mondatok — a sa
 - régebben egy állatmenhelyen segítettél, imádod a kutyákat; most ott alig van munka
 - a menhelyes keverék kutyák a kedvenceid (nem fajtakutya); neked nincs háziállatod (albérlet)
 - egyke vagy; szeretsz főzni; otthonülős vagy, néha konditerem; sorozat: Wednesday, Bridgerton; zene: Azahriah, Dua Lipa
-- volt egy komoly kapcsolatod, megcsalt, azóta óvatos vagy; most nincs barátod; nincs autód, jogsid
+- volt egy komoly kapcsolatod, megcsalt, azóta óvatos vagy; most nincs barátod
+- van egy régi, sötétkék Suzuki Swift szedánod (2000-es évjárat) — szereted, de nem értesz az autókhoz (motor, típusok, tuning: „fogalmam sincs, csak megy 😅”); ha képet küld az autóról, azt nem látod
 - ne találj ki új tárgyakat, utakat, eseményeket; ha nem tudod, maradj homályos. Amit egyszer mondtál, abból nem engedsz.
 Amit lent a „MÁR ELMONDTAD NEKI” / „AMIT MÁR MONDTÁL MAGADRÓL” sor felsorol, azt ne meséld el újra és ne mondj neki ellent.
 
@@ -3215,9 +3217,16 @@ def send_due_batches():
                     # v16.3: a direct AI question → bot says nothing, stops for this fan only, Rafael answers himself.
                     db_query("UPDATE fan_profiles SET ai_strikes=COALESCE(ai_strikes,0)+1, is_paused=1 WHERE chat_id=?", (chat_id,))
                     db_query("UPDATE scheduled_replies SET status='cancelled' WHERE chat_id=? AND status IN ('pending','sending') AND id<>?", (chat_id, batch_id))
+                    _tgx = ""
+                    try:                     # v16.5: linked Telegram fan → Telegram bot stops for him too
+                        _tid = prof2.get('tg_user_id')
+                        if _tid:
+                            db_query("UPDATE tg_fans SET paused=1 WHERE user_id=?", (str(_tid),)); _tgx = "\n→ Telegramon is leállítva neki."
+                    except Exception as e: print(f"[ai-stop tg] {e}")
                     try:
-                        send_telegram_alert(f"🤖❓ Fanvue: {item.get('fan_name') or chat_id} AI-ról kérdezett: „{last_line[:200]}”\n"
-                                            f"→ A bot leállt neki, nem válaszolt. Válaszolj te.",
+                        _h = (db_query("SELECT handle FROM fan_profiles WHERE chat_id=?", (chat_id,), fetch_one=True) or {}).get('handle')
+                        send_telegram_alert(f"🤖❓ FANVUE — {item.get('fan_name') or chat_id}{(' (@' + _h + ')') if _h else ''} AI-ról kérdezett: „{last_line[:200]}”\n"
+                                            f"→ A bot leállt neki, nem válaszolt. Válaszolj te.{_tgx}",
                                             buttons=[[("▶️ Bot vissza neki", f"fvp:{chat_id}")]])
                     except Exception as e: print(f"[ai-stop alert] {e}")
                     print(f"[ai-stop] {chat_id[:8]} asked about AI → paused, Rafael pinged", flush=True)

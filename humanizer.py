@@ -821,7 +821,7 @@ _PROMISE = re.compile(r"itt leszek|mindig itt vagyok|szolj nyugodtan|irj nyugodt
 _SELLING = re.compile(r"nem arul|nem adok el|semmibe|ingyen|nem kerul (semmibe|penzbe)|\b\d+ ?(ft|forint|dollar|euro|eur|huf)\b|"
                       r"\$ ?\d|\d ?\$|vedd meg|oldd fel|feloldod|ara \d|fizess")
 _PERSONA_BAD = re.compile(r"\b(corgi|husky|labrador|tacsko|pomeran|chihuahua|bulldog|uszkar|golden|yorki|spaniel)\w*|"
-                          r"\ba (swift|kocsi|auto)m\b|az autom|a kocsim|van (egy )?(autom|kocsim|jogsim)|\b(van )?baratom van\b|"
+                          r"\bnincs (autom|kocsim|jogsim)\b|\b(van )?baratom van\b|"
                           r"egyetemre jarok|suliba jarok|\bvizsgam\b|\bvizsgaim\b|pincernokent dolgozom|dolgozom (most|egy|a|itt)|"
                           r"van (egy )?(kutyam|macskam|cicam)|\bketten (lakunk|elunk)|a (tesom|testverem|batyam|noverem|ocsem|hugom)")
 _Q_WORDS = {"milyen", "mit", "mik", "hol", "mikor", "mennyi", "hany", "ki", "kit", "melyik", "miert", "hogy", "hogyan",
@@ -1330,7 +1330,7 @@ def postprocess(reply: str, plan: TurnPlan, fan_text: str, her_recent: Sequence[
         if "template_regen" in reasons: bits.append("ne reakció + magyarázat + kérdés legyen egy mondatban")
         if invite: bits.append("SOHA ne hívd át magadhoz és ne utalj találkozásra (nincs „gyere át”, „aludj nálam”, „ott lennék”)")
         if selling: bits.append("tartalomnál csak játékosan „majd később / türelem” — ne mondd, hogy nem árulsz semmit, ne mondj árat")
-        if persona_bad: bits.append("maradj a tényeidnél (menhelyes keverék kutyákat szeretsz, nincs autód, barátod, nem jársz suliba)")
+        if persona_bad: bits.append("maradj a tényeidnél (menhelyes keverék kutyákat szeretsz, van egy régi sötétkék Suzuki Swifted, nincs barátod, nem jársz suliba)")
         if too_short: bits.append("ez túl rövid és hideg, írj egy kicsit többet, kedvesebben")
         hint = "FONTOS: az előző változat nem volt jó — " + "; ".join(bits) + f". Kb. {plan.max_words} szó."
     return FilterResult(text, out_parts, needs, reasons, hint, plain)
