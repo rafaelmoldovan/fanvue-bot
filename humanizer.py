@@ -90,7 +90,7 @@ _Q_TAIL = re.compile(r"\b\w+-e\b|\bes\s+(te|neked|veled|nalad)\s*$")
 _ACK = re.compile(r"^(ok|oke|okes|oksi|okay|ja+|jaja|aha+|igen|ige+n|jo|jol|ertem|cuki+|cukii+|haha+|hehe+|xd+|szuper|"
                   r"nagyon jo|naon jo|koszi+|koszonom|tenyleg|komoly|ugyes|aww+|persze|rendben|nice|az lehet|lehet|"
                   r"hat igen|biztos|igazad van|valoban|jo ejt|szep almokat)( ([a-z]+))?$")
-_FLIRT3 = re.compile(r"rosszalkod|kivanlak|szexel|\bszex\b|meztelen|punci|cici|\bmell(ek|eid\w*|em|ed|bimbo\w*)?\b|fasz|dug(j|n|ni|unk)|baszn|horny|\bnude|"
+_FLIRT3 = re.compile(r"kutya ?poz|doggy|mogotted|hatulrol|nyalna|lovagol|elkapnalak|rosszalkod|kivanlak|szexel|\bszex\b|meztelen|punci|cici|\bmell(ek|eid\w*|em|ed|bimbo\w*)?\b|fasz|dug(j|n|ni|unk)|baszn|horny|\bnude|"
                      r"naked|\bfuck|szopn|felizgat|gerjed|merev|sexting|popsi|fenek|segg")
 _FLIRT2 = re.compile(r"dogos|szexi|csok|puszil|agyba|olel|bujn|imadlak|gyonyoru|csinos|szep vagy|hianyz|kivancsi vagyok rad|"
                      r"megmutat|mutass|mutassam")
