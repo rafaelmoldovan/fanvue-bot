@@ -2993,9 +2993,19 @@ def _should_open_chat(chat_id, chat):
             hot = since < 300
             lm = chat.get('lastMessage') or chat.get('latestMessage') or {}
             ff = hz.fan_features(lm.get('text') or '')
-            no_gap = since > 1800 or ff.asked_question or ff.sad      # he comes back / asks / is sad → no long gap
+            # v16.8: she asked him something within the last hour and he's answering → she's waiting for it, no long gap
+            _hl = db_query("SELECT text FROM messages WHERE chat_id=? AND is_mine=1 ORDER BY timestamp DESC LIMIT 1", (chat_id,), fetch_one=True) or {}
+            her_q = since < 3600 and '?' in (_hl.get('text') or '')
+            no_gap = since > 1800 or ff.asked_question or ff.sad or her_q   # he comes back / asks / is sad / answers her
             busy = _PRESENCE.busy_for(time.time(), h) if _PRESENCE else 0.0
-            wait = (ts, hz.sample_read_delay(lm.get('text') or '', h, hot, busy_for=busy, no_gap=no_gap))
+            secs = hz.sample_read_delay(lm.get('text') or '', h, hot, busy_for=busy, no_gap=no_gap)
+            old_w = _read_after.get(chat_id)
+            if old_w and old_w[0] and old_w[0] < ts:
+                # v16.8: he sent several messages in a row → the read moment NEVER moves later (was: re-rolled per
+                # message, up to ~10 min → "the bot went dead"); she reads at the earlier deadline
+                old_deadline = old_w[0] + timedelta(seconds=old_w[1])
+                secs = min(secs, max(0.0, (old_deadline - ts).total_seconds()))
+            wait = (ts, secs)
             print(f"[hz] {chat_id[:8]} read in ~{int(wait[1])}s{' (hot)' if hot else ''}{' (phone down)' if busy else ''}", flush=True)
         else:
             wait = (ts, random.uniform(70, 95))
