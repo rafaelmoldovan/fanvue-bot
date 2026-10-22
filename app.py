@@ -2801,6 +2801,12 @@ def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_
                            spelling="plain" if rng.random() < hz.PLAIN_SPELLING_P else "accent", lowercase=rng.random() < 0.85)
     else:
         plan = hz.plan_turn(ctx, rng)
+        if profile_overrides is None and get_fan_plan(chat_id):   # v16.11: Rafael's plan → never a silent skip
+            if plan.skip:
+                plan = hz.TurnPlan("short", hz.sample_length("short", rng, hour=hour), False, spelling=plan.spelling,
+                                   lowercase=plan.lowercase)
+            if fan_plan_wants_questions(chat_id) and plan.turn_type not in ("care", "refuse") and not plan.he_bye:
+                plan.allow_question = True
         plan.open_q = open_q
         plan.multi = len([l for l in fan_text.split("\n") if l.strip()]) > 1
     is_hot = hz.is_hot(secs) if hot is None else hot
@@ -3411,7 +3417,7 @@ def send_due_batches():
             if use_hz:
                 # ── v16 HUMANIZER: plan → compact prompt → model → post-filters; merges messages that arrive meanwhile ──
                 lock = _kw_lock(fan_text_all)
-                extra = "\n".join(x for x in (tg_hint_used, later_hint) if x)
+                extra = "\n".join(x for x in (tg_hint_used, later_hint, fan_plan_hint(chat_id)) if x)
                 hz_st = hz_load(chat_id)
                 t_gen = time.time()
                 requeue = False
@@ -3790,6 +3796,106 @@ def status_text():
             + (f"\n🧪 Csak ezeknek válaszol: {', '.join('@' + h for h in sorted(allowed_set())) or 'senkinek'} — más chatet nem nyit meg "
                f"(/fv_start név · /fv_stop név · /fv_list)" if only_fan() else ""))
 
+# ── v16.11 COMMAND CENTER (Rafael 2026-10-22): per-fan game plan in plain Hungarian + full summary ──────────────
+# /fv_plan <név> <mit csináljon>  → the bot follows it in that chat (time-aware: "20 perc múlva…"); /fv_plan_off <név> ends it;
+# /fv_stop or /fv_start ALWAYS clears the plan → after a restart she just chats casually. /fv_summary <név> → full summary.
+def _plan_key(cid): return f"fv_plan_{cid}"
+def get_fan_plan(cid):
+    try: return json.loads(load_token(_plan_key(cid)) or 'null')
+    except Exception: return None
+def set_fan_plan(cid, text, handle=""):
+    save_token(_plan_key(cid), json.dumps({"text": text.strip()[:1200], "start": datetime.now(timezone.utc).isoformat(),
+                                           "handle": handle}, ensure_ascii=False))
+def clear_fan_plan(cid): save_token(_plan_key(cid), 'null')
+def fan_plan_hint(cid):
+    pl = get_fan_plan(cid)
+    if not pl or not pl.get("text"): return ""
+    try: mins = int((datetime.now(timezone.utc) - datetime.fromisoformat(pl["start"])).total_seconds() // 60)
+    except Exception: mins = 0
+    return ("🗒️ RAFAEL TERVE EHHEZ A SRÁCHOZ (a terv " + str(mins) + " perce indult): „" + pl["text"] + "”\n"
+            "Kövesd ezt a beszélgetésben TERMÉSZETESEN, lépésenként, ahogy telik az idő (ha időpontot ír, a fenti percszám "
+            "alapján döntsd el, melyik lépésnél tartasz); a saját laza stílusodban, ne kihallgatásszerűen, és reagálj arra is, "
+            "amit ő ír. A szabályok mindig erősebbek a tervnél: nem találkozol vele, nem írsz linket, nem adsz el, "
+            "AI-kérdésnél nem válaszolsz, kiskorúval nem beszélsz.")
+def fan_plan_wants_questions(cid):
+    pl = get_fan_plan(cid)
+    return bool(pl and re.search(r"k[ée]rdez|k[ée]rd[ée]s|t[öo]bbet (meg)?tudni|ismerd meg|faggas|der[íi]tsd ki", pl.get("text") or "", re.I))
+
+SUMMARY_SYSTEM = (
+    "Egy Fanvue creator fiók (Jázmin, kezeli: Rafael) és egy rajongó TELJES beszélgetését kapod, plusz a korábbi jegyzeteket. "
+    "Írj Rafaelnek egy ALAPOS, pontos összefoglalót MAGYARUL a rajongóról. SZABÁLYOK: csak azt írd le, amit a RAJONGÓ ténylegesen "
+    "mondott vagy egyértelműen kiderül; ha valami bizonytalan, írd mellé, hogy „(bizonytalan)”, és ne találj ki semmit; amit Jázmin "
+    "(a fiók) mondott magáról, az NEM a rajongóról szóló tény. Ahol fontos, tegyél mellé rövid szó szerinti idézetet. Ne moralizálj. "
+    "Formátum (rövid címsorok, pontokba szedve):\n"
+    "1. Alapadatok: név/becenév, kor, hol lakik, munka/tanulás, családi állapot, gyerekek\n"
+    "2. Élete: család, barátok, napi rutin, hobbik, kedvencek (kaja, zene, sport, sorozat…), autó, kisállat\n"
+    "3. Kapcsolatok: múltbeli/mostani kapcsolatok, mit keres, mit vár Jázmintól\n"
+    "4. Érzelmek, gondok: amit nehéznek mesélt, hangulata, mire érzékeny\n"
+    "5. Flört / szexuális érdeklődés: mit szeret, milyen tempóban halad\n"
+    "6. Vásárlások / pénz: vett-e már valamit, mit mondott a pénzről, árakról, előfizetésről\n"
+    "7. Ígéretek és nyitott szálak: amit megbeszéltetek, amit Jázmin ígért, amire még nem jött válasz\n"
+    "8. Figyelmeztetések: kiskorúság gyanúja, AI-gyanú, találkozó-kérés, más platform kérése, agresszió\n"
+    "9. Hogyan érdemes vele folytatni (2-3 konkrét javaslat)\n"
+    "Ha egy pontról nincs információ: „—”.")
+def fan_summary(cid):
+    prof = db_query("SELECT fan_name, handle, memory_notes, total_messages FROM fan_profiles WHERE chat_id=?", (cid,), fetch_one=True) or {}
+    rows = db_query("SELECT text, is_mine, author, timestamp FROM messages WHERE chat_id=? ORDER BY timestamp ASC", (cid,)) or []
+    facts = db_query("SELECT fact_type, fact_value FROM fan_facts WHERE chat_id=? ORDER BY discovered_at ASC", (cid,)) or []
+    lines, seen = [], set()
+    for r in rows:
+        t = (r.get('text') or '').strip()
+        if not t: continue
+        who = "FAN" if not r.get('is_mine') else ("RAFAEL (kézzel, Jázminként)" if r.get('author') == 'rafael' else "JÁZMIN")
+        k = (who[:3], t)
+        if k in seen and len(t) > 12: continue
+        seen.add(k)
+        lines.append(f"[{(r.get('timestamp') or '')[:16]}] {who}: {t}")
+    convo = "\n".join(lines)
+    if len(convo) > 150000:
+        convo = "…(a legrégebbi rész kimaradt)…\n" + convo[-150000:]
+    ctx = (f"RAJONGÓ: {prof.get('fan_name') or ''} (@{prof.get('handle') or ''}), {len(rows)} üzenet\n"
+           f"KORÁBBI JEGYZETEK: {(prof.get('memory_notes') or '—')[:3000]}\n"
+           f"AUTOMATIKUSAN KISZEDETT TÉNYEK: " + ("; ".join(f"{f['fact_type']}: {f['fact_value']}" for f in facts) or "—") +
+           "\n\nBESZÉLGETÉS:\n" + convo)
+    r = llm_create(model=REPLY_MODEL, max_tokens=3000, system=SUMMARY_SYSTEM, messages=[{"role": "user", "content": ctx}])
+    return (r.text or "").strip()
+def _send_long(text):
+    text = text or ""
+    while text:
+        cut = text[:3400]
+        if len(text) > 3400 and "\n" in cut: cut = cut[:cut.rfind("\n")]
+        send_telegram_alert(cut); text = text[len(cut):].lstrip("\n")
+def _summary_job(h):
+    try:
+        cids = chat_ids_for(h)
+        if not cids:
+            send_telegram_alert(f"❓ Nem találok ilyen Fanvue fant: @{h}. Írd pontosan a nevét (pl. native-bobolink-990)."); return
+        for cid in cids:
+            out = fan_summary(cid)
+            _send_long(f"📋 ÖSSZEFOGLALÓ — @{h}\n\n" + (out or "(nem sikerült összefoglalót írni)"))
+    except Exception as e:
+        send_telegram_alert(f"⚠️ Összefoglaló hiba (@{h}): {e}")
+
+FV_HELP = """🎛️ PARANCSKÖZPONT — Fanvue bot (Telegramról)
+
+▶️ /fv_start név — bot BE neki (laza, sima beszélgetés)
+⏸ /fv_stop név — bot KI neki (a terv is törlődik)
+📋 /fv_list — kinek válaszol most
+✉️ /fv_say név mit írjon — ő ír elsőként, ezzel a gondolattal
+
+🗒️ /fv_plan név mit csináljon — TERV ennek a fannak, sima magyar mondatokkal.
+   Példa: /fv_plan native-bobolink-990 az első pár üzenetben kérdezz róla minél többet (munka, család, hobbi), kb. 20 perc múlva, ha még beszélgettek, térj rá a régi kapcsolataira
+   • A bot lépésenként követi, és tudja, hány perce indult a terv (ezért írhatsz időt is).
+   • A szabályok mindig erősebbek: nem találkozik, nem ad el, nem ír linket, AI-kérdésnél leáll.
+   • Új /fv_plan ugyanannak a fannak = felülírja a régit.
+🔎 /fv_plan név — megmutatja a mostani tervet
+🧹 /fv_plan_off név — terv vége, onnantól laza beszélgetés
+   ⚠️ /fv_stop vagy /fv_start mindig törli a tervet → újraindítás után sima, laza beszélgetés.
+
+📋 /fv_summary név — teljes összefoglaló a fanról (kor, munka, család, kapcsolatok, kedvencek, flört, vásárlás, nyitott szálak, figyelmeztetések, javaslat). 1-2 perc, több üzenetben jön.
+
+💡 Tippek: a nevet úgy írd, ahogy a Fanvue-n van (pl. native-bobolink-990, @ nélkül is jó). A tervet írd úgy, mintha egy kollégának mondanád: mit, milyen sorrendben, mikor. Ne írj bele linket vagy árat."""
+
 def fv_allow_cmd(act, arg):
     """Per-fan Fanvue on/off from Telegram: /fv_start <handle or link>, /fv_stop <handle>, /fv_list."""
     if only_fan() != 'allowlist':
@@ -3815,11 +3921,35 @@ def fv_allow_cmd(act, arg):
             resolve_tg_link(cid, h)
         return (f"🔗 @{h} ↔ Telegram „{tgname}”: " + ("összekötöm most." if cids else "összekötöm, amint megnyitom a chatjét (pár másodperc).")
                 + f"\n▶️ Fanvue bot BE neki is. Most aktív: " + ", ".join("@" + x for x in sorted(allowed_set())))
+    if act == "fvhelp":
+        return FV_HELP
+    if act in ("fvplan", "fvplanoff", "fvsummary"):
+        parts = (arg or "").split(None, 1)
+        if not parts: return "Így: /fv_plan név mit csináljon  ·  /fv_plan_off név  ·  /fv_summary név   (részletek: /fv_help)"
+        h = norm_handle(parts[0]); cids = chat_ids_for(h)
+        if act == "fvsummary":
+            threading.Thread(target=_summary_job, args=(h,), daemon=True).start()
+            return f"📋 Összefoglaló készül @{h}-ról… (1-2 perc, több üzenetben jön)"
+        if not cids: return f"❓ Nem találok ilyen Fanvue fant: @{h}. Írd pontosan a nevét (pl. native-bobolink-990)."
+        if act == "fvplanoff":
+            for cid in cids: clear_fan_plan(cid)
+            return f"🧹 @{h}: terv törölve — innentől laza, sima beszélgetés."
+        if len(parts) < 2:
+            pl = get_fan_plan(cids[0])
+            return (f"🗒️ @{h} terve ({pl.get('start','')[:16].replace('T',' ')} UTC óta): „{pl['text']}”" if pl and pl.get('text')
+                    else f"@{h}: nincs terve (laza beszélgetés). Új terv: /fv_plan {h} mit csináljon")
+        for cid in cids: set_fan_plan(cid, parts[1], h)
+        if h not in al:
+            set_allowed(al | {h}); cancel_stale_pending(); set_away(True); set_fanvue(True)
+        return (f"🗒️ @{h} terve beállítva: „{parts[1].strip()[:300]}”\nA bot ezt követi a következő üzenetétől. "
+                f"Megnézés: /fv_plan {h} · Vége: /fv_plan_off {h}")
     if act == "fvallowlist":
         return ("🟢 Fanvue bot ezeknek válaszol: " + ", ".join("@" + h for h in sorted(al))) if al else "⏸ Senkinek nem válaszol most."
     hs = [norm_handle(x) for x in re.split(r"[\s,]+", arg or "") if norm_handle(x)]
     if not hs:
         return "Írd mögé a fan nevét, pl.: /fv_start csaby84  vagy  /fv_stop csaby84"
+    for h in hs:                                         # v16.11: start/stop = fresh, casual chat (no plan)
+        for cid in chat_ids_for(h): clear_fan_plan(cid)
     if act == "fvallow":
         set_allowed(al | set(hs))
         cancel_stale_pending()
@@ -3894,7 +4024,7 @@ _CMD_MAP = {"/start": "menu", "/menu": "menu", "/status": "status", "/allapot": 
             "/fanvue_be": "fv:on", "/fanvue_ki": "fv:off", "/telegram_be": "tg:on", "/telegram_ki": "tg:off",
             "/reconnect": "reconnect", "/ujracsatlakozas": "reconnect",
             "/learn": "learn", "/tanulj": "learn", "/away": "away:on", "/tavol": "away:on", "/back": "away:off", "/vissza": "away:off",
-            "/fv_start": "fvallow", "/fvstart": "fvallow", "/fv_stop": "fvdeny", "/fvstop": "fvdeny", "/fv_list": "fvallowlist", "/fvlist": "fvallowlist", "/fv_link": "fvlink", "/fvlink": "fvlink", "/fv_say": "fvsay", "/fvsay": "fvsay",
+            "/fv_start": "fvallow", "/fvstart": "fvallow", "/fv_stop": "fvdeny", "/fvstop": "fvdeny", "/fv_list": "fvallowlist", "/fvlist": "fvallowlist", "/fv_link": "fvlink", "/fvlink": "fvlink", "/fv_say": "fvsay", "/fvsay": "fvsay", "/fv_plan": "fvplan", "/fvplan": "fvplan", "/fv_plan_off": "fvplanoff", "/fvplanoff": "fvplanoff", "/fv_summary": "fvsummary", "/fvsummary": "fvsummary", "/fv_help": "fvhelp", "/fvhelp": "fvhelp", "/parancsok": "fvhelp",
             "/fans": "fvlist", "/fanok": "fvlist", "/tgfans": "tglist", "/tgfanok": "tglist", "/fan": "search"}
 
 def control_bot_loop():
@@ -3913,7 +4043,11 @@ def control_bot_loop():
             {"command": "reconnect", "description": "Fanvue újracsatlakoztatása"},
             {"command": "fans", "description": "Fanvue fanok — megállítás / indítás"},
             {"command": "tgfans", "description": "Telegram fanok — megállítás / indítás"},
-            {"command": "fan", "description": "Fan keresése név szerint: /fan Péter"}]}, timeout=10)
+            {"command": "fan", "description": "Fan keresése név szerint: /fan Péter"},
+            {"command": "fv_help", "description": "Parancsközpont: terv, összefoglaló — útmutató"},
+            {"command": "fv_plan", "description": "Terv egy fannak: /fv_plan név mit csináljon"},
+            {"command": "fv_plan_off", "description": "Terv vége: /fv_plan_off név"},
+            {"command": "fv_summary", "description": "Teljes összefoglaló: /fv_summary név"}]}, timeout=10)
     except Exception: pass
     offset = int(load_token('tg_ctrl_offset') or 0)
     if not offset:
@@ -3945,7 +4079,7 @@ def control_bot_loop():
                         if str(m.get('chat', {}).get('id')) != str(TELEGRAM_CHAT_ID): continue
                         cmd = (m.get('text') or '').strip().split()[0].split('@')[0].lower() if (m.get('text') or '').strip() else ''
                         act = _CMD_MAP.get(cmd)
-                        if act in ("fvallow", "fvdeny", "fvallowlist", "fvlink", "fvsay"):
+                        if act in ("fvallow", "fvdeny", "fvallowlist", "fvlink", "fvsay", "fvplan", "fvplanoff", "fvsummary", "fvhelp"):
                             arg_ = " ".join((m.get('text') or '').split()[1:]).strip()
                             send_telegram_alert(fv_allow_cmd(act, arg_)); continue
                         if act == "search":
