@@ -3165,6 +3165,27 @@ def process_new_messages():
             msg_id = last.get('uuid') or ''
             row = db_query('SELECT text FROM messages WHERE msg_id=?', (msg_id,), fetch_one=True)
             text = (row.get('text') if row else (last.get('text') or '')).strip()
+            # v16.9: he often sends several messages before she reads (e.g. a long confession + "if this is too much,
+            # I understand") — ALL of his unanswered messages since her last one go into the batch, oldest first.
+            # (Before: only the newest line was answered and the earlier ones never reached the model.)
+            try:
+                _mine_ts = [_ts(m) for m in api_messages if (m.get('sender') or {}).get('uuid') == MY_UUID]
+                _her_last = max(_mine_ts) if _mine_ts else datetime.min.replace(tzinfo=timezone.utc)
+                _parts = []
+                for _fm in sorted([m for m in fan_msgs if _ts(m) > _her_last], key=_ts)[-8:]:
+                    _id = _fm.get('uuid') or ''
+                    if _id and db_query('SELECT 1 FROM messages WHERE msg_id=? AND was_replied=1', (_id,), fetch_one=True):
+                        continue
+                    _r = db_query('SELECT text FROM messages WHERE msg_id=?', (_id,), fetch_one=True) if _id else None
+                    _t = ((_r or {}).get('text') or _fm.get('text') or '').strip()
+                    if _t and db_query("SELECT 1 FROM scheduled_replies WHERE chat_id=? AND status IN ('sent','sending') AND "
+                                       "COALESCE(kind,'reply')='reply' AND fan_text LIKE ? LIMIT 1", (chat_id, '%' + _t + '%'),
+                                       fetch_one=True):
+                        continue                                    # already part of an answered batch
+                    if _t and _t not in _parts: _parts.append(_t)
+                if len(_parts) > 1: text = "\n".join(_parts)
+            except Exception as _e:
+                print(f"[batch-join {chat_id[:8]}] {_e}", flush=True)
 
             if is_emoji_or_nonsense(text) and not text.startswith('[fotót') and not (
                     hz_on() and away_mode() and hz.fan_features(text).emoji_only):   # v16: '😘' may get '😘😘' (or nothing)

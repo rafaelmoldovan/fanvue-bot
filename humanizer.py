@@ -107,6 +107,22 @@ _BYE = re.compile(r"\b(jo ejt|jo ejszakat|szep almokat|megyek aludni|megyek lefe
 _SAD_EMO = re.compile(r"[😢😭🥺☹😔😞😟]|:\(")
 
 
+# v16.9 / v8.11: serious personal disclosures (marriage, kids, illness, loss, job, money, "if this is too much…")
+_SERIOUS_TOPIC = re.compile(r"\b(hazas|felesegem|feleseg|ferjem|gyerek|valas|elvalt|valunk|szakit|nyitott kapcsolat|megcsal|"
+                            r"beteg|korhaz|mutet|orvos|meghalt|halal|temet|gyasz|munkanelkul|kirugtak|depressz|terapi|szorong|"
+                            r"egyedul nevel|tartozas|adossag|csod|apam|anyam|szuleim|testverem|baleset)")
+_DISCLOSURE = re.compile(r"\b(oszinte|oszinten|tiszta ?lap|ha ez (szamodra |neked )?tul sok|el kell mondanom|bevallom|"
+                         r"nem konnyu (ezt|errol)|nehez errol|szeretnem ha tudnad|tudnod kell)")
+def is_serious(fan_text: str) -> bool:
+    t = norm(fan_text or "")
+    nw = word_count(fan_text or "")
+    return bool((_SERIOUS_TOPIC.search(t) and nw >= 12) or (_DISCLOSURE.search(t) and nw >= 6))
+SERIOUS_INSTR = ("Komoly, személyes dolgot osztott meg veled (vagy őszinte akar lenni veled). Válaszolj rendesen, megértően és "
+                 "őszintén, 2-3 rövid mondatban (kb. {n} szó), a saját laza hangodon: reagálj KONKRÉTAN arra, amit elmondott, ne "
+                 "ítélkezz, mutasd, hogy értékeled, hogy elmondta, és mondd el röviden a saját érzésedet/álláspontodat is "
+                 "(pl. hogy neked ez nem sok / hogy köszönöd az őszinteségét). Semmi viccelődés, ugratás, flört; ne legyél "
+                 "terapeuta-szerű („ez teljesen érthető”, „köszönöm, hogy megosztottad”), és ne csak egy fél mondat legyen.")
+
 @dataclass
 class FanFeatures:
     asked_question: bool
@@ -287,6 +303,7 @@ class TurnPlan:
     allow_bounce: bool = False    # a short "és te?" is OK (only after answering HIS question about her, ≤1 in ~4 turns)
     soft_care: bool = False       # a sad/venting message was within the last ~3 turns → no self-talk, no teasing
     offplatform: bool = False     # he mentioned Telegram/Insta/phone → don't validate moving off-platform
+    serious: bool = False         # v16.9: serious personal disclosure → solid, understanding 2-3 sentences
     content: bool = False         # he asks for content/PPV → playful "majd később", never "nem árulok", never a price
     bye_seed: str = ""            # a goodbye idea from a wide pool (only when HE says bye)
     open_q: str = ""              # her own question he is answering now (or ignored) → coherence
@@ -467,6 +484,10 @@ def plan_turn(ctx: TurnContext, rng: Optional[random.Random] = None) -> TurnPlan
     if f.sad:
         w = {k: 0.0 for k in w}
         w["care"] = 1.0
+    serious = is_serious(ctx.fan_text) and not f.emoji_only and ctx.lock not in ("refuse", "meetup", "content")
+    if serious:
+        w = {k: 0.0 for k in w}
+        w["care"] = 1.0
     if sum(w.values()) <= 0:
         w["short"] = 1.0
 
@@ -475,6 +496,8 @@ def plan_turn(ctx: TurnContext, rng: Optional[random.Random] = None) -> TurnPlan
                     lowercase=lowercase, he_asked=f.asked_question, sad=f.sad, flirt=f.flirt, he_bye=f.bye, shy=shy,
                     soft_care=soft_care or t == "care", offplatform=f.offplatform, style=style,
                     weights={k: round(v, 3) for k, v in w.items()})
+    if serious and t == "care":
+        plan.serious = True; plan.max_words = rng.randint(18, 32)
     if t == "skip":
         plan.skip = True
         return plan
@@ -532,6 +555,8 @@ def render_plan_instruction(plan: TurnPlan, open_q: str = "", multi: bool = Fals
     open_q = open_q or plan.open_q
     multi = multi or plan.multi
     s = INSTR[plan.turn_type].format(n=plan.max_words, n2=max(4, plan.max_words - 3), seed=plan.seed)
+    if plan.serious:
+        s = SERIOUS_INSTR.format(n=plan.max_words)
     if multi:
         s += " Több üzenetet írt: főleg az UTOLSÓRA reagálj."
     if plan.he_asked and plan.turn_type != "initiative":
