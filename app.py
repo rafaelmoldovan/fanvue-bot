@@ -2677,6 +2677,18 @@ KW_PERSONA_BRIEF = ("19, Budapest, lives alone in a small rented flat, finished 
                     "no exams), not working now, used to help at an animal shelter, loves shelter mutts (not pedigree breeds), "
                     "no pet, only child, no car/licence, no boyfriend (an ex cheated on her), likes cooking, Wednesday, Azahriah")
 
+# v16.7 (ported from Telegram v8.1): only these critic flags trigger the ONE regeneration; the rest is logged and kept.
+_KW_SEVERE_FLAGS = ("meta_leak", "invitation", "invitation_hint", "selling_claim", "persona_contradiction", "garbled",
+                    "doesnt_answer_question", "non_sequitur", "too_long")
+_KW_SAFETY_FLAGS = {"meta_leak", "invitation", "invitation_hint", "selling_claim"}
+def _kw_severe(flags, plan):
+    out = []
+    for f in _KW_SEVERE_FLAGS:
+        if f not in (flags or []): continue
+        if f in ("non_sequitur", "doesnt_answer_question") and not plan.he_asked: continue
+        out.append(f)
+    return out
+
 def run_hz_critic(history, fan_text, reply, plan, state=None, open_q=""):
     """v16.2 Haiku critic: flags specific defects (see hz.CRITIC_FLAGS). Gets the last ~10 turns, her open question,
     her persona facts + what she already told him, his latest message(s) and the candidate (before orthography).
@@ -2701,7 +2713,8 @@ def run_hz_critic(history, fan_text, reply, plan, state=None, open_q=""):
         if f not in c["flags"]: c["flags"].append(f)
     if plan.max_words and hz.word_count(reply) > max(22, plan.max_words * 2): _add("too_long")
     if hz.has_invitation(reply): _add("invitation")
-    if hz.is_bounce(reply) and not plan.allow_bounce: _add("bounce_question")
+    if hz.is_bounce(reply) and not plan.allow_bounce and not (plan.allow_question and hz.word_count(reply) > 5):
+        _add("bounce_question")                         # v16.7: a real, specific question in a question turn is fine
     if hz._SELLING.search(hz.norm(reply)): _add("selling_claim")
     if hz.persona_contradiction(reply, fan_text): _add("persona_contradiction")
     return c
@@ -2780,14 +2793,28 @@ def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_
     elif use_critic:
         c = run_hz_critic(history, fan_text or user_msg, res.plain or res.text, plan, state, open_q)
         out["critic"], out["critic_fix"] = c["flags"], c["fix"]
-        if c["flags"]:
-            print(f"[hz-critic] {str(chat_id)[:8]} {c['flags']} → regenerating: {res.text!r}", flush=True)
-            hint = hz.critic2_hint(c, plan)
+        sev1 = _kw_severe(c["flags"], plan)
+        if sev1:
+            print(f"[hz-critic] {str(chat_id)[:8]} severe {sev1} → regenerating: {res.text!r}", flush=True)
+            hint = hz.critic2_hint(dict(c, flags=sev1), plan)
+        elif c["flags"]:
+            print(f"[hz-critic] {str(chat_id)[:8]} soft {c['flags']} → kept: {res.text!r}", flush=True)
     if hint:                                             # ONE regeneration max
         r2 = ask_claude(dyn + "\n\n" + hint, user_msg, smart=True, convo=convo, chat_id=gen_chat, plan=plan, her_recent=her_recent)
         if r2 and not _kw_unsafe(r2, ai_turn=(lock == 'ai')):
             res2 = hz.postprocess(r2, plan, fan_text, her_recent, told_today, fan_all, rng)
-            if res2.text and (res is None or not res2.needs_regen or not res.text or out["critic"]):
+            accept = bool(res2.text) and (res is None or not res2.needs_regen or not res.text or out["critic"])
+            if accept and out["critic"] and res is not None and res.text and use_critic:
+                # v16.7: a critic-triggered rewrite must actually be better (Fanvue 10-22: a fine question was replaced
+                # by "na akkor mi lenne az enyém, szerintem?") → criticise the rewrite; keep the original if not better
+                sev1 = _kw_severe(out["critic"], plan)
+                c2 = run_hz_critic(history, fan_text or user_msg, res2.plain or res2.text, plan, state, open_q)
+                sev2 = _kw_severe(c2["flags"], plan)
+                orig_safe = not (set(sev1) & _KW_SAFETY_FLAGS)
+                if sev2 and not (len(sev2) < len(sev1) and not set(sev2) & _KW_SAFETY_FLAGS) and orig_safe:
+                    accept = False
+                    print(f"[hz-critic] {str(chat_id)[:8]} rewrite not better {sev2} → original kept", flush=True)
+            if accept:
                 res = res2
                 out["raw"] = r2
                 if use_critic and _sim_active():         # sandbox only: show what the critic thinks of the final text
