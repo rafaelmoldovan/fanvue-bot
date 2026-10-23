@@ -1403,7 +1403,10 @@ def cancel_stale_pending(max_age_min=30):
 
 _CONTENT_REQ = re.compile(r"k[üu]ld(j|esz|en[ée]l|h?etn[ée]l|d)?\w*.{0,25}(k[ée]p|fot[óo]|vide[óo]|pic|nude|selfie|sz[ée]lfi|tartalm|valami)|"
                           r"(k[ée]p|fot[óo]|vide[óo]|tartalom|ppv)\w*.{0,20}(k[ée]r|szeretn|akarok|mutat|k[üu]ld)|mutass?d?\s+(meg\s+)?(magad|valamit|t[öo]bbet)|"
-                          r"\bppv\b|z[áa]rolt|feloldan|felold|megvenn[ée]m|megveszem|mennyi(be)?\s+(ker[üu]l|az\s+[áa]r)|\bnudes?\b|meztelen|pu?c[ée]r|"
+                          r"\bppv\b|z[áa]rolt|feloldan|felold|megvenn[ée]m|megveszem|mennyi(be)?\s+(ker[üu]l|az\s+[áa]r)|\bnudes\b|"
+                          # v16.15: nudity words count only as a REQUEST (send/show/see/have), not when he talks about himself
+                          r"(k[üu]ld|mutat|l[áa]t(ni|hat|n[áa]m)|k[ée]rek|kaphat|van\s+(egy\s+)?|szeretn[ée]k)\w*.{0,30}(meztelen|pu?c[ée]r|nude)|"
+                          r"(meztelen|pu?c[ée]r|nude)\w*\s+(k[ée]p|fot[óo]|vide[óo]|tartalm)|"
                           r"send\s+(me\s+)?(pics?|nudes?|photos?|videos?)|show\s+me", re.I)
 LATER_HINTS = [
     "📦 A srác tartalmat/képet/videót kér. NE küldj és NE ígérj konkrétumot — játékosan, a te stílusodban hagyd nyitva, hogy MAJD KÉSŐBB (pl. „majd később 😏”, „türelem, később meglátjuk”, „kicsit később, most nem vagyok gépnél”). Variáld a szavakat.",
