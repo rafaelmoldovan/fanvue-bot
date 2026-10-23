@@ -828,12 +828,19 @@ _MEETUP_Q = re.compile(r"tal[áa]lkoz|tal[áa]lka|\btali\b|\btaliz|randi|randiz|
                        r"személyesen|szem[ée]lyesen|élőben|[ée]l[őo]ben|elj[öo]ssz|(gyere|megyek|elmegyek|[áa]tmegyek|mehetek)\s+(el\s+)?(hozz[áa]d|n[áa]lad)|n[áa]lad\s+alud|gyere el|"
                        r"\bmeet\b|\bdate\b", re.I)
 
+_AI_STRONG = re.compile(r"\b(ai|a\.i\.)\b|\bbot\b|\bbot(ok|nak|tal|e)\b|robot|chat ?gpt|\bgpt\b|mesters[ée]ges|\bfake\b|deepfake|"
+                        r"g[ée]p\s+[íi]rja|nem\s+te\s+[íi]rsz|program\s+vagy|val[óo]di\s+ember\s+vagy|igazi\s+ember\s+vagy|"
+                        r"\bl[ée]tezel\b|are you (real|human)", re.I)
 def is_direct_ai_question(text):
     """Regex first (cheap); for borderline cases ask Haiku. Banter is NOT a direct question."""
     t = (text or "").strip()
     if not t or not (_AI_PRE.search(t) or re.search(r"\bMI\b", t)): return False
     if _AI_DIRECT.search(t) and ("?" in t or re.search(r"\b(vagy|-e|e)\s*[?!.]*\s*$", t, re.I)):
         return True
+    # v16.14: only weak words ("ember", "igazi", "program", "gép"…) and no regex hit → NOT an AI question
+    # (10-23: "…szimplán beszélgetünk. Ahhoz amire te gondoltál. Két ember kell." was judged as one and stopped the bot)
+    if not _AI_STRONG.search(t):
+        return False
     try:
         r = llm_create(model=UTIL_MODEL, max_tokens=5, temperature=0,
             system=("Egy rajongó üzenetét kapod egy chatből. Döntsd el: KÖZVETLENÜL a beszélgetőtársáról (TE/VAGY) kérdezi-e, hogy "
