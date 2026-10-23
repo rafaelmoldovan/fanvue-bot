@@ -4744,9 +4744,9 @@ try:
                 if '=' not in item: continue
                 h, nm = item.split('=', 1); h = norm_handle(h)
                 cids = chat_ids_for(h)
-                if not cids:
-                    send_telegram_alert(f"🔗 @{h}: még nincs meg a Fanvue chatje az adatbázisban — összekötéshez: /fv_link {h} {nm.strip()}"); continue
                 pend = _pending_links(); pend[h] = nm.strip(); save_token('fv_pending_links', json.dumps(pend))
+                if not cids:      # his chat isn't in the DB yet → linked automatically the first time the bot opens it
+                    print(f"[boot] link-only @{h} ↔ TG „{nm.strip()}” saved — links when his chat is opened", flush=True); continue
                 prof = db_query("SELECT fan_name FROM fan_profiles WHERE chat_id=?", (cids[0],), fetch_one=True) or {}
                 for cid in cids: resolve_tg_link(cid, h, prof.get('fan_name') or '')
                 print(f"[boot] link-only @{h} ↔ TG „{nm.strip()}”", flush=True)
