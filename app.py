@@ -4737,6 +4737,21 @@ try:
             set_allowed(allowed_set() | {norm_handle(h)}); set_away(True); set_fanvue(True)
             print(f"[boot] opener queued for @{norm_handle(h)}", flush=True)
     except Exception as e: print(f"[boot opener] {e}")
+    try:   # v16.17: link-only seed "fvhandle=Telegram Name;..." (once per value) → memory linked, bot NOT switched on
+        lo = (os.environ.get('FV_LINK_ONLY') or '').strip()
+        if lo and load_token('fv_link_only_seed') != lo:
+            for item in lo.split(';'):
+                if '=' not in item: continue
+                h, nm = item.split('=', 1); h = norm_handle(h)
+                cids = chat_ids_for(h)
+                if not cids:
+                    send_telegram_alert(f"🔗 @{h}: még nincs meg a Fanvue chatje az adatbázisban — összekötéshez: /fv_link {h} {nm.strip()}"); continue
+                pend = _pending_links(); pend[h] = nm.strip(); save_token('fv_pending_links', json.dumps(pend))
+                prof = db_query("SELECT fan_name FROM fan_profiles WHERE chat_id=?", (cids[0],), fetch_one=True) or {}
+                for cid in cids: resolve_tg_link(cid, h, prof.get('fan_name') or '')
+                print(f"[boot] link-only @{h} ↔ TG „{nm.strip()}”", flush=True)
+            save_token('fv_link_only_seed', lo)
+    except Exception as e: print(f"[boot link-only] {e}")
     try:   # v16.16: plan seed "fvhandle=plan text" (once per value) → that fan's /fv_plan (+ allowlist)
         ps = (os.environ.get('FV_PLAN_SEED') or '').strip()
         if only_fan() == 'allowlist' and ps and '=' in ps and load_token('fv_plan_seed') != ps:
