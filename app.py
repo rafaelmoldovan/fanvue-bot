@@ -562,12 +562,26 @@ def get_messages(chat_id):
     except Exception:
         return []
 
+def _delivered_anyway(chat_id, text):
+    """v16.12: a read timeout does NOT mean it wasn't sent (10-23: api.fanvue.com timed out on a send). Look at the chat:
+    if our text is already there, it went out → no retry (no double message, no false 'manual takeover')."""
+    try:
+        time.sleep(3)
+        want = _fv_norm(text)
+        for m in (get_messages(chat_id) or [])[:15]:
+            if (m.get('sender') or {}).get('uuid') == MY_UUID and _fv_norm(m.get('text') or '') == want:
+                print(f"[send] {chat_id[:8]} timed out but was delivered → not resending", flush=True)
+                return True
+    except Exception as e:
+        print(f"[send check] {e}", flush=True)
+    return False
+
 def send_fanvue_message(chat_id, text):
     if _sim_active():
         _sim_block(f"send_fanvue_message({chat_id})")
     try:
         r = requests.post(f"https://api.fanvue.com/chats/{chat_id}/message",
-            headers=get_headers(), json={"text": text}, timeout=10)
+            headers=get_headers(), json={"text": text}, timeout=25)
         if only_fan(): print(f"[lab] BOT → {text}", flush=True)
         return r.status_code in (200, 201)
     except Exception as e:
@@ -2988,7 +3002,7 @@ def _send_extra(item, done):
     msg_id = f"bot_{now_iso}_{chat_id}_hz{bid}"
     # saved BEFORE sending: the manual-takeover detector must always recognise her own bubble as 'bot'
     save_message_to_db(msg_id, chat_id, item.get('fan_name') or '', MY_UUID, text, now_iso, is_mine=True, facts_done=1, vision_done=1)
-    if send_fanvue_message(chat_id, text):
+    if send_fanvue_message(chat_id, text) or _delivered_anyway(chat_id, text):
         db_claim("UPDATE scheduled_replies SET status='sent' WHERE id=?", (bid,))
         _last_sent_at[chat_id] = time.time()
         return 1
@@ -3526,7 +3540,7 @@ def send_due_batches():
 
             time.sleep(random.uniform(2, 5))
 
-            if send_fanvue_message(chat_id, reply):
+            if send_fanvue_message(chat_id, reply) or _delivered_anyway(chat_id, reply):
                 db_claim("UPDATE scheduled_replies SET status='sent' WHERE id=?", (batch_id,))
                 db_query('UPDATE messages SET was_replied=1 WHERE msg_id=?', (item['fan_msg_id'],))
                 now_iso = datetime.now().isoformat()
