@@ -3188,7 +3188,14 @@ def process_new_messages():
             if not chat_id: continue
             fan_name = user.get('displayName', 'ismeretlen') or 'ismeretlen'
             handle = user.get('handle', '') or ''
-            if not chat_allowed(chat_id, handle): continue          # single-fan mode: never open other chats
+            if not chat_allowed(chat_id, handle):
+                # v16.18: /fv_link for a fan the bot isn't on for → link his Telegram memory WITHOUT opening his chat
+                if handle and norm_handle(handle) in _pending_links():
+                    try:
+                        get_or_create_fan(chat_id, fan_name, handle, 0)
+                        resolve_tg_link(chat_id, norm_handle(handle), fan_name)
+                    except Exception as _e: print(f"[link-only] {_e}", flush=True)
+                continue                                              # single-fan mode: never open other chats
             try:
                 _pp = json.loads(load_token('fv_pending_plans') or '{}')
                 if handle and norm_handle(handle) in _pp:
@@ -3952,13 +3959,13 @@ def fv_allow_cmd(act, arg):
         if len(parts) < 2: return "Így: /fv_link <fanvue név> <telegram név>, pl.: /fv_link obnoxious-sparrow-446 Krisz Szabo"
         h, tgname = norm_handle(parts[0]), parts[1].strip()
         pend = _pending_links(); pend[h] = tgname; save_token('fv_pending_links', json.dumps(pend))
-        set_allowed(al | {h}); cancel_stale_pending(); set_away(True); set_fanvue(True)
-        cids = chat_ids_for(h)
+        cids = chat_ids_for(h)            # v16.18: /fv_link only links the memory — it does NOT switch the bot on
         for cid in cids:
             _lab_ready.pop(cid, None)
             resolve_tg_link(cid, h)
-        return (f"🔗 @{h} ↔ Telegram „{tgname}”: " + ("összekötöm most." if cids else "összekötöm, amint megnyitom a chatjét (pár másodperc).")
-                + f"\n▶️ Fanvue bot BE neki is. Most aktív: " + ", ".join("@" + x for x in sorted(allowed_set())))
+        return (f"🔗 @{h} ↔ Telegram „{tgname}”: " + ("összekötve, a bot ismeri az előzményeit." if cids else
+                "összekötöm pár percen belül (a chatjét nem nyitom meg, nem olvasom el).")
+                + f"\nA bot NEM indul el neki — ha kell: /fv_start {h}")
     if act == "fvhelp":
         return FV_HELP
     if act in ("fvplan", "fvplanoff", "fvsummary"):
