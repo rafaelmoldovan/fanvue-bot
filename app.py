@@ -3189,6 +3189,11 @@ def process_new_messages():
             fan_name = user.get('displayName', 'ismeretlen') or 'ismeretlen'
             handle = user.get('handle', '') or ''
             if not chat_allowed(chat_id, handle): continue          # single-fan mode: never open other chats
+            try:
+                _pp = json.loads(load_token('fv_pending_plans') or '{}')
+                if handle and norm_handle(handle) in _pp:
+                    set_fan_plan(chat_id, _pp.pop(norm_handle(handle)), norm_handle(handle)); save_token('fv_pending_plans', json.dumps(_pp, ensure_ascii=False))
+            except Exception: pass
             if only_fan() and not _lab_ready.get(chat_id):
                 get_or_create_fan(chat_id, fan_name, handle, 0)
                 _lab_ready[chat_id] = True
@@ -4732,6 +4737,17 @@ try:
             set_allowed(allowed_set() | {norm_handle(h)}); set_away(True); set_fanvue(True)
             print(f"[boot] opener queued for @{norm_handle(h)}", flush=True)
     except Exception as e: print(f"[boot opener] {e}")
+    try:   # v16.16: plan seed "fvhandle=plan text" (once per value) → that fan's /fv_plan (+ allowlist)
+        ps = (os.environ.get('FV_PLAN_SEED') or '').strip()
+        if only_fan() == 'allowlist' and ps and '=' in ps and load_token('fv_plan_seed') != ps:
+            h, txt = ps.split('=', 1); h = norm_handle(h)
+            cids = chat_ids_for(h)
+            for cid in cids: set_fan_plan(cid, txt, h)
+            if not cids:
+                pp = json.loads(load_token('fv_pending_plans') or '{}'); pp[h] = txt.strip(); save_token('fv_pending_plans', json.dumps(pp, ensure_ascii=False))
+            set_allowed(allowed_set() | {h}); set_away(True); set_fanvue(True); save_token('fv_plan_seed', ps)
+            print(f"[boot] plan set for @{h} ({'now' if cids else 'when his chat opens'})", flush=True)
+    except Exception as e: print(f"[boot plan] {e}")
     try:   # v15.7: link seed "fvhandle=Telegram Name;..." (once per value) → pending link + allowlist
         ls = (os.environ.get('FV_LINK_SEED') or '').strip()
         if only_fan() == 'allowlist' and ls and load_token('fv_link_seed') != ls:
