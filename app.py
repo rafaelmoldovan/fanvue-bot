@@ -887,7 +887,7 @@ def mentions_ai(t): return bool(_AIRE.search(t or ""))
 def came_from_telegram(t): return bool(_FROMTG.search(t or ""))
 MINOR_MSG_F = "bocsi, de te még kiskorú vagy, így nem tudok veled beszélgetni. vigyázz magadra! 🙏"
 _AGE_TEEN_F = re.compile(
-    r"\b1[0-7]\s*[ée]ves(?:ek|en)?\b"
+    r"\b1[0-7]\s*[ée]ves(?:ek|en)?\b(?!\s+(?!vagyok|leszek|lettem|voltam|[ée]s\b|de\b|m[ée]g\b|csak\b)[a-záéíóöőúüű]{3,})"
     r"|\b1[0-7]\s+(?:vagyok|leszek|m[úu]lt[áa]m|elm[úu]lt[áa]m|lettem)\b"
     r"|\bén\s+1[0-7]\b(?!\s*[-–]|\s*(?:[ée]ve\b|[ée]vesen|km|kilo|m[ée]ter|alma|[óo]r[áa]|perc|kg|cm|fok|m[ée]ret))"
     r"|\btizen(egy|kett[oő]|h[áa]rom|n[ée]gy|[öo]t|hat|h[ée]t)\s*[ée]ves(?:ek|en)?\b"
@@ -897,6 +897,26 @@ def is_minor_fan(t):
     t = (t or "").strip()
     if re.search(r"kisk[oó]r[uú]|nem vagyok nagykor|m[ée]g iskol[áa]s\s+vagyok|[áa]ltal[áa]nos\w*\s+iskol", t, re.I): return True
     return bool(_AGE_TEEN_F.search(t)) and not bool(_KID_SUBJECT_F.search(t))
+_FV_MINOR_JUDGE = ("Egy férfi rajongó és egy lány (Jázmin) Fanvue chatjének részletét kapod. Döntsd el: a RAJONGÓ (FAN) "
+                   "egyértelműen azt állítja-e, hogy Ő MAGA JELENLEG 18 év alatti? "
+                   "NEM számít: múltbeli kor („17 éves koromban”, „16 évesen”), más dolgok kora vagy hossza („16 éves kapcsolatom”, "
+                   "„15 éves házasság”, „12 éves kocsi”, „10 éves munkahely”), gyerek/testvér/kutya kora, évszámok, órák, "
+                   "ha a lány korát kérdezi, vicc/irónia, és ha korábban felnőtt kort mondott magáról. "
+                   "Válasz CSAK egy szó: IGEN (biztosan kiskorú), NEM, vagy BIZONYTALAN.")
+def fv_minor_verdict(chat_id, text):
+    """v16.23: 'yes' | 'unsure' | 'no'. Regex is only the trigger; a model reads the context before anyone is refused
+    ('végelett a 16 éves kapcsolatom' = a 16-YEAR relationship, not a 16-year-old)."""
+    if not is_minor_fan(text): return "no"
+    try:
+        rows = (db_query("SELECT is_mine, text FROM messages WHERE chat_id=? ORDER BY timestamp DESC LIMIT 12", (chat_id,)) or [])[::-1]
+        convo = "\n".join(("JÁZMIN: " if r.get("is_mine") else "FAN: ") + (r.get("text") or "")[:300] for r in rows)
+        if text and text[:40] not in convo: convo += "\nFAN: " + text[:600]
+        r = llm_create(model=REPLY_MODEL, max_tokens=5, system=_FV_MINOR_JUDGE, messages=[{"role": "user", "content": convo[-4000:]}])
+        a = (r.text or "").upper()
+        return "yes" if "IGEN" in a else "unsure" if "BIZONYTALAN" in a else "no"
+    except Exception as e:
+        print(f"[minor-judge] {e}", flush=True)
+        return "unsure"                                          # judge down → pause + ask Rafael, never auto-refuse
 _SCHOOL_F = re.compile(
     r"\b\d{1,2}\.?\s*oszt[áa]ly(ba|os)\s+(j[áa]rok|vagyok)|\b\d{1,2}[-\s]?(be|ba|ik|edik)\s+j[áa]rok(?!\s+(dolgoz|melóz|edz))"
     r"|\bgimis\s+vagyok|\bgimibe\s+j[áa]rok|\bgimn[áa]zista\s+vagyok|k[öo]z[ée]piskol[áa]s\s+vagyok|k[öo]z[ée]piskol[áa]ba\s+j[áa]rok"
@@ -3391,14 +3411,21 @@ def send_due_batches():
             override = None
             ai_mode = None          # 'confirm' | 'already' | None
             tg_hint_used = None
-            if _SCHOOL_F.search(fan_text_all) and not is_minor_fan(fan_text_all):
+            _mv = fv_minor_verdict(chat_id, fan_text_all) if is_minor_fan(fan_text_all) else "no"
+            if _mv == "unsure":
+                db_query("UPDATE fan_profiles SET is_paused=1 WHERE chat_id=?", (chat_id,))
+                send_telegram_alert(f"⚠️ Fanvue: talán kiskorú (nem biztos) — {item.get('fan_name') or chat_id}: „{last_line[:160]}” → szüneteltetve, nem írtam neki semmit.",
+                                    buttons=[[("▶️ Folytatás", f"fvp:{chat_id}")]])
+                db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,)); continue
+            if _SCHOOL_F.search(fan_text_all) and _mv != "yes":
                 db_query("UPDATE fan_profiles SET is_paused=1 WHERE chat_id=?", (chat_id,))
                 send_telegram_alert(f"⚠️ Fanvue: lehet kiskorú — {item.get('fan_name') or chat_id}: „{last_line[:160]}” → szüneteltetve.",
                                     buttons=[[("▶️ Folytatás", f"fvp:{chat_id}")]])
                 db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,)); continue
-            if is_minor_fan(fan_text_all):
+            if _mv == "yes":
                 db_query("UPDATE fan_profiles SET is_paused=1 WHERE chat_id=?", (chat_id,))
-                try: send_telegram_alert(f"⛔ MINOR claim from {item.get('fan_name') or chat_id} -> auto-refused + paused.")
+                try: send_telegram_alert(f"⛔ Fanvue: kiskorú — {item.get('fan_name') or chat_id}: „{last_line[:160]}” → elutasítva + szüneteltetve.",
+                                         buttons=[[("▶️ Folytatás", f"fvp:{chat_id}")]])
                 except Exception: pass
                 override = MINOR_MSG_F
             else:
