@@ -1976,6 +1976,8 @@ def get_history(chat_id, limit=100):
     """The LATEST `limit` messages, oldest→newest (v13 bug: ORDER BY ASC LIMIT returned the OLDEST ones)."""
     rows = db_query("SELECT text, is_mine, timestamp FROM messages WHERE chat_id=? ORDER BY timestamp DESC LIMIT ?",
                     (chat_id, limit)) or []
+    # v16.24: a minor-refusal that was wrong (chat un-paused afterwards, Rafael deleted it) never goes back into the prompt
+    rows = [r for r in rows if not (r.get('is_mine') and (r.get('text') or '').strip() == MINOR_MSG_F)]
     return list(reversed(rows))
 
 _JUNK_NAMES = {'fáradt','tired','mert','because','jól','rosszul','igen','nem','oké','okay','szia','hello','helló',
