@@ -4020,6 +4020,7 @@ FV_HELP = """🎛️ PARANCSKÖZPONT — Fanvue bot (Telegramról)
    ⚠️ /fv_stop vagy /fv_start mindig törli a tervet → újraindítás után sima, laza beszélgetés.
 
 💞 /fv_stage1 név [Telegram név] — MEGISMERÉS-szakasz az első sub után: kb. 25 (max 30) üzenet, őszinte kíváncsiság (célok, álmok, régi kapcsolatok, mi teszi boldoggá), nem kérdés-áradat. Ha megadod a Telegram nevét, előbb összeköti az előzményekkel. Magától véget ér és szól; korábban: /fv_stage1_off név
+🔗 /fv_link név Telegram név — összeköti a Telegram előzményeivel (a bot NEM indul el neki, csak megismeri)
 📋 /fv_summary név — teljes összefoglaló a fanról (kor, munka, család, kapcsolatok, kedvencek, flört, vásárlás, nyitott szálak, figyelmeztetések, javaslat). 1-2 perc, több üzenetben jön.
 
 💡 Tippek: a nevet úgy írd, ahogy a Fanvue-n van (pl. native-bobolink-990, @ nélkül is jó). A tervet írd úgy, mintha egy kollégának mondanád: mit, milyen sorrendben, mikor. Ne írj bele linket vagy árat."""
@@ -4195,7 +4196,8 @@ def control_bot_loop():
             {"command": "fv_plan_off", "description": "Terv vége: /fv_plan_off név"},
             {"command": "fv_summary", "description": "Teljes összefoglaló: /fv_summary név"},
             {"command": "fv_stage1", "description": "Megismerés-szakasz (első sub után): /fv_stage1 név [TG név]"},
-            {"command": "fv_stage1_off", "description": "Megismerés-szakasz vége: /fv_stage1_off név"}]}, timeout=10)
+            {"command": "fv_stage1_off", "description": "Megismerés-szakasz vége: /fv_stage1_off név"},
+            {"command": "fv_link", "description": "Telegram előzmény összekötése (bot nem indul): /fv_link név TG név"}]}, timeout=10)
     except Exception: pass
     offset = int(load_token('tg_ctrl_offset') or 0)
     if not offset:
