@@ -3230,6 +3230,14 @@ def process_new_messages():
                 if handle and norm_handle(handle) in _pp:
                     set_fan_plan(chat_id, _pp.pop(norm_handle(handle)), norm_handle(handle)); save_token('fv_pending_plans', json.dumps(_pp, ensure_ascii=False))
             except Exception: pass
+            try:                                                      # v16.22: /fv_stage1 given before his chat was known
+                _ps = json.loads(load_token('fv_pending_stage1') or '{}')
+                if handle and norm_handle(handle) in _ps:
+                    get_or_create_fan(chat_id, fan_name, handle, 0)
+                    clear_fan_plan(chat_id); set_stage1(chat_id, norm_handle(handle))
+                    _ps.pop(norm_handle(handle)); save_token('fv_pending_stage1', json.dumps(_ps))
+                    send_telegram_alert(f"💞 @{norm_handle(handle)} chatje megjelent — 1. szakasz elindult.")
+            except Exception as _e: print(f"[stage1-pending] {_e}", flush=True)
             if only_fan() and not _lab_ready.get(chat_id):
                 get_or_create_fan(chat_id, fan_name, handle, 0)
                 _lab_ready[chat_id] = True
@@ -4058,12 +4066,19 @@ def fv_allow_cmd(act, arg):
         h = norm_handle(parts[0])
         if act == "fvstage1off":
             for cid in chat_ids_for(h): clear_stage(cid)
+            ps = json.loads(load_token('fv_pending_stage1') or '{}')
+            if ps.pop(h, None): save_token('fv_pending_stage1', json.dumps(ps))
             return f"🧹 @{h}: 1. szakasz vége — innentől laza beszélgetés."
         if len(parts) > 1:                                     # optional Telegram name → link his memory first
             pend = _pending_links(); pend[h] = parts[1].strip(); save_token('fv_pending_links', json.dumps(pend))
             for cid in chat_ids_for(h): resolve_tg_link(cid, h)
         cids = chat_ids_for(h)
-        if not cids: return f"❓ Nem találok ilyen Fanvue fant: @{h}. Írd pontosan a nevét (pl. crooked-badger-452)."
+        if not cids:                                           # v16.22: new subber the bot hasn't seen yet → start when his chat shows up
+            ps = json.loads(load_token('fv_pending_stage1') or '{}'); ps[h] = 1; save_token('fv_pending_stage1', json.dumps(ps))
+            if h not in al:
+                set_allowed(al | {h}); cancel_stale_pending(); set_away(True); set_fanvue(True)
+            return (f"💞 @{h}: a chatjét még nem láttam (új sub) — bot BE neki, és az 1. szakasz (megismerés, kb. {STAGE1_MIN}, max {STAGE1_MAX} üzenet) "
+                    f"elindul, amint megjelenik a chatje / ír. Ha elírtad a nevet: /fv_stop {h}")
         for cid in cids:
             clear_fan_plan(cid); set_stage1(cid, h); _lab_ready.pop(cid, None)
         if h not in al:
@@ -4108,6 +4123,10 @@ def fv_allow_cmd(act, arg):
                 + (f"\n⚠️ Ilyen nevű chatet még nem láttam: {', '.join(unknown)} — ha elírtad, /fv_stop {unknown[0]}." if unknown else "")
                 + "\nMost aktív: " + ", ".join("@" + h for h in sorted(allowed_set())))
     left = al - set(hs)
+    try:
+        ps = json.loads(load_token('fv_pending_stage1') or '{}')
+        if any(ps.pop(h, None) for h in list(hs)): save_token('fv_pending_stage1', json.dumps(ps))
+    except Exception: pass
     set_allowed(left)
     for h in hs:
         for cid in chat_ids_for(h):
