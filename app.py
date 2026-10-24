@@ -138,6 +138,31 @@ def _sim_block(what):
     if v is not None: v.append(what)
     raise RuntimeError(f"[sim] blocked side effect: {what}")
 
+# v16.20 / v8.14: prompt-cache stats (logging only — never changes what the model sees)
+_CACHE_STATS = {}
+_CACHE_LOCK = threading.Lock()
+_CACHE_LAST = [time.time()]
+def _cache_track(model, usage):
+    try:
+        if usage is None: return
+        g = lambda k: int(getattr(usage, k, 0) or 0)
+        with _CACHE_LOCK:
+            s = _CACHE_STATS.setdefault(model or "?", [0, 0, 0, 0])
+            s[0] += 1; s[1] += g("input_tokens"); s[2] += g("cache_read_input_tokens"); s[3] += g("cache_creation_input_tokens")
+            if time.time() - _CACHE_LAST[0] < 3600: return
+            _CACHE_LAST[0] = time.time()
+            for m, (n, i, r, w) in _CACHE_STATS.items():
+                tot = i + r + w
+                print(f"[cache] {m}: calls={n} uncached={i} read={r} write={w} hit={100*r/max(tot,1):.0f}%", flush=True)
+            _CACHE_STATS.clear()
+    except Exception:
+        pass
+
+def _cache_call(kw2):
+    r = LLM_CLIENT.messages.create(**kw2)
+    _cache_track(kw2.get("model"), getattr(r, "usage", None))
+    return _Resp(r)
+
 def llm_create(**kw):
     """One place that knows each model generation's rules:
     - Claude 5.x: no custom temperature; Sonnet/Opus 5.x think by default → switch thinking off (between_tools)
@@ -155,12 +180,12 @@ def llm_create(**kw):
         # Sonnet/Opus 5.x reject "disabled" and use "between_tools" for "don't think before answering".
         kw2["extra_body"] = {"thinking": {"type": "disabled" if "haiku" in model else "between_tools"}}
     try:
-        return _Resp(LLM_CLIENT.messages.create(**kw2))
+        return _cache_call(kw2)
     except Exception as e:
         msg = str(e)
         if "thinking" in msg or "temperature" in msg:
             kw2.pop("extra_body", None); kw2.pop("temperature", None)
-            return _Resp(LLM_CLIENT.messages.create(**kw2))
+            return _cache_call(kw2)
         raise
 
 
@@ -2257,10 +2282,7 @@ def build_convo(history, user_msg, limit=50):
         msgs[-1]["content"] += "\n" + user_msg + tail
     else:
         msgs.append({"role": "user", "content": user_msg + tail})
-    if len(msgs) >= 3:
-        prev = msgs[-2]
-        prev["content"] = [{"type": "text", "text": prev["content"], "cache_control": {"type": "ephemeral"}}]
-    return msgs
+    return msgs    # v16.20: no message breakpoint — the per-turn system block comes first, so it never hit (paid writes only)
 
 MEMORY_PROMPT = ("Ez Jázmin és egy fan Fanvue chatje (Fan = a srác, Jázmin = a lány; [..] = média/rendszer jelzés). "
                  "Írj Jázminnak tömör, magyar emlékeztetőt pontokba szedve, CSAK abból ami a chatben ténylegesen elhangzott:\n"
@@ -2619,10 +2641,7 @@ def build_convo_kw(history, user_msg, limit=24, gap_min=15):
         msgs[-1]["content"] += "\n" + um
     else:
         msgs.append({"role": "user", "content": um})
-    if len(msgs) >= 3:
-        prev_m = msgs[-2]
-        prev_m["content"] = [{"type": "text", "text": prev_m["content"], "cache_control": {"type": "ephemeral"}}]
-    return msgs
+    return msgs    # v16.20: see above
 
 def _with_most_line(msgs, line):
     out = [dict(m) for m in msgs]
@@ -2778,7 +2797,7 @@ def run_hz_critic(history, fan_text, reply, plan, state=None, open_q=""):
     if state is not None and state.facts:
         facts += "; she already told him: " + "; ".join(f for _, f in state.facts[-8:])
     try:
-        r = llm_create(model=UTIL_MODEL, max_tokens=140, system=hz.CRITIC2_SYSTEM,
+        r = llm_create(model=UTIL_MODEL, max_tokens=140, system=[{"type": "text", "text": hz.CRITIC2_SYSTEM, "cache_control": {"type": "ephemeral"}}],
                        messages=[{"role": "user", "content": hz.build_critic2_prompt(turns, fan_text, reply, plan, open_q, facts)}])
         c = hz.parse_critic2(r.text)
     except Exception as e:
@@ -2834,6 +2853,16 @@ def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_
                            spelling="plain" if rng.random() < hz.PLAIN_SPELLING_P else "accent", lowercase=rng.random() < 0.85)
     else:
         plan = hz.plan_turn(ctx, rng)
+        if profile_overrides is None and get_s1(chat_id):        # v16.19: stage 1 → never silent, curious, longer
+            if plan.skip:
+                plan = hz.TurnPlan("short", hz.sample_length("short", rng, hour=hour), False, spelling=plan.spelling,
+                                   lowercase=plan.lowercase)
+            if plan.he_asked and plan.turn_type not in ("care", "refuse", "deflect"):
+                plan.max_words = max(plan.max_words, rng.randint(16, 28))
+            elif (stage_wants_question(chat_id, rng) and plan.turn_type not in ("care", "refuse", "deflect")
+                  and not plan.he_bye and not (her_recent and hz.is_question_text(her_recent[-1]))):
+                plan.allow_question = True
+                plan.max_words = max(plan.max_words, rng.randint(10, 20))
         if profile_overrides is None and get_fan_plan(chat_id):   # v16.11: Rafael's plan → never a silent skip
             if plan.skip:
                 plan = hz.TurnPlan("short", hz.sample_length("short", rng, hour=hour), False, spelling=plan.spelling,
@@ -3462,7 +3491,7 @@ def send_due_batches():
             if use_hz:
                 # ── v16 HUMANIZER: plan → compact prompt → model → post-filters; merges messages that arrive meanwhile ──
                 lock = _kw_lock(fan_text_all)
-                extra = "\n".join(x for x in (tg_hint_used, later_hint, fan_plan_hint(chat_id)) if x)
+                extra = "\n".join(x for x in (tg_hint_used, later_hint, fan_plan_hint(chat_id), stage_hint(chat_id)) if x)
                 hz_st = hz_load(chat_id)
                 t_gen = time.time()
                 requeue = False
@@ -3862,6 +3891,59 @@ def fan_plan_hint(cid):
             "alapján döntsd el, melyik lépésnél tartasz); a saját laza stílusodban, ne kihallgatásszerűen, és reagálj arra is, "
             "amit ő ír. A szabályok mindig erősebbek a tervnél: nem találkozol vele, nem írsz linket, nem adsz el, "
             "AI-kérdésnél nem válaszolsz, kiskorúval nem beszélsz.")
+# ── v16.19 STAGE 1 (Rafael 2026-10-24): after his first sub → ~25 (max 30) messages of really getting to know him and
+# showing she's genuinely interested. /fv_stage1 név [Telegram név] · /fv_stage1_off név. Ends by itself → casual chat.
+STAGE1_MIN, STAGE1_MAX = 25, 30
+STAGE1_QUESTIONS = [
+    "Mi az intimebb neked: egy csók, vagy egy mély beszélgetés késő éjjel?",
+    "Az a lány tetszik jobban, aki cukin ragaszkodó, vagy aki sok teret hagy?",
+    "Min dolgozol most, ami igazán lelkesít?",
+    "Mi a legnagyobb dolog, amit a következő pár évben el akarsz érni?",
+    "Milyen élet tenne igazán boldoggá?",
+    "Milyen volt a legkomolyabb kapcsolatod? Miért ért véget, és mit tanultál belőle?",
+]
+def _stage_key(cid): return f"fv_stage_{cid}"
+def _fan_msg_count(cid):
+    r = db_query("SELECT COUNT(*) AS n FROM messages WHERE chat_id=? AND COALESCE(is_mine,0)=0", (cid,), fetch_one=True) or {}
+    return int(r.get('n') or 0)
+def get_s1(cid):
+    try: return json.loads(load_token(_stage_key(cid)) or 'null')
+    except Exception: return None
+def set_stage1(cid, handle=""):
+    save_token(_stage_key(cid), json.dumps({"stage": 1, "start": datetime.now(timezone.utc).isoformat(), "n0": _fan_msg_count(cid),
+                                            "handle": handle, "limit": random.randint(STAGE1_MIN, STAGE1_MAX)}))
+def clear_stage(cid): save_token(_stage_key(cid), 'null')
+def stage_progress(cid):
+    st = get_s1(cid)
+    return (max(0, _fan_msg_count(cid) - int(st.get("n0") or 0)) if st else 0)
+def stage_hint(cid):
+    st = get_s1(cid)
+    if not st: return ""
+    n = stage_progress(cid)
+    if n >= int(st.get("limit") or STAGE1_MAX):
+        clear_stage(cid)
+        h = st.get("handle") or cid[:8]
+        send_telegram_alert(f"✅ Stage 1 kész — @{h} ({n} üzenet). Innentől laza beszélgetés. Összefoglaló: /fv_summary {h}")
+        return ""
+    phase = ("eleje: lazán indíts, ismerkedj" if n < 6 else "közepe: mehetnek a mélyebb, komolyabb kérdések" if n < 20
+             else "vége felé: már ne nyiss új nagy témát, inkább mélyítsd, amiről beszéltek, és mutasd, hogy jólesett")
+    asked = " ".join(m.get('text') or '' for m in (db_query(
+        "SELECT text FROM messages WHERE chat_id=? AND is_mine=1 ORDER BY timestamp DESC LIMIT 60", (cid,)) or []))
+    bank = "\n".join(f"- {q}" for q in STAGE1_QUESTIONS)
+    return ("💞 1. SZAKASZ — MEGISMERÉS (ez a(z) " + str(n + 1) + ". üzenete ebben a szakaszban, kb. " + str(STAGE1_MIN) +
+            "-ig tart; most: " + phase + ").\n"
+            "Cél: minél jobban megismerni őt, és éreztetni vele, hogy TÉNYLEG érdekel — őszinte kíváncsiság, nem kihallgatás. "
+            "Ilyen irányok (a saját szavaiddal, nem szó szerint, és csak ami még NEM derült ki — nézd meg az emlékeket és a "
+            "Telegramos előzményt):\n" + bank + "\n"
+            "+ amit ő hoz fel: álmai, céljai, régi kapcsolatai (miért lett vége, mit tanult belőle), mi teszi boldoggá.\n"
+            "SZABÁLYOK: egyszerre max EGY kérdés, és nem minden üzenetben — előbb reagálj rendesen, érdemben arra, amit mondott "
+            "(mutasd, hogy figyelsz, kapcsold össze azzal, amit korábban mesélt). Ha visszakérdez, válaszolj HOSSZABBAN és "
+            "őszintén a saját életedből (2-3 mondat, ne szárazon). Ne ismételj meg kérdést, amit már feltettél. Semmi eladás, "
+            "semmi link. Maradj a saját laza, kedves stílusodban.")
+def stage_wants_question(cid, rng=random):
+    st = get_s1(cid)
+    return bool(st) and rng.random() < 0.6
+
 def fan_plan_wants_questions(cid):
     pl = get_fan_plan(cid)
     return bool(pl and re.search(r"k[ée]rdez|k[ée]rd[ée]s|t[öo]bbet (meg)?tudni|ismerd meg|faggas|der[íi]tsd ki", pl.get("text") or "", re.I))
@@ -3937,6 +4019,7 @@ FV_HELP = """🎛️ PARANCSKÖZPONT — Fanvue bot (Telegramról)
 🧹 /fv_plan_off név — terv vége, onnantól laza beszélgetés
    ⚠️ /fv_stop vagy /fv_start mindig törli a tervet → újraindítás után sima, laza beszélgetés.
 
+💞 /fv_stage1 név [Telegram név] — MEGISMERÉS-szakasz az első sub után: kb. 25 (max 30) üzenet, őszinte kíváncsiság (célok, álmok, régi kapcsolatok, mi teszi boldoggá), nem kérdés-áradat. Ha megadod a Telegram nevét, előbb összeköti az előzményekkel. Magától véget ér és szól; korábban: /fv_stage1_off név
 📋 /fv_summary név — teljes összefoglaló a fanról (kor, munka, család, kapcsolatok, kedvencek, flört, vásárlás, nyitott szálak, figyelmeztetések, javaslat). 1-2 perc, több üzenetben jön.
 
 💡 Tippek: a nevet úgy írd, ahogy a Fanvue-n van (pl. native-bobolink-990, @ nélkül is jó). A tervet írd úgy, mintha egy kollégának mondanád: mit, milyen sorrendben, mikor. Ne írj bele linket vagy árat."""
@@ -3968,6 +4051,24 @@ def fv_allow_cmd(act, arg):
                 + f"\nA bot NEM indul el neki — ha kell: /fv_start {h}")
     if act == "fvhelp":
         return FV_HELP
+    if act in ("fvstage1", "fvstage1off"):
+        parts = (arg or "").split(None, 1)
+        if not parts: return "Így: /fv_stage1 név [Telegram név]  ·  vége: /fv_stage1_off név"
+        h = norm_handle(parts[0])
+        if act == "fvstage1off":
+            for cid in chat_ids_for(h): clear_stage(cid)
+            return f"🧹 @{h}: 1. szakasz vége — innentől laza beszélgetés."
+        if len(parts) > 1:                                     # optional Telegram name → link his memory first
+            pend = _pending_links(); pend[h] = parts[1].strip(); save_token('fv_pending_links', json.dumps(pend))
+            for cid in chat_ids_for(h): resolve_tg_link(cid, h)
+        cids = chat_ids_for(h)
+        if not cids: return f"❓ Nem találok ilyen Fanvue fant: @{h}. Írd pontosan a nevét (pl. crooked-badger-452)."
+        for cid in cids:
+            clear_fan_plan(cid); set_stage1(cid, h); _lab_ready.pop(cid, None)
+        if h not in al:
+            set_allowed(al | {h}); cancel_stale_pending(); set_away(True); set_fanvue(True)
+        return (f"💞 @{h}: 1. szakasz indul — megismerés, kb. {STAGE1_MIN} (max {STAGE1_MAX}) üzenet. Bot BE neki.\n"
+                f"Magától véget ér, és szól. Korábban leállítani: /fv_stage1_off {h}")
     if act in ("fvplan", "fvplanoff", "fvsummary"):
         parts = (arg or "").split(None, 1)
         if not parts: return "Így: /fv_plan név mit csináljon  ·  /fv_plan_off név  ·  /fv_summary név   (részletek: /fv_help)"
@@ -3994,7 +4095,7 @@ def fv_allow_cmd(act, arg):
     if not hs:
         return "Írd mögé a fan nevét, pl.: /fv_start csaby84  vagy  /fv_stop csaby84"
     for h in hs:                                         # v16.11: start/stop = fresh, casual chat (no plan)
-        for cid in chat_ids_for(h): clear_fan_plan(cid)
+        for cid in chat_ids_for(h): clear_fan_plan(cid); clear_stage(cid)
     if act == "fvallow":
         set_allowed(al | set(hs))
         cancel_stale_pending()
@@ -4069,7 +4170,7 @@ _CMD_MAP = {"/start": "menu", "/menu": "menu", "/status": "status", "/allapot": 
             "/fanvue_be": "fv:on", "/fanvue_ki": "fv:off", "/telegram_be": "tg:on", "/telegram_ki": "tg:off",
             "/reconnect": "reconnect", "/ujracsatlakozas": "reconnect",
             "/learn": "learn", "/tanulj": "learn", "/away": "away:on", "/tavol": "away:on", "/back": "away:off", "/vissza": "away:off",
-            "/fv_start": "fvallow", "/fvstart": "fvallow", "/fv_stop": "fvdeny", "/fvstop": "fvdeny", "/fv_list": "fvallowlist", "/fvlist": "fvallowlist", "/fv_link": "fvlink", "/fvlink": "fvlink", "/fv_say": "fvsay", "/fvsay": "fvsay", "/fv_plan": "fvplan", "/fvplan": "fvplan", "/fv_plan_off": "fvplanoff", "/fvplanoff": "fvplanoff", "/fv_summary": "fvsummary", "/fvsummary": "fvsummary", "/fv_help": "fvhelp", "/fvhelp": "fvhelp", "/parancsok": "fvhelp",
+            "/fv_start": "fvallow", "/fvstart": "fvallow", "/fv_stop": "fvdeny", "/fvstop": "fvdeny", "/fv_list": "fvallowlist", "/fvlist": "fvallowlist", "/fv_link": "fvlink", "/fvlink": "fvlink", "/fv_say": "fvsay", "/fvsay": "fvsay", "/fv_plan": "fvplan", "/fvplan": "fvplan", "/fv_plan_off": "fvplanoff", "/fvplanoff": "fvplanoff", "/fv_summary": "fvsummary", "/fvsummary": "fvsummary", "/fv_help": "fvhelp", "/fvhelp": "fvhelp", "/fv_stage1": "fvstage1", "/fvstage1": "fvstage1", "/fv_stage1_off": "fvstage1off", "/fvstage1off": "fvstage1off", "/parancsok": "fvhelp",
             "/fans": "fvlist", "/fanok": "fvlist", "/tgfans": "tglist", "/tgfanok": "tglist", "/fan": "search"}
 
 def control_bot_loop():
@@ -4092,7 +4193,9 @@ def control_bot_loop():
             {"command": "fv_help", "description": "Parancsközpont: terv, összefoglaló — útmutató"},
             {"command": "fv_plan", "description": "Terv egy fannak: /fv_plan név mit csináljon"},
             {"command": "fv_plan_off", "description": "Terv vége: /fv_plan_off név"},
-            {"command": "fv_summary", "description": "Teljes összefoglaló: /fv_summary név"}]}, timeout=10)
+            {"command": "fv_summary", "description": "Teljes összefoglaló: /fv_summary név"},
+            {"command": "fv_stage1", "description": "Megismerés-szakasz (első sub után): /fv_stage1 név [TG név]"},
+            {"command": "fv_stage1_off", "description": "Megismerés-szakasz vége: /fv_stage1_off név"}]}, timeout=10)
     except Exception: pass
     offset = int(load_token('tg_ctrl_offset') or 0)
     if not offset:
@@ -4124,7 +4227,7 @@ def control_bot_loop():
                         if str(m.get('chat', {}).get('id')) != str(TELEGRAM_CHAT_ID): continue
                         cmd = (m.get('text') or '').strip().split()[0].split('@')[0].lower() if (m.get('text') or '').strip() else ''
                         act = _CMD_MAP.get(cmd)
-                        if act in ("fvallow", "fvdeny", "fvallowlist", "fvlink", "fvsay", "fvplan", "fvplanoff", "fvsummary", "fvhelp"):
+                        if act in ("fvallow", "fvdeny", "fvallowlist", "fvlink", "fvsay", "fvplan", "fvplanoff", "fvsummary", "fvhelp", "fvstage1", "fvstage1off"):
                             arg_ = " ".join((m.get('text') or '').split()[1:]).strip()
                             send_telegram_alert(fv_allow_cmd(act, arg_)); continue
                         if act == "search":
