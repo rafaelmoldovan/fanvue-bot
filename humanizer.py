@@ -142,8 +142,8 @@ _ABOUT_HER = re.compile(r"\b(te|neked|nalad|veled|rolad|teged|tied|vagy|voltal|s
                         r"jarsz|dolgozol|hallgatsz|nezel|fozol|tudsz|szoktal|lennel|mennel|gondolsz|vagy-e)\b")
 _COMPLIMENT = re.compile(r"gyonyoru|csinos|szep (vagy|mosoly|hajad|szemed)|szep a|imadom a|aranyos vagy|cuki vagy|edes vagy|"
                          r"dogos|szexi|bejossz|tetszel|koszi|koszonom|koszike|kosz\b|hianyoztal|orulok neki|jo volt veled")
-_OFFPLATFORM = re.compile(r"telegram|\binsta|instagram|facebook|\bfb\b|snap|whatsapp|viber|messenger|tiktok|\bszamod|telefonszam|"
-                          r"\bdiscord|\bonlyfans")
+_OFFPLATFORM = re.compile(r"telegram|\binsta|instagram|facebook|\bfb\b|\bsnap|whatsapp|viber|messenger|tiktok|\bszamod|telefonszam|"
+                          r"\bdiscord|\bonlyfans")   # v16.26: \bsnap (masnapi/masnap matched)
 
 
 def fan_features(fan_text: str) -> FanFeatures:
@@ -207,6 +207,11 @@ QUESTION_BUDGET = (1, 2)          # never two questions in a row (her last messa
 PLAIN_SPELLING_P = 0.8            # Rafael strips ö/ő/ü/ű in practically every message (FORENSICS: 0 % of his replies have them)
 BYPASS_LOCKS = ("ai", "meetup", "minor")      # compliance turns: humanizer does not touch them
 SELFSHARE_GAP = 5                 # at most one own-initiative self-share in ~6 turns, never back to back
+# v16.26: a reply to HIS message never becomes an "initiative" (self-share with a random day-story seed) — 10-26 logs:
+# "Legyen" → "ma vettem egy új pulcsit", "Köszönöm kedvességed" → "bézs". Initiative only when SHE writes first
+# (follow-up / dead chat: keepwarm_generate(is_followup=True) builds that plan itself).
+REPLY_ALLOW_INITIATIVE = False
+REPLY_MIN_WORDS = 8               # v16.26: a real message (≥ 4 words) gets ≥ ~8 words → complete sentences, no "hmm"/"aha"
 
 # Her day: a large pool of small, concrete, plausible activities per part of the day. Each chat gets its own consistent
 # "today" (day_story: seeded by chat + date). No laundry / "ágyban telefonozok" / "lusta" fillers (round-1 tells).
@@ -308,6 +313,7 @@ class TurnPlan:
     bye_seed: str = ""            # a goodbye idea from a wide pool (only when HE says bye)
     open_q: str = ""              # her own question he is answering now (or ignored) → coherence
     multi: bool = False           # he sent several messages → react to the LAST one
+    focus: str = ""               # v16.26: his last message quoted for a focused (last-chance) regeneration
     style: str = "ou"             # owner orthography applied in code: 'ou' (ö/ő→o, ü/ű→u) | 'ou_long' (+ó/ú/í) | 'full' | 'bare'
     weights: dict = field(default_factory=dict)   # debug
 
@@ -416,6 +422,8 @@ def plan_turn(ctx: TurnContext, rng: Optional[random.Random] = None) -> TurnPlan
                         offplatform=f.offplatform, soft_care=soft_care)
 
     w = dict(BASE_WEIGHTS)
+    if not REPLY_ALLOW_INITIATIVE:
+        w["initiative"] = 0.0             # v16.26: plan_turn only plans REPLIES → never a random self-share seed
     # ── he asked → answer it; no own-initiative detour ──
     if f.asked_question:
         w["react"] = 0.0; w["skip"] = 0.0; w["question"] = 0.0; w["initiative"] = 0.0
@@ -433,6 +441,7 @@ def plan_turn(ctx: TurnContext, rng: Optional[random.Random] = None) -> TurnPlan
     # ── shy / one-word fan → she carries a bit more: small own news or an easy question, not "rendben :D" ──
     if shy and not f.emoji_only:
         w["react"] *= 0.3; w["skip"] = 0.0; w["question"] *= 1.6; w["initiative"] *= 2.5; w["short"] *= 0.8
+        w["answer_share"] *= 1.5          # v16.26: carry with a small detail ON his topic instead of a random self-share
     # ── long / high-energy message ──
     if f.n_words >= 25:
         w["react"] *= 0.3; w["answer_share"] *= 1.4; w["two_bubble"] *= 1.4; w["initiative"] *= 0.4
@@ -498,6 +507,10 @@ def plan_turn(ctx: TurnContext, rng: Optional[random.Random] = None) -> TurnPlan
                     weights={k: round(v, 3) for k, v in w.items()})
     if serious and t == "care":
         plan.serious = True; plan.max_words = rng.randint(18, 32)
+    # v16.26: tiny budgets (max=4..7, "NE kérdezz") on a real message produced "hmm", "aha", "itt maradunk"
+    if (t not in ("react", "refuse", "skip") and not f.emoji_only and not f.ack and not f.bye
+            and f.n_words >= 4):
+        plan.max_words = max(plan.max_words, REPLY_MIN_WORDS)
     if t == "skip":
         plan.skip = True
         return plan
@@ -557,6 +570,9 @@ def render_plan_instruction(plan: TurnPlan, open_q: str = "", multi: bool = Fals
     s = INSTR[plan.turn_type].format(n=plan.max_words, n2=max(4, plan.max_words - 3), seed=plan.seed)
     if plan.serious:
         s = SERIOUS_INSTR.format(n=plan.max_words)
+    if plan.focus:                    # v16.26: last-chance regeneration after garbled / non-sequitur drafts
+        s += (f" Erre az üzenetére válaszolj, közvetlenül és érthetően, egy kerek mondattal: „{plan.focus[:160]}”."
+              " Ne hozz be új témát, ne mentegetőzz, ne hivatkozz elírásra.")
     if multi:
         s += " Több üzenetet írt: főleg az UTOLSÓRA reagálj."
     if plan.he_asked and plan.turn_type != "initiative":
@@ -845,6 +861,10 @@ _PROMISE = re.compile(r"itt leszek|mindig itt vagyok|szolj nyugodtan|irj nyugodt
                       r"ma este itt|holnap is itt|egesz este itt|ra(d)? fogok varni|varni foglak")
 _SELLING = re.compile(r"nem arul|nem adok el|semmibe|ingyen|nem kerul (semmibe|penzbe)|\b\d+ ?(ft|forint|dollar|euro|eur|huf)\b|"
                       r"\$ ?\d|\d ?\$|vedd meg|oldd fel|feloldod|ara \d|fizess")
+# v16.26: invented "slip" excuses after a garbled line ("bocsi, elírtam", "elcsúszott", "az előző üzenet volt")
+EXCUSE_RX = re.compile(r"\belir(tam|as|odott|tad)|\belgepel|elcsusz|az elozo uzenet|rossz (helyre|chatbe|embernek)|"
+                       r"nem neked (irtam|szolt|ment)|veletlen\w* (kuldtem|irtam|ment)|osszekevertem")
+_GUT_REASONS = {"question_over_budget", "self_repeat", "mirror", "stale_persona", "echo_start", "banned_phrase"}
 _PERSONA_BAD = re.compile(r"\b(corgi|husky|labrador|tacsko|pomeran|chihuahua|bulldog|uszkar|golden|yorki|spaniel)\w*|"
                           r"\bnincs (autom|kocsim|jogsim)\b|\b(van )?baratom van\b|"
                           r"egyetemre jarok|suliba jarok|\bvizsgam\b|\bvizsgaim\b|pincernokent dolgozom|dolgozom (most|egy|a|itt)|"
@@ -1340,11 +1360,17 @@ def postprocess(reply: str, plan: TurnPlan, fan_text: str, her_recent: Sequence[
     persona_bad = persona_contradiction(raw, fan_text)
     too_short = (bool(text) and plan.turn_type not in ("react", "refuse") and not plan.emoji_only and plan.max_words >= 6
                  and word_count(text) <= 2 and word_count(fan_text) >= 4)
+    # v16.26: the filters cut a real sentence down to an orphan ("hmm, a munkán kívül", "itt maradunk") → regenerate
+    fragment = (bool(text) and not too_short and plan.turn_type not in ("react", "refuse") and not plan.emoji_only
+                and word_count(text) <= 3 and word_count(raw) >= word_count(text) + 3 and word_count(fan_text) >= 4
+                and bool(_GUT_REASONS & set(reasons)))
+    excuse = bool(EXCUSE_RX.search(norm(text))) and not EXCUSE_RX.search(norm(fan_text))   # v16.26
     for flag, name in ((invite, "invitation"), (selling, "selling_claim"), (persona_bad, "persona_contradiction"),
-                       (too_short, "too_short")):
+                       (too_short, "too_short"), (fragment, "fragment"), (excuse, "excuse")):
         if flag: reasons.append(name)
     needs = (not text) or impossible or still_same or (word_count(text) == 0 and not _EMOJI.search(text)) \
-        or ("too_long_hard" in reasons) or ("template_regen" in reasons) or invite or too_short or selling or persona_bad
+        or ("too_long_hard" in reasons) or ("template_regen" in reasons) or invite or too_short or selling or persona_bad \
+        or fragment or excuse
     hint = ""
     if needs:
         bits = []
@@ -1357,6 +1383,8 @@ def postprocess(reply: str, plan: TurnPlan, fan_text: str, her_recent: Sequence[
         if selling: bits.append("tartalomnál csak játékosan „majd később / türelem” — ne mondd, hogy nem árulsz semmit, ne mondj árat")
         if persona_bad: bits.append("maradj a tényeidnél (menhelyes keverék kutyákat szeretsz, van egy régi sötétkék Suzuki Swifted, nincs barátod, nem jársz suliba)")
         if too_short: bits.append("ez túl rövid és hideg, írj egy kicsit többet, kedvesebben")
+        if fragment: bits.append("egy kerek, érthető mondat arra, amit most írt (ne csonka töredék)")
+        if excuse: bits.append("ne mentegetőzz elírással / elcsúszással; mondd el egyszerűen, mire gondoltál, vagy reagálj arra, amit most írt")
         hint = "FONTOS: az előző változat nem volt jó — " + "; ".join(bits) + f". Kb. {plan.max_words} szó."
     return FilterResult(text, out_parts, needs, reasons, hint, plain)
 

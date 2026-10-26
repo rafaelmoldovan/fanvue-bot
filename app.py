@@ -36,6 +36,7 @@ import threading
 import time
 import random
 import uuid
+import dataclasses          # v16.26: dataclasses.replace for the focused regeneration plan
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -1787,6 +1788,7 @@ HOGYAN ÍRSZ (mint Rafael lenti valódi válaszai):
 - a legtöbb üzenet reakció, válasz, ugratás vagy egy apróság rólad; NEM kérdezel minden üzenetben
 - NE ismételd vissza a szavait, NE foglald össze amit írt, NE értékeld és NE elemezd őt („látszik hogy…”, „ez szépen hangzik”, „tetszik ez benned”, „ez érthető”), NE adj tanácsot, ne beszélj terapeuta / ügyfélszolgálat hangon
 - régi, már elmúlt kérdésekre nem válaszolsz utólag; nem találsz ki közös emlékeket
+- ha nem érti egy korábbi üzenetedet („ez mit jelent?”), mondd el egyszerűen, érthetően, mire gondoltál; SOHA ne találj ki kifogást („elírtam”, „elcsúszott”, „az előző üzenet volt”, „nem neked írtam”)
 - pontosan azt a formát és hosszt írd, amit az utolsó üzenet végén a „🎯 MOST” sor kér; ha két üzenetet kér, a kettőt külön sorba írd"""
 
 # Rafael's real replies (the exam example fixed: she has finished school) + the human rewrites from FORENSICS.md.
@@ -1843,6 +1845,7 @@ def refresh_live_examples(force=False):
             me, fan = (pr.get('me') or '').strip(), (pr.get('fan') or '').strip()
             if not (4 <= len(me) <= 220) or not fan or len(fan) > 300: continue
             if me.count(' / ') > 1 or _KW_LIVE_BAD.search(me) or _MENTIONS_AI_OUT.search(me): continue
+            if hz is not None and hz.EXCUSE_RX.search(hz.norm(me)): continue     # v16.26: no "bocsi, elírtam" templates
             key = _fv_norm(me)[:60]
             if key in seen: continue
             seen.add(key); bank.append((fan[-200:], me.replace(' / ', '\n')))
@@ -2000,11 +2003,35 @@ def _valid_fact(ft, fv):
             'péntek','délután','délelőtt','reggel','este','éjjel','holnap','tegnap','otthon vagyok')): return False
     return True
 
+def _parse_facts_json(text):
+    """v16.26: the fact extractor's answer → list. 10-26 logs: '[facts] Expecting value: line 1 column 1 (char 0)' on
+    every message without facts — Haiku answers with an empty text or prose ('Nincs tény.', 'No facts…') instead of
+    '[]', and json.loads('') / json.loads(prose) raised. Empty / prose → []; ```json fences, a leading sentence and a
+    single {...} object are accepted; a truncated array keeps its complete objects."""
+    raw = re.sub(r"```(?:json)?", "", text or "").strip()
+    if not raw:
+        return []
+    a, b = raw.find('['), raw.rfind(']')
+    if a != -1 and b > a:
+        try:
+            v = json.loads(raw[a:b + 1])
+            return v if isinstance(v, list) else []
+        except ValueError:
+            pass
+    objs = []
+    for m in re.finditer(r"\{[^{}]*\}", raw):           # single object / truncated array → the complete objects
+        try:
+            o = json.loads(m.group(0))
+            if isinstance(o, dict): objs.append(o)
+        except ValueError:
+            continue
+    return objs
+
 def extract_facts(msg_id, chat_id, fan_text):
     if not fan_text or len(fan_text.strip()) < 10:
         db_query('UPDATE messages SET facts_done=1 WHERE msg_id=?', (msg_id,)); return
     try:
-        resp = llm_create(model=UTIL_MODEL, max_tokens=200,
+        resp = llm_create(model=UTIL_MODEL, max_tokens=300,        # v16.26: 200 truncated longer arrays
             system=("You extract facts the FAN (the man writing) states ABOUT HIMSELF. "
                     "CRITICAL: IGNORE anything about Jázmin / the girl / 'you' (te/téged) — ONLY the fan's OWN facts. "
                     "Only REAL, explicitly-stated facts about himself: an actual NAME, a real AGE number, a real JOB title, "
@@ -2012,10 +2039,7 @@ def extract_facts(msg_id, chat_id, fan_text):
                     "Output ONLY a raw JSON array of {\"fact_type\",\"fact_value\"}; [] if none. "
                     "fact_type in: name, job, location, age, relationship, hobby, family, stress, interest, language, pet."),
             messages=[{"role": "user", "content": fan_text}])
-        raw = resp.text.replace("```json", "").replace("```", "").strip()
-        m = re.search(r'\[.*\]', raw, re.DOTALL)
-        if m: raw = m.group(0)
-        facts_list = json.loads(raw)
+        facts_list = _parse_facts_json(resp.text)          # v16.26: robust (fences, prose, empty, single object)
         if isinstance(facts_list, list):
             for f in facts_list:
                 if not isinstance(f, dict): continue
@@ -2768,7 +2792,7 @@ def _kw_unsafe(text, ai_turn=False):
 
 HZ_CRITIC_ON = lambda: (os.environ.get('HZ_CRITIC', '1') or '1').strip() != '0'
 
-_KW_CONTACT_PLATFORM = re.compile(r"telefonszam|\bszamod|\bszamot|insta|instagram|telegram|whatsapp|viber|snap|facebook|messenger|"
+_KW_CONTACT_PLATFORM = re.compile(r"telefonszam|\bszamod|\bszamot|insta|instagram|telegram|whatsapp|viber|\bsnap|facebook|messenger|"  # v16.26: \bsnap (másnap)
                                   r"\bfb\b|discord|e-?mail")
 _KW_CONTACT_ASK = re.compile(r"\?|megad|\badd\b|adnad|kuld|irj|irjak|lehet|hol talal|keresselek|beszeljunk")
 _KW_MEET_SOFT = re.compile(r"\bkave(zunk|zzunk|ra|t inni|t innank)|egy kave|elhivhatlak|elviszlek|meghivlak|sorozunk|"
@@ -2838,6 +2862,41 @@ def run_hz_critic(history, fan_text, reply, plan, state=None, open_q=""):
     return c
 
 KW_SAFE_FALLBACK = ["hihi 🙈", "jajj :)", "na ne már :D"]
+
+# v16.26: draft selection. A draft with one of these critic flags / post-filter reasons is never sent.
+_KW_BLOCK_FLAGS = {"non_sequitur", "garbled", "persona_contradiction"} | _KW_SAFETY_FLAGS
+_KW_BLOCK_REASONS = {"too_short", "fragment", "excuse", "invitation", "selling_claim", "persona_contradiction"}
+_KW_BLOCK_ALL = _KW_BLOCK_FLAGS | _KW_BLOCK_REASONS
+
+def _kw_bad(cd, plan):
+    r_ = cd["res"]
+    if r_ is None or not r_.text: return True
+    flags = set(cd["sev"]) & (_KW_SAFETY_FLAGS if plan.bypass else _KW_BLOCK_FLAGS)   # AI / meetup turns: safety only
+    return bool(flags) or (r_.needs_regen and bool(set(r_.reasons) & _KW_BLOCK_REASONS))
+
+def _kw_clean(cd):
+    return cd["res"] is not None and bool(cd["res"].text) and not cd["res"].needs_regen and not cd["sev"]
+
+def _kw_pick(cands, plan):
+    """Lowest severity among the drafts that are not known-bad; on a tie the later (more targeted) draft wins."""
+    ok = [cd for cd in cands if not _kw_bad(cd, plan)]
+    if not ok: return None
+    return min(reversed(ok), key=lambda cd: len(cd["sev"]) + (2 if cd["res"].needs_regen else 0))
+
+KW_ONTOPIC_FALLBACK = {
+    "sad": ["jaj 🥺 sajnálom, mi történt?", "jajj 🥺 ez nem hangzik jól"],
+    "compliment": ["jajj koszi 🥰", "ahj, koszonom 🤭"],
+    "flirt": ["hihi 🙈 na ne már", "hmm, ezt még meggondolom 😏"],
+    "question": ["hmm, ezen gondolkodnom kell 😅", "hirtelen nem is tudom 😅"],
+    "default": ["aha, értem 🙂", "jaa, értem :)", "hehe, oké 🙂"],
+}
+
+def _kw_ontopic_fallback(plan, fan_text, rng=None):
+    """v16.26: short, safe, never cryptic line when every draft was garbled / off-topic."""
+    f = hz.fan_features(fan_text or "")
+    key = ("sad" if (f.sad or plan.turn_type == "care") else "question" if f.asked_question else
+           "compliment" if f.compliment else "flirt" if f.flirt >= 1 else "default")
+    return (rng or random).choice(KW_ONTOPIC_FALLBACK[key])
 
 def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_overrides=None, *, lock=None,
                       extra_hints="", is_followup=False, now_bp=None, rng=None, hot=None, critic=None):
@@ -2921,39 +2980,64 @@ def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_
     r1 = ask_claude(dyn, user_msg, smart=True, convo=convo, chat_id=gen_chat, plan=plan, her_recent=her_recent)
     out["raw"] = r1
     res = hz.postprocess(r1, plan, fan_text, her_recent, told_today, fan_all, rng) if r1 else None
-    hint = ""
-    if res is None or res.needs_regen:
-        hint = res.regen_hint if (res and res.regen_hint) else f"FONTOS: írj egy természetes választ. Kb. {plan.max_words} szó."
-    elif use_critic:
-        c = run_hz_critic(history, fan_text or user_msg, res.plain or res.text, plan, state, open_q)
-        out["critic"], out["critic_fix"] = c["flags"], c["fix"]
-        sev1 = _kw_severe(c["flags"], plan)
-        if sev1:
-            print(f"[hz-critic] {str(chat_id)[:8]} severe {sev1} → regenerating: {res.text!r}", flush=True)
-            hint = hz.critic2_hint(dict(c, flags=sev1), plan)
-        elif c["flags"]:
-            print(f"[hz-critic] {str(chat_id)[:8]} soft {c['flags']} → kept: {res.text!r}", flush=True)
-    if hint:                                             # ONE regeneration max
-        r2 = ask_claude(dyn + "\n\n" + hint, user_msg, smart=True, convo=convo, chat_id=gen_chat, plan=plan, her_recent=her_recent)
-        if r2 and not _kw_unsafe(r2, ai_turn=(lock == 'ai')):
-            res2 = hz.postprocess(r2, plan, fan_text, her_recent, told_today, fan_all, rng)
-            accept = bool(res2.text) and (res is None or not res2.needs_regen or not res.text or out["critic"])
-            if accept and out["critic"] and res is not None and res.text and use_critic:
-                # v16.7: a critic-triggered rewrite must actually be better (Fanvue 10-22: a fine question was replaced
-                # by "na akkor mi lenne az enyém, szerintem?") → criticise the rewrite; keep the original if not better
-                sev1 = _kw_severe(out["critic"], plan)
-                c2 = run_hz_critic(history, fan_text or user_msg, res2.plain or res2.text, plan, state, open_q)
-                sev2 = _kw_severe(c2["flags"], plan)
-                orig_safe = not (set(sev1) & _KW_SAFETY_FLAGS)
-                if sev2 and not (len(sev2) < len(sev1) and not set(sev2) & _KW_SAFETY_FLAGS) and orig_safe:
-                    accept = False
-                    print(f"[hz-critic] {str(chat_id)[:8]} rewrite not better {sev2} → original kept", flush=True)
-            if accept:
-                res = res2
-                out["raw"] = r2
-                if use_critic and _sim_active():         # sandbox only: show what the critic thinks of the final text
-                    out["critic_final"] = run_hz_critic(history, fan_text or user_msg, res2.plain or res2.text, plan,
-                                                        state, open_q)["flags"]
+    # v16.26: every draft is judged (post-filters + critic) and the best NON-garbled one is sent. Before: a critic-
+    # flagged original was kept whenever the rewrite was "not better" (10-26: 'bézs', 'hmm, ez jól hangzik, amúgy vettem
+    # ma egy új pulcsit' went out), and a too_short/fragment rewrite was accepted unchecked ('hmm').
+    cands = []
+    def _judge(raw_, res_, plan_, first=False):
+        cd = {"raw": raw_, "res": res_, "plan": plan_, "sev": [], "flags": [], "fix": ""}
+        if res_ is not None and res_.text and not res_.needs_regen and use_critic:
+            c_ = run_hz_critic(history, fan_text or user_msg, res_.plain or res_.text, plan_, state, open_q)
+            cd["flags"], cd["fix"], cd["sev"] = c_["flags"], c_["fix"], _kw_severe(c_["flags"], plan_)
+            if first:
+                out["critic"], out["critic_fix"] = c_["flags"], c_["fix"]
+        cands.append(cd)
+        return cd
+    def _hint_for(cd):
+        r_ = cd["res"]
+        if r_ is None or r_.needs_regen:
+            return r_.regen_hint if (r_ and r_.regen_hint) else f"FONTOS: írj egy természetes választ. Kb. {cd['plan'].max_words} szó."
+        return hz.critic2_hint(dict(flags=cd["sev"], fix=cd["fix"]), cd["plan"]) if cd["sev"] else ""
+    def _gen(plan_, hint_):
+        r_ = ask_claude(dyn + "\n\n" + hint_, user_msg, smart=True, convo=convo, chat_id=gen_chat, plan=plan_, her_recent=her_recent)
+        if not r_ or _kw_unsafe(r_, ai_turn=(lock == 'ai')):
+            return None
+        return _judge(r_, hz.postprocess(r_, plan_, fan_text, her_recent, told_today, fan_all, rng), plan_)
+    c1 = _judge(r1, res, plan, first=True)
+    if c1["sev"]:
+        print(f"[hz-critic] {str(chat_id)[:8]} severe {c1['sev']} → regenerating: {res.text!r}", flush=True)
+    elif c1["flags"]:
+        print(f"[hz-critic] {str(chat_id)[:8]} soft {c1['flags']} → kept: {res.text!r}", flush=True)
+    hint = _hint_for(c1)
+    if hint:
+        c2 = _gen(plan, hint)
+        if not any(_kw_clean(cd) for cd in cands) and not is_followup and fan_text:
+            # v16.26: ONE last, focused try: his last message quoted, plain answer, no seed / self-share
+            last = (c2 if (c2 and c2["res"] is not None) else c1)
+            focus = [l.strip() for l in fan_text.split("\n") if l.strip()][-1]
+            t3 = plan.turn_type if plan.turn_type in ("short", "answer_share", "tease", "question", "care", "refuse", "locked") else "short"
+            p3 = dataclasses.replace(plan, turn_type=t3, bubbles=1, seed="", seed_topic="", focus=focus,
+                                     max_words=plan.max_words if t3 in ("refuse", "locked") else max(plan.max_words, 10))
+            sev_names = ", ".join(sorted((set(last["sev"]) | set(last["res"].reasons if last["res"] else [])) & _KW_BLOCK_ALL)) or "nem volt jó"
+            print(f"[hz-critic] {str(chat_id)[:8]} still bad ({sev_names}) → focused regeneration", flush=True)
+            _gen(p3, (_hint_for(last) or "FONTOS: írd újra.") + f" Az előző változat rossz volt ({sev_names}).")
+    best = _kw_pick(cands, plan)
+    if best is None and any(cd["res"] is not None and cd["res"].text for cd in cands):
+        # every draft is known-bad → never send a known-garbled / non-sequitur text
+        out["reasons"] = list(cands[-1]["res"].reasons if cands[-1]["res"] else []) + ["all_drafts_bad→fallback"]
+        fb = [] if (is_followup or not fan_text) else [_kw_ontopic_fallback(plan, fan_text, rng)]
+        print(f"[hz-critic] {str(chat_id)[:8]} all drafts bad → {'fallback ' + repr(fb[0]) if fb else 'skip'}", flush=True)
+        res = hz.FilterResult(fb[0] if fb else "", fb, False, out["reasons"])
+        out["raw"] = fb[0] if fb else ""
+    elif best is not None:
+        if best is not c1:
+            res, out["raw"] = best["res"], best["raw"]
+            if use_critic and _sim_active():             # sandbox only: what the critic thinks of the final text
+                out["critic_final"] = best["flags"]
+            if c1["sev"] and best["sev"]:
+                print(f"[hz-critic] {str(chat_id)[:8]} least-bad draft sent {best['sev']}", flush=True)
+        elif c1["sev"]:
+            print(f"[hz-critic] {str(chat_id)[:8]} rewrites worse → original (least bad, {c1['sev']}) kept", flush=True)
     bubbles = list(res.bubbles) if (res and res.text) else []
     if res is not None:
         out["reasons"] = list(res.reasons)
@@ -3953,6 +4037,7 @@ def clear_stage(cid): save_token(_stage_key(cid), 'null')
 def stage_progress(cid):
     st = get_s1(cid)
     return (max(0, _fan_msg_count(cid) - int(st.get("n0") or 0)) if st else 0)
+_GREET_ONLY = re.compile(r"^(sz+i+a+|sz+e+v+a+s+z+|hel+[oó]+|hel+[oó]ka|hal+i+|hel+l+o+|hi+|hey+|cs[aá]+|j[oó] (reggelt|est[ée]t|napot)|sziaszt\w*)[\s!.?😊🙂😘❤️🥰😁😄]*$", re.I)
 def stage_hint(cid):
     st = get_s1(cid)
     if not st: return ""
@@ -3967,7 +4052,11 @@ def stage_hint(cid):
     asked = " ".join(m.get('text') or '' for m in (db_query(
         "SELECT text FROM messages WHERE chat_id=? AND is_mine=1 ORDER BY timestamp DESC LIMIT 60", (cid,)) or []))
     bank = "\n".join(f"- {q}" for q in STAGE1_QUESTIONS)
-    return ("💞 1. SZAKASZ — MEGISMERÉS (ez a(z) " + str(n + 1) + ". üzenete ebben a szakaszban, kb. " + str(STAGE1_MIN) +
+    _lf = db_query("SELECT text FROM messages WHERE chat_id=? AND COALESCE(is_mine,0)=0 ORDER BY timestamp DESC LIMIT 1", (cid,), fetch_one=True) or {}
+    greet = ("👋 Most csak köszönt („" + (_lf.get('text') or '').strip()[:20] + "”): ELŐSZÖR köszönj vissza kedvesen, melegen "
+             "(pl. „sziaa 😊”, örülj neki), és csak utána, ugyanabban az üzenetben jöhet egy könnyű kérdés.\n"
+             if _GREET_ONLY.match((_lf.get('text') or '').strip()) else "")
+    return (greet + "💞 1. SZAKASZ — MEGISMERÉS (ez a(z) " + str(n + 1) + ". üzenete ebben a szakaszban, kb. " + str(STAGE1_MIN) +
             "-ig tart; most: " + phase + ").\n"
             "Cél: minél jobban megismerni őt, és éreztetni vele, hogy TÉNYLEG érdekel — őszinte kíváncsiság, nem kihallgatás. "
             "Ilyen irányok (a saját szavaiddal, nem szó szerint, és csak ami még NEM derült ki — nézd meg az emlékeket és a "
@@ -4698,8 +4787,6 @@ def _sim_bot_turn(ctx, fan_text, use_hz):
     """One bot turn for the sandbox (mirrors send_due_batches' decisions, no side effects)."""
     history, chat_id = ctx["history"], ctx["chat_id"]
     prof_over = {"memory_notes": ctx.get("memory") or "", "ai_confirmed": ctx.get("ai_confirmed", 0), "real_name": ""}
-    if is_minor_fan(fan_text) or _SCHOOL_F.search(fan_text):
-        return {"bubbles": [MINOR_MSG_F], "plan": "locked:minor", "delay_s": 30.0, "skip": False}
     ai = is_direct_ai_question(fan_text)
     meet = bool(_MEETUP_Q.search(fan_text))
     if use_hz and not ai and not meet:
