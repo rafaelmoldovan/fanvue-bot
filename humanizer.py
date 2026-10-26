@@ -103,7 +103,11 @@ _SAD = re.compile(r"szomoru|rossz nap|rossz napom|szar nap|szar napom|szar napo|
                   r"hianyzik (az|a) |korhaz|mutet|baleset|szomorusag|kesz vagyok|kikeszult")
 _BYE = re.compile(r"\b(jo ejt|jo ejszakat|szep almokat|megyek aludni|megyek lefekudni|lefekszem|aludni megyek|mennem kell|"
                   r"most mennem|majd irok|kesobb irok|holnap irok|szia(sztok)? holnap|puszi\s*$|pa+\s*$|bye|good night|"
-                  r"aludj jol|elalszom|alszom is)\b")
+                  r"aludj jol|elalszom|alszom is|"
+                  # v16.27: 'holnap ha gondolod délelőtt írok', 'jóccakát', 'megyek is aludni'
+                  r"holnap\b.{0,30}\b(irok|irunk|beszelunk|dumalunk)|majd (holnap )?(dumalunk|beszelunk)|"
+                  r"(delelott|delutan|este|reggel) irok|"
+                  r"joccakat|jo ejszakat|jo pihenest|edes almokat|megyek (is )?(aludni|lefekudni|alszom)|tovabbi jo csevegest)\b")
 _SAD_EMO = re.compile(r"[😢😭🥺☹😔😞😟]|:\(")
 
 
@@ -314,6 +318,7 @@ class TurnPlan:
     open_q: str = ""              # her own question he is answering now (or ignored) → coherence
     multi: bool = False           # he sent several messages → react to the LAST one
     focus: str = ""               # v16.26: his last message quoted for a focused (last-chance) regeneration
+    closing: bool = False         # v16.27: the goodbye was already said → short, no question, no double-text / pick-up
     style: str = "ou"             # owner orthography applied in code: 'ou' (ö/ő→o, ü/ű→u) | 'ou_long' (+ó/ú/í) | 'full' | 'bare'
     weights: dict = field(default_factory=dict)   # debug
 
@@ -1226,6 +1231,74 @@ def is_goodbye(text: str) -> bool:
     return bool(_HER_BYE.search(norm(text) + " "))
 
 
+# ── v16.27: GOOD-NIGHT LOOP GUARD (ported from Telegram's bye-loop guard) ──────────────────────────────────────────
+# Rafael 10-26 (Lajos): "jo éjt…" → "Efootball a játék" → … → "na tényleg jó éjt 😘" → "álmodj rólam is 😏 pihend ki
+# magad" → "Majd elmesélem!" → "alig várom, na és milyen volt az álmod?". Once the goodbye is said, his closing
+# pleasantries get NO reply (and no double-text / pick-up) until he writes something real or a new day starts.
+_HER_BYE_WIDE = re.compile(r"\b(jo ejt\w*|joccakat|jo ejszakat|szep almokat|edes almokat|almodj\w*|aludj\w*|pihend ki|"
+                           r"pihenj\w*|jo pihenest|menj aludni|ne nyomkodd sokaig|holnap (meselj|beszelunk|irj|irok|folytatjuk)|"
+                           r"majd irj|irj holnap|puszi,? holnap|holnapig)\b")
+_HER_SENDOFF = re.compile(r"\b(szep estet|szep napot|szep delutant|vigyazz magadra|jo jatekot|jo munkat|jo edzest|"
+                          r"jo szorakozast|jo meccset)\b")     # a send-off: if HE then says bye, one short goodbye is fine
+_CLOSER_PREFIX = tuple("""majd holnap elmesel mesel irok irj irunk beszel jelentkez te tenis is neked nekem kosz koszon puszi pusza
+pusz csok rendben ok jo jol aha ja igen persze ugy lesz meglesz igerem na ejt ejsz almo almod alom szep edes aludj alud alsz pihen
+szia pa dum hehe haha hihi draga edesem cica kedves joccak tenyleg akkor viszont mindenkepp termeszetes biztos en rolad rolam nagyon
+sok szeretet xd lol gn bye good night meg latjuk meglatjuk remel orul ertem megprobal igyekszem ugyan hasonlo szinten okes
+a az es de hat ha mit hogy ilyen olyan dehogy nem baj semmi vagy is is""".split())
+
+
+def is_goodbye_wide(text: str) -> bool:
+    """Her goodbye, incl. 'álmodj rólam', 'pihend ki magad', 'majd írj holnap', 'szép estét' (loop guard only)."""
+    n = norm(text) + " "
+    return bool(_HER_BYE.search(n) or _HER_BYE_WIDE.search(n) or _HER_SENDOFF.search(n))
+
+
+def _her_real_goodbye(text: str) -> bool:
+    n = norm(text) + " "
+    return bool(_HER_BYE.search(n) or _HER_BYE_WIDE.search(n))
+
+
+def fan_says_bye(text: str) -> bool:
+    return bool(_BYE.search(norm(text) + " "))
+
+
+def is_closer(text: str) -> bool:
+    """A closing pleasantry with nothing new in it: 'Majd elmesélem!', 'te is', 'puszi', 'köszi', 'jó éjt 😘', '😘',
+    'na tényleg jó éjt'. A question or a real sentence is never a closer."""
+    t = (text or "").strip()
+    if not t or "?" in t:
+        return False
+    w = norm(t).split()
+    # (prefix list also covers 'dumálunk')
+    if not w:
+        return True                                  # emoji / punctuation only
+    if fan_says_bye(t) and len(w) <= 10:
+        return True
+    return len(w) <= 6 and all(x.startswith(_CLOSER_PREFIX) for x in w)
+
+
+BYE_LOOP_MAX_S = 6 * 3600                            # her goodbye older than this → a new day / new chat: normal reply
+
+
+def bye_context(her_last_turn: str, fan_prev_turn: str, secs_since_her: Optional[float]) -> bool:
+    """The goodbye has been said: her latest turn is a goodbye, or it answered HIS goodbye (recent)."""
+    if secs_since_her is not None and secs_since_her > BYE_LOOP_MAX_S:
+        return False
+    return bool(her_last_turn) and (is_goodbye_wide(her_last_turn) or (bool(fan_prev_turn) and fan_says_bye(fan_prev_turn)))
+
+
+def bye_loop_silent(her_last_turn: str, fan_prev_turn: str, fan_new: Sequence[str], secs_since_her: Optional[float]) -> bool:
+    """True → she sends nothing: the goodbye was said and everything he wrote since is a closing pleasantry."""
+    msgs = [m for m in (fan_new or []) if (m or "").strip()]
+    if not msgs or not bye_context(her_last_turn, fan_prev_turn, secs_since_her) or not all(is_closer(m) for m in msgs):
+        return False
+    # she only sent him off ('jó játékot', 'szép estét') and NOW he says good night → one short goodbye is still fine
+    if not _her_real_goodbye(her_last_turn) and not (fan_prev_turn and fan_says_bye(fan_prev_turn)) \
+            and any(fan_says_bye(m) for m in msgs):
+        return False
+    return True
+
+
 _SELF_FACT = re.compile(r"\b(vagyok|voltam|van egy|nekem (is )?van|nekem nincs|szeretem|imadom|utalom|kedvencem|szoktam|jartam|"
                         r"lakom|eltem|dolgoztam|tanultam|nottem fel|testverem|egyke)\b")
 _NOT_FACT = re.compile(r"\b(jol vagyok|faradt vagyok|itt vagyok|kivancsi vagyok|ugy vagyok|meg vagyok|most|epp|eppen|ma)\b")
@@ -1638,6 +1711,8 @@ def maybe_followup_delay(plan: TurnPlan, hour: int, rng: Optional[random.Random]
     The caller cancels it when he writes before it is due."""
     rng = rng or random.Random()
     if plan.bypass or plan.allow_question or plan.turn_type in ("question", "locked"):
+        return None
+    if plan.he_bye or plan.closing:                  # v16.27: never a double-text after a goodbye
         return None
     if daypart(hour) == "night" or (secs_since_last_followup is not None and secs_since_last_followup < 3600):
         return None

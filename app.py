@@ -2560,6 +2560,16 @@ def _her_recent_from_history(history, n=30):
         if len(out) >= n: break
     return list(reversed(out))
 
+def _last_turns(hh):
+    """(her latest turn, his turn before it) — hh: history WITHOUT his newest message(s). v16.27"""
+    i = len(hh or []); her, fan = [], []
+    while i and hh[i - 1].get('is_mine'):
+        i -= 1; her.insert(0, (hh[i].get('text') or '').strip())
+    while i and not hh[i - 1].get('is_mine'):
+        i -= 1; fan.insert(0, (hh[i].get('text') or '').strip())
+    dedup = lambda xs: "\n".join(dict.fromkeys(x for x in xs if x))
+    return dedup(her[-4:]), dedup(fan[-3:])
+
 def _secs_since_her_last(history):
     """How long he took to answer her last message (None if unknown) → 'hot' chat detection."""
     h = history or []
@@ -2877,9 +2887,29 @@ def _kw_bad(cd, plan):
 def _kw_clean(cd):
     return cd["res"] is not None and bool(cd["res"].text) and not cd["res"].needs_regen and not cd["sev"]
 
-def _kw_pick(cands, plan):
-    """Lowest severity among the drafts that are not known-bad; on a tie the later (more targeted) draft wins."""
+# v16.27: live 10-26 15:10-19:30 — 24 of ~70 turns ended as a canned fallback ('aha, értem 🙂' 6×, 'hmm, ezen gondolkodnom
+# kell 😅' 4× — also as the answer to 'Miért ??'), fans: 'Most mi az ??', 'Nem tudlak követni', 'Rosszat mondtam ??'.
+# Most were blocked by the Haiku critic's non_sequitur ALONE on fine drafts ('jaj, az fárasztó lehet' to his 3-shift job).
+# A non_sequitur-only draft (≥4 words, no topic jump / own-activity / excuse) is now a last resort BEFORE the canned line.
+_KW_TOPIC_JUMP = re.compile(r"\bamugy\b|\bma (vettem|voltam|setaltam|sutottem|fozt?em|takaritottam|csinaltam|jartam)\b|"
+                            r"\ben (most|meg|epp|eppen)\b|\bnalam (most|meg|epp)\b|elirtam|eliras|elcsusz|elozo uzenet|"
+                            r"\bbocsi\b|osszekevertem")
+
+def _kw_soft_bad(cd, plan):
+    """Known-bad ONLY because the critic said non_sequitur (no garbled / safety / persona / hard post-filter reason)."""
+    r_ = cd["res"]
+    if r_ is None or not r_.text or plan.bypass: return False
+    if (set(cd["sev"]) & _KW_BLOCK_FLAGS) != {"non_sequitur"}: return False
+    if r_.needs_regen and set(r_.reasons) & _KW_BLOCK_REASONS: return False
+    n = hz.norm(r_.plain or r_.text)
+    return hz.word_count(r_.plain or r_.text) >= 4 and not _KW_TOPIC_JUMP.search(n) and not hz._ACTIVITY.search(n)
+
+def _kw_pick(cands, plan, allow_soft=False):
+    """Lowest severity among the drafts that are not known-bad; on a tie the later (more targeted) draft wins.
+    allow_soft (v16.27): if none is clean, a non_sequitur-only draft beats the canned fallback."""
     ok = [cd for cd in cands if not _kw_bad(cd, plan)]
+    if not ok and allow_soft:
+        ok = [cd for cd in cands if _kw_soft_bad(cd, plan)]
     if not ok: return None
     return min(reversed(ok), key=lambda cd: len(cd["sev"]) + (2 if cd["res"].needs_regen else 0))
 
@@ -2891,12 +2921,17 @@ KW_ONTOPIC_FALLBACK = {
     "default": ["aha, értem 🙂", "jaa, értem :)", "hehe, oké 🙂"],
 }
 
-def _kw_ontopic_fallback(plan, fan_text, rng=None):
-    """v16.26: short, safe, never cryptic line when every draft was garbled / off-topic."""
+def _kw_ontopic_fallback(plan, fan_text, rng=None, her_recent=()):
+    """v16.26: short, safe, never cryptic line when every draft was garbled / off-topic.
+    v16.27: 'sad' only when THIS message is sad; a line she sent recently is not repeated ('aha, értem 🙂' 6× in a chat)."""
     f = hz.fan_features(fan_text or "")
-    key = ("sad" if (f.sad or plan.turn_type == "care") else "question" if f.asked_question else
+    key = ("sad" if f.sad else "question" if f.asked_question else
            "compliment" if f.compliment else "flirt" if f.flirt >= 1 else "default")
-    return (rng or random).choice(KW_ONTOPIC_FALLBACK[key])
+    used = {hz.norm(x) for x in (her_recent or [])[-30:]}
+    pool = [x for x in KW_ONTOPIC_FALLBACK[key] if hz.norm(x) not in used] or \
+           [x for k in ("default", "question", "flirt") for x in KW_ONTOPIC_FALLBACK[k] if hz.norm(x) not in used] or \
+           KW_ONTOPIC_FALLBACK[key]
+    return (rng or random).choice(pool)
 
 def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_overrides=None, *, lock=None,
                       extra_hints="", is_followup=False, now_bp=None, rng=None, hot=None, critic=None):
@@ -2926,6 +2961,16 @@ def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_
         units = [u for u in hz.split_units(hh[-1].get('text') or '') if hz.is_question_text(u)]
         if units and not hz.is_bounce(units[-1]):
             open_q = units[-1]
+    # v16.27: good-night loop guard — the goodbye was said and he only answers with a closing pleasantry
+    # ('Majd elmesélem!', 'te is', 'puszi', '😘') → no reply, no double-text, no pick-up (Rafael 10-26, Lajos)
+    her_turn, fan_prev = _last_turns(hh)
+    fan_new = [l.strip() for l in fan_text.replace("[+] ", "\n").split("\n") if l.strip()]
+    closing = (not is_followup) and bool(fan_text) and hz.bye_context(her_turn, fan_prev, secs)
+    if closing and hz.bye_loop_silent(her_turn, fan_prev, fan_new, secs):
+        print(f"[bye-loop] {str(chat_id)[:8]}: goodbye already said, closer {fan_text[:40]!r} → no reply", flush=True)
+        return {"plan": hz.TurnPlan("skip", 0, False, skip=True, closing=True), "bubbles": [], "delay_s": 0.0,
+                "followup": None, "read_delay_s": 0.0, "reply_window_s": 0.0, "typing_s": 0.0, "raw": "",
+                "reasons": ["bye_loop→silent"], "told": [], "facts": [], "critic": [], "critic_fix": "", "critic_final": None}
     ctx = hz.TurnContext(fan_text, her_recent, list(state.turns), hour, n_fan, secs, lock, fan_recent=fan_recent,
                          chat_key=chat_key, day=day, told_today=told_today, care_left=state.care_left)
     if is_followup:
@@ -2952,6 +2997,15 @@ def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_
                 plan.allow_question = True
         plan.open_q = open_q
         plan.multi = len([l for l in fan_text.split("\n") if l.strip()]) > 1
+        if closing or plan.he_bye:
+            # v16.27: after a goodbye (his or hers) — short, warm, no question / counter-question, no own news
+            plan.closing = closing
+            plan.allow_question, plan.allow_bounce = False, False
+            if plan.turn_type in ("initiative", "question", "two_bubble"):
+                plan.turn_type = "short"
+            plan.seed, plan.seed_topic, plan.bubbles = "", "", 1
+            if not plan.he_asked:
+                plan.max_words = min(plan.max_words, 10)
     is_hot = hz.is_hot(secs) if hot is None else hot
     came_back = secs is None or secs > 1800                    # his first message after a pause: no long gap
     no_gap = came_back or plan.he_asked or plan.sad
@@ -3022,10 +3076,14 @@ def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_
             print(f"[hz-critic] {str(chat_id)[:8]} still bad ({sev_names}) → focused regeneration", flush=True)
             _gen(p3, (_hint_for(last) or "FONTOS: írd újra.") + f" Az előző változat rossz volt ({sev_names}).")
     best = _kw_pick(cands, plan)
+    if best is None and not is_followup:
+        best = _kw_pick(cands, plan, allow_soft=True)        # v16.27
+        if best is not None:
+            print(f"[hz-critic] {str(chat_id)[:8]} only non_sequitur-flagged drafts → least-bad sent instead of a canned line", flush=True)
     if best is None and any(cd["res"] is not None and cd["res"].text for cd in cands):
         # every draft is known-bad → never send a known-garbled / non-sequitur text
         out["reasons"] = list(cands[-1]["res"].reasons if cands[-1]["res"] else []) + ["all_drafts_bad→fallback"]
-        fb = [] if (is_followup or not fan_text) else [_kw_ontopic_fallback(plan, fan_text, rng)]
+        fb = [] if (is_followup or not fan_text) else [_kw_ontopic_fallback(plan, fan_text, rng, her_recent)]
         print(f"[hz-critic] {str(chat_id)[:8]} all drafts bad → {'fallback ' + repr(fb[0]) if fb else 'skip'}", flush=True)
         res = hz.FilterResult(fb[0] if fb else "", fb, False, out["reasons"])
         out["raw"] = fb[0] if fb else ""
@@ -3133,6 +3191,8 @@ def _send_extra(item, done):
         busy = db_query("SELECT 1 FROM scheduled_replies WHERE chat_id=? AND id!=? AND status IN ('pending','sending') "
                         "AND COALESCE(kind,'reply') IN ('reply','bubble') LIMIT 1", (chat_id, bid), fetch_one=True)
         _late = hz.daypart(get_budapest_now().hour) == "night"      # v16.5: a ~1h-later pick-up never lands at night
+        _hl = db_query("SELECT text FROM messages WHERE chat_id=? AND is_mine=1 ORDER BY timestamp DESC LIMIT 1", (chat_id,), fetch_one=True) or {}
+        _late = _late or hz.is_goodbye_wide(_hl.get('text') or '')  # v16.27: never a double-text after her goodbye
         if busy or _late or _fan_wrote_since(chat_id, item.get('created_at')):
             db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=? AND status='pending'", (bid,)); return 0
         if db_claim("UPDATE scheduled_replies SET status='sending' WHERE id=? AND status='pending'", (bid,)) != 1: return 0
@@ -3633,7 +3693,10 @@ def send_due_batches():
                     db_claim("UPDATE scheduled_replies SET status='cancelled' WHERE id=?", (batch_id,))
                     hz_st.push(plan if plan.skip else hz.TurnPlan('skip', 0, False, skip=True))
                     _fu = hz_res['followup']
-                    if not _fu and hz.daypart(get_budapest_now().hour) != "night":
+                    _bye = plan.he_bye or plan.closing or 'bye_loop→silent' in (hz_res.get('reasons') or [])   # v16.27
+                    if _bye:
+                        _fu = None
+                    elif not _fu and hz.daypart(get_budapest_now().hour) != "night":
                         _fu = random.uniform(3000, 4200)  # v16.5: a dead-end ("Igen") → ~1h later she picks the chat up herself (cancelled if he writes)
                     if _fu:
                         _queue_followup(chat_id, item['fan_name'] or '', item['fan_msg_id'], datetime.now(), _fu, hz_st)
