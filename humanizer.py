@@ -208,7 +208,7 @@ BOUNCE_GAP = 3                    # "és te?" at most once in ~4 of her messages
 CARE_TURNS = 3                    # care mode persists this many turns after a sad / venting message
 STYLE_WEIGHTS = (("ou", 0.5), ("ou_long", 0.3), ("full", 0.1), ("bare", 0.1))
 QUESTION_BUDGET = (1, 2)          # never two questions in a row (her last message); the weights keep the share ~25-30 %
-PLAIN_SPELLING_P = 0.8            # Rafael strips ö/ő/ü/ű in practically every message (FORENSICS: 0 % of his replies have them)
+PLAIN_SPELLING_P = 0.0            # v16.28: spelling is decided per chat via style (full / bare), never a mix
 BYPASS_LOCKS = ("ai", "meetup", "minor")      # compliance turns: humanizer does not touch them
 SELFSHARE_GAP = 5                 # at most one own-initiative self-share in ~6 turns, never back to back
 # v16.26: a reply to HIS message never becomes an "initiative" (self-share with a random day-story seed) — 10-26 logs:
@@ -238,6 +238,11 @@ ACTIVITY_POOL = {
     "night": [("nem tudok aludni", "alvas"), ("most fejeztem be egy filmet", "film"),
               ("épp teát iszom", "tea"), ("zenét hallgatok még egy kicsit", "zene")],
 }
+def chat_style(chat_key: str) -> str:
+    """v16.28: one spelling habit per chat — 'full' (all accents) or 'bare' (none), never a per-message mix."""
+    return "bare" if random.Random(f"style|{chat_key or ''}").random() < 0.5 else "full"
+
+
 INITIATIVE_SEEDS = ACTIVITY_POOL          # backwards compatible name
 
 
@@ -319,7 +324,7 @@ class TurnPlan:
     multi: bool = False           # he sent several messages → react to the LAST one
     focus: str = ""               # v16.26: his last message quoted for a focused (last-chance) regeneration
     closing: bool = False         # v16.27: the goodbye was already said → short, no question, no double-text / pick-up
-    style: str = "ou"             # owner orthography applied in code: 'ou' (ö/ő→o, ü/ű→u) | 'ou_long' (+ó/ú/í) | 'full' | 'bare'
+    style: str = "full"           # v16.28 default full; owner orthography applied in code: 'ou' (ö/ő→o, ü/ű→u) | 'ou_long' (+ó/ú/í) | 'full' | 'bare'
     weights: dict = field(default_factory=dict)   # debug
 
     def to_json(self) -> str:
@@ -399,13 +404,11 @@ def plan_turn(ctx: TurnContext, rng: Optional[random.Random] = None) -> TurnPlan
     f = fan_features(ctx.fan_text)
     her = list(ctx.her_recent)
     turns = list(ctx.recent_turns)
-    spelling = "plain" if rng.random() < PLAIN_SPELLING_P else "accent"
     lowercase = rng.random() < 0.85
-    x, style = rng.random(), "ou"
-    for name, wgt in STYLE_WEIGHTS:
-        x -= wgt
-        if x <= 0:
-            style = name; break
+    # v16.28: one spelling habit per CHAT — all accents or none. The old per-message mix (ö/ő/ü/ű stripped but á/é kept,
+    # changing every message) read as a foreigner ("egy budapesti lakos nem így beszél, ilyen magyartalanul").
+    style = chat_style(getattr(ctx, 'chat_key', '') or '')
+    spelling = "accent"
 
     # Compliance turns: existing app.py logic decides everything.
     if ctx.lock in BYPASS_LOCKS:
