@@ -861,6 +861,9 @@ def is_direct_ai_question(text):
     """Regex first (cheap); for borderline cases ask Haiku. Banter is NOT a direct question."""
     t = (text or "").strip()
     if not t or not (_AI_PRE.search(t) or re.search(r"\bMI\b", t)): return False
+    if re.search(r"\begy\s+MI\b|\bMI\s*(vagy|lenn[ée]l)\b|\bvagy\s+(egy\s+)?MI\b|\bMI\s*[?🤔]", t) or \
+       re.search(r"nem\s+(is\s+)?vagy\s+val[óo]s|\bval[óo]s\s+vagy\s*\?", t, re.I):
+        return True                                  # v16.28: 'Lehet hogy nem is vagy valós csak egy MI🤔' was missed
     if _AI_DIRECT.search(t) and ("?" in t or re.search(r"\b(vagy|-e|e)\s*[?!.]*\s*$", t, re.I)):
         return True
     # v16.14: only weak words ("ember", "igazi", "program", "gép"…) and no regex hit → NOT an AI question
@@ -1772,6 +1775,8 @@ Amit lent a „MÁR ELMONDTAD NEKI” / „AMIT MÁR MONDTÁL MAGADRÓL” sor f
 KEMÉNY SZABÁLYOK (mindent felülírnak):
 - Ha KÖZVETLENÜL megkérdezi, hogy AI / bot / valódi ember vagy-e: őszintén igen, AI vagy. Magadtól nem hozod szóba, és SOHA nem állítod, hogy ember vagy.
 - Nem adsz el semmit: nincs ár, PPV, csomag, „mit szeretnél látni”; nem ígérsz és nem állítod, hogy küldtél képet/videót. Ha tartalmat kér: játékosan „majd később”.
+- Ez a TE privát oldalad, ahol vannak képeid és videóid: ha képet / videót kér, SOHA ne mondd, hogy nincs ilyen képed, hogy nem küldesz / nem szeretsz küldeni, vagy hogy „inkább nem” — kacéran, sejtetve húzd („majd meglátod 😏”, „türelem, megéri várni”). Ne tűnjön úgy, mintha az oldalnak nem lenne értelme.
+- Ártatlan, hétköznapi kérdésre (melyik étterem, milyen suli, mit ettél) ne titkolózz és ne mondd, hogy „nem szeretem elmondani”: adj egy laza, általános, de barátságos választ (pl. „egy kis belvárosi bisztró”), név nélkül.
 - Nincs találkozó, hívás, cím, telefonszám, más platform, link, felhasználónév. Ha felhozza: kedves, egyértelmű nem (soha nem „majd egyszer”).
 - Neked most nincs munkád, főnököd, irodád, műszakod: ha ő a munkájáról / az irodáról mesél vagy panaszkodik, RÓLA beszélj (kérdezz rá, szurkolj neki), ne vedd magadra, mintha a tiéd lenne. Ha megkérdezi, hogy telt a napod, arra konkrétan válaszolj.
 - Nincs szerelmi vallomás, kizárólagosság, bűntudatkeltés. Fanvue felnőtt oldal: ha szexuálisan közeledik (pl. pózokról, testről ír), menj bele pajkosan, csábítóan, sejtetve, az ő szintjén — SOHA ne lassítsd le, ne hűtsd le („lassíts”, „ez most nem”, „nyugi”), ne oktasd ki; csak a nagyon grafikus részletezést kerüld.
@@ -2916,7 +2921,7 @@ KW_ONTOPIC_FALLBACK = {
     "sad": ["jaj 🥺 sajnálom, mi történt?", "jajj 🥺 ez nem hangzik jól"],
     "compliment": ["jajj koszi 🥰", "ahj, koszonom 🤭"],
     "flirt": ["hihi 🙈 na ne már", "hmm, ezt még meggondolom 😏"],
-    "question": ["hmm, ezen gondolkodnom kell 😅", "hirtelen nem is tudom 😅"],
+    "question": ["jaj, jó kérdés 😄 te mit gondolsz?", "hmm, te mire tippelnél? 😄"],
     "default": ["aha, értem 🙂", "jaa, értem :)", "hehe, oké 🙂"],
 }
 
@@ -2975,12 +2980,13 @@ def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_
     if is_followup:
         seed, topic = hz._seed_for(ctx, her_recent, rng)
         plan = hz.TurnPlan("initiative", hz.sample_length("initiative", rng, hour=hour), False, seed=seed, seed_topic=topic,
+                           style=hz.chat_style(str(chat_key)),
                            spelling="plain" if rng.random() < hz.PLAIN_SPELLING_P else "accent", lowercase=rng.random() < 0.85)
     else:
         plan = hz.plan_turn(ctx, rng)
         if profile_overrides is None and get_s1(chat_id):        # v16.19: stage 1 → never silent, curious, longer
             if plan.skip:
-                plan = hz.TurnPlan("short", hz.sample_length("short", rng, hour=hour), False, spelling=plan.spelling,
+                plan = hz.TurnPlan("short", hz.sample_length("short", rng, hour=hour), False, spelling=plan.spelling, style=plan.style,
                                    lowercase=plan.lowercase)
             if plan.he_asked and plan.turn_type not in ("care", "refuse", "deflect"):
                 plan.max_words = max(plan.max_words, rng.randint(16, 28))
@@ -2990,7 +2996,7 @@ def keepwarm_generate(chat_id, fan_name, history, fan_text, state=None, profile_
                 plan.max_words = max(plan.max_words, rng.randint(10, 20))
         if profile_overrides is None and get_fan_plan(chat_id):   # v16.11: Rafael's plan → never a silent skip
             if plan.skip:
-                plan = hz.TurnPlan("short", hz.sample_length("short", rng, hour=hour), False, spelling=plan.spelling,
+                plan = hz.TurnPlan("short", hz.sample_length("short", rng, hour=hour), False, spelling=plan.spelling, style=plan.style,
                                    lowercase=plan.lowercase)
             if fan_plan_wants_questions(chat_id) and plan.turn_type not in ("care", "refuse") and not plan.he_bye:
                 plan.allow_question = True
@@ -4610,6 +4616,10 @@ def tg_login():
     api_id = int(os.environ.get('TG_API_ID', '0') or 0); api_hash = os.environ.get('TG_API_HASH', '')
     if not api_id or not api_hash:
         return "TG_API_ID / TG_API_HASH missing on the web service", 500
+    # v16.29: ?bot=eszter → the session goes to key tg_session_eszter (2nd persona bot reads it from public.tokens)
+    _bot = (request.args.get('bot') or '').strip().lower()
+    _skey = 'tg_session' + (('_' + _bot) if _bot in ('eszter',) else '')
+    _tmpk = 'tg_login_tmp' + (('_' + _bot) if _bot in ('eszter',) else '')
     step = request.form.get('step', '')
     field = lambda n, t, ph: f'<input name={n} type={t} placeholder="{ph}" style="width:100%;padding:10px;margin:6px 0" required>'
     try:
@@ -4620,11 +4630,11 @@ def tg_login():
                 r = await c.send_code_request(phone); tmp = c.session.save(); await c.disconnect()
                 return r.phone_code_hash, tmp
             h, tmp = _tg_run(go)
-            save_token('tg_login_tmp', json.dumps({"phone": phone, "hash": h, "sess": tmp}))
+            save_token(_tmpk, json.dumps({"phone": phone, "hash": h, "sess": tmp}))
             return _TG_LOGIN_HTML.format(msg="Kód elküldve a Telegram appba.", btn="Belépés",
                                          fields="<input type=hidden name=step value=code>" + field("code", "text", "Telegram kód"))
         if step in ('code', 'password'):
-            st = json.loads(load_token('tg_login_tmp') or '{}')
+            st = json.loads(load_token(_tmpk) or '{}')
             code = request.form.get('code', '').strip(); pw = request.form.get('password', '')
             async def go():
                 c = TelegramClient(StringSession(st.get('sess', '')), api_id, api_hash); await c.connect()
@@ -4639,11 +4649,11 @@ def tg_login():
                 return s_, getattr(me, 'first_name', '')
             res, extra = _tg_run(go)
             if res is None:
-                st['sess'] = extra; save_token('tg_login_tmp', json.dumps(st))
+                st['sess'] = extra; save_token(_tmpk, json.dumps(st))
                 return _TG_LOGIN_HTML.format(msg="Kétlépcsős jelszó kell.", btn="Belépés",
                                              fields="<input type=hidden name=step value=password>" + field("password", "password", "Telegram jelszó (2FA)"))
-            save_token('tg_session', res); save_token('tg_login_tmp', '')
-            send_telegram_alert(f"✅ Telegram bejelentkezés kész ({extra}). A Telegram bot pár percen belül újraindul.")
+            save_token(_skey, res); save_token(_tmpk, '')
+            send_telegram_alert(f"✅ Telegram bejelentkezés kész ({extra}{', ' + _bot if _bot else ''}). A Telegram bot pár percen belül újraindul.")
             return _TG_LOGIN_HTML.format(msg=f"✅ Kész, bejelentkezve: {extra}. A Telegram bot magától újraindul.", btn="OK", fields="")
     except Exception as e:
         return _TG_LOGIN_HTML.format(msg=f"Hiba: {e}", btn="Kód kérése",
